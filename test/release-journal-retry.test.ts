@@ -63,9 +63,17 @@ function target(): TargetPolicy {
   };
 }
 
-function versionReadback(value: TargetPolicy): unknown {
+function versionReadback(value: TargetPolicy, releaseId?: string): unknown {
   return {
     id: versionId,
+    ...(releaseId
+      ? {
+          annotations: {
+            "workers/message": releaseId,
+            "workers/tag": "0.1.12",
+          },
+        }
+      : {}),
     resources: {
       bindings: [
         { name: "DB", type: "d1", id: value.databaseId },
@@ -110,7 +118,7 @@ function installLiveFetchMock(): void {
       return Response.json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.11",
+        version: "0.1.12",
       });
     }
     if (url.pathname === "/readyz") {
@@ -122,7 +130,7 @@ function installLiveFetchMock(): void {
     if (url.pathname === "/.well-known/tcs") {
       return Response.json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.11" },
+          software: { name: "takosumi-store", version: "0.1.12" },
           baseUrl: "https://store.takosumi.com",
         },
       });
@@ -167,6 +175,7 @@ describe("release operation journal retry", () => {
         versions: [{ version_id: versionId, percentage: 100 }],
       };
       let deployed = phase === "deployed" || phase === "verified";
+      let uploaded = !["intent-recorded", "schema-applied"].includes(phase);
       const calls: string[][] = [];
       const runner = (args: readonly string[]): string => {
         calls.push([...args]);
@@ -188,10 +197,16 @@ describe("release operation journal retry", () => {
           ]);
         }
         if (args[0] === "versions" && args[1] === "upload") {
+          uploaded = true;
           return `Version ID: ${versionId}`;
         }
+        if (args[0] === "versions" && args[1] === "list") {
+          return JSON.stringify(uploaded ? [{ id: versionId }] : []);
+        }
         if (args[0] === "versions" && args[1] === "view") {
-          return JSON.stringify(versionReadback(releaseTarget));
+          return JSON.stringify(
+            versionReadback(releaseTarget, envelope.releaseId),
+          );
         }
         if (args[0] === "versions" && args[1] === "deploy") {
           deployed = true;
@@ -201,7 +216,7 @@ describe("release operation journal retry", () => {
       };
       const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
       const envelope = {
-        releaseId: "takosumi-store-0.1.11-retry",
+        releaseId: "takosumi-store-0.1.12-retry",
         source: { commit: "d".repeat(40) },
         candidate: { artifactDigests },
       } as unknown as ReleaseEnvelope;
@@ -230,6 +245,8 @@ describe("release operation journal retry", () => {
           phase === "intent-recorded" || phase === "schema-applied"
             ? null
             : versionId,
+        preUploadVersionIds:
+          phase === "intent-recorded" || phase === "schema-applied" ? null : [],
         updatedAt: "2026-07-22T00:00:00.000Z",
       });
       const manifest = {
@@ -291,7 +308,7 @@ describe("release operation journal retry", () => {
     };
     const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
     const envelope = {
-      releaseId: "takosumi-store-0.1.11-lost-deploy",
+      releaseId: "takosumi-store-0.1.12-lost-deploy",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests },
     } as unknown as ReleaseEnvelope;
@@ -317,6 +334,7 @@ describe("release operation journal retry", () => {
       ...authority,
       phase: "version-uploaded",
       versionId,
+      preUploadVersionIds: [],
       updatedAt: "2026-07-22T00:00:00.000Z",
     });
     const calls: string[][] = [];
@@ -373,6 +391,121 @@ describe("release operation journal retry", () => {
     expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({
       phase: "verified",
       versionId,
+    });
+  });
+
+  test("recovers one annotated version after a lost upload response", async () => {
+    installLiveFetchMock();
+    const root = await mkdtemp(join(tmpdir(), "store-journal-lost-upload-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const journalPath = join(root, "output/operation.json");
+    const releaseTarget = target();
+    const oldVersionId = "10000000-0000-4000-8000-000000000000";
+    const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
+    const envelope = {
+      releaseId: "takosumi-store-0.1.12-lost-upload",
+      source: { commit: "d".repeat(40) },
+      candidate: { artifactDigests },
+    } as unknown as ReleaseEnvelope;
+    const baselineDeployment = { versions: [] };
+    const authority = {
+      kind: "takosumi.store-release-operation@v1",
+      environment: "production",
+      surfaceId: "takosumi-store",
+      releaseId: envelope.releaseId,
+      sourceCommit: envelope.source.commit,
+      artifactDigests,
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      target: {
+        accountId: releaseTarget.accountId,
+        workerName: releaseTarget.workerName,
+        databaseId: releaseTarget.databaseId,
+        kvNamespaceId: releaseTarget.kvNamespaceId,
+        iconsBucketName: releaseTarget.iconsBucketName,
+        origin: releaseTarget.origin,
+      },
+      preDeploymentDigest: digestJson(baselineDeployment),
+    };
+    await writePrivateJson(journalPath, {
+      ...authority,
+      phase: "upload-intent-recorded",
+      versionId: null,
+      preUploadVersionIds: [oldVersionId],
+      updatedAt: "2026-07-22T00:00:00.000Z",
+    });
+    let deployed = false;
+    const calls: string[][] = [];
+    const runner = (args: readonly string[]): string => {
+      calls.push([...args]);
+      if (args[0] === "deployments") {
+        return JSON.stringify(
+          deployed
+            ? { versions: [{ version_id: versionId, percentage: 100 }] }
+            : baselineDeployment,
+        );
+      }
+      if (args[0] === "d1" && args[1] === "migrations") {
+        return "No migrations to apply.";
+      }
+      if (args[0] === "d1" && args[1] === "execute") {
+        return JSON.stringify([
+          { results: migrationNames.map((name) => ({ name })) },
+        ]);
+      }
+      if (args[0] === "versions" && args[1] === "list") {
+        return JSON.stringify([{ id: oldVersionId }, { id: versionId }]);
+      }
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify(
+          versionReadback(releaseTarget, envelope.releaseId),
+        );
+      }
+      if (args[0] === "versions" && args[1] === "deploy") {
+        deployed = true;
+        return "";
+      }
+      return "";
+    };
+    const manifest = {
+      migrations: migrationNames.map((name) => ({
+        path: `migrations/${name}`,
+      })),
+      assets: [
+        {
+          path: "assets/assets/index-review.js",
+          sha256: sha256Bytes(staticBytes),
+        },
+        { path: "assets/index.html", sha256: sha256Bytes(indexBytes) },
+      ],
+    } as unknown as StoreArtifactManifest;
+    await expect(
+      deploySealedStore({
+        runner,
+        cwd: root,
+        target: releaseTarget,
+        envelope,
+        manifest,
+        candidateChecks: [],
+        readTopology: async () => ({
+          mode: "custom-domain",
+          hostname: "store.takosumi.com",
+          workerName: "takosumi-store",
+        }),
+        journal: {
+          path: journalPath,
+          environment: "production",
+          targetFingerprint: authority.targetFingerprint,
+        },
+      }),
+    ).resolves.toMatchObject({ versionId });
+    expect(
+      calls.filter((args) => args[0] === "versions" && args[1] === "upload"),
+    ).toHaveLength(0);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({
+      phase: "verified",
+      versionId,
+      preUploadVersionIds: [oldVersionId],
     });
   });
 });

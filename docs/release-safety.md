@@ -36,9 +36,19 @@ TAKOSUMI_RELEASE_STAGING_ACCOUNT_ID_FILE
 TAKOSUMI_RELEASE_STAGING_API_TOKEN_FILE
 TAKOSUMI_RELEASE_REPLICA_ACCOUNT_ID_FILE
 TAKOSUMI_RELEASE_REPLICA_API_TOKEN_FILE
+TAKOSUMI_RELEASE_REPLICA_SOURCE_ACCOUNT_ID_FILE
+TAKOSUMI_RELEASE_REPLICA_SOURCE_API_TOKEN_FILE
+TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE
+TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE
 ```
 
-Raw Cloudflare credential variables are rejected by the fixed adapters.
+The source pair is a dedicated production **read-only** credential used only by
+`prepare-input`; the ordinary replica pair can mutate only the isolated replica
+resources. The snapshot key is exactly 32 bytes and the Workers subdomain file
+contains only the account subdomain label needed to derive the fresh replica
+origin. Every file is absolute, operator-owned, `0600`, outside Git worktrees,
+and outside the retained evidence directory. Raw Cloudflare credential
+variables are rejected by the fixed adapters.
 
 ## One-time staging bootstrap
 
@@ -83,11 +93,11 @@ names are rejected for every bootstrap action.
 ## Build once
 
 The release commit must be clean canonical `main`, pushed to `origin/main`,
-and be the peeled commit of a pushed, signed, annotated `v0.1.11` tag.
+and be the peeled commit of a pushed, signed, annotated `v0.1.12` tag.
 
 ```bash
 bun run release:candidate -- \
-  --evidence-directory /absolute/operator/evidence/store-0.1.11 \
+  --evidence-directory /absolute/operator/evidence/store-0.1.12 \
   --operator-root /absolute/operator/root
 ```
 
@@ -140,18 +150,38 @@ Staging and production then:
 9. retain a create-only attestation tied to the operation journal.
 
 The operation journal advances atomically through `intent-recorded`,
-`schema-applied`, `version-uploaded`, `deployed`, and `verified`. A failure
-after D1 apply retains forward-repair identity. Only the same source, artifact,
-target, and pre-deploy head can resume; an already deployed exact Version is
-read back instead of redeployed. D1 is never automatically down-migrated.
+`schema-applied`, `upload-intent-recorded`, `version-uploaded`, `deployed`, and
+`verified`. The upload intent seals the complete pre-upload Version ID set. A
+lost upload response is recovered only when exactly one new Version has the
+release ID/tag annotations and exact candidate bindings; zero or multiple
+candidates fail closed. A failure after D1 apply retains forward-repair
+identity. Only the same source, artifact, target, and pre-deploy head can
+resume; an already deployed exact Version is read back instead of redeployed.
+D1 is never automatically down-migrated.
 
 ## Fresh replica
 
 The replica adapter exposes only:
 
 ```text
-plan -> provision -> attest -> cleanup-plan -> destroy | quarantine
+prepare-input -> plan -> provision -> rehearse -> attest
+                                      \-> cleanup-plan -> destroy | quarantine
 ```
+
+`prepare-input` first verifies that the realized production Wrangler config is
+the exact candidate config/policy/target authority. It then performs one fixed,
+read-only `SELECT` for the canonical public `tako/takos` listing and reads only
+its declared icon from the exact production R2 bucket or the allowlisted public
+GitHub raw source. The query and production R2 read use the same already
+validated config bytes through a private `0700` temporary directory and `0400`
+Wrangler config. That directory is removed in `finally` and is never retained
+as evidence, so replacing the operator config between validation and Wrangler
+execution cannot redirect either read. The source row/reference digests and the sanitized output
+row/reference digests are distinct provenance fields. The exact row, generated
+SQL, icon type/bytes, production identities, PII, and credential patterns are
+scanned before encryption. Only AES-256-GCM ciphertext, digest-only source
+provenance, and controller input evidence are retained; plaintext is never
+retained.
 
 Its config and encrypted/anonymized snapshot bundle are absolute `0600` file
 references:
@@ -159,6 +189,7 @@ references:
 ```text
 TAKOSUMI_RELEASE_REPLICA_RUNTIME_CONFIG_FILE
 TAKOSUMI_RELEASE_REPLICA_SANITIZED_SNAPSHOT_FILE
+TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE
 ```
 
 Before remote mutation, the adapter retains intent records for the fresh D1,
@@ -170,21 +201,37 @@ credential-like literals, email/IP/JWT/cookie-like values, and any mutation
 outside the public `listings` table. Icon declarations must match PNG, JPEG, or
 WebP signatures or a fail-closed safe-SVG profile. Decoded icon bytes (including
 otherwise inert SVG text and binary image metadata) and the exact allowed icon
-metadata are subject to the same credential and PII scan. It never fetches
-production D1/R2 data.
+metadata are subject to the same credential and PII scan. A retry consumes and
+authenticates retained ciphertext/provenance before any production read. If the
+process stopped after ciphertext retention, the digest-only provenance and
+input evidence are reconstructed from that authenticated bundle without a
+second production query; a partial or conflicting retained set fails closed.
+
+Initial Worker publication has its own monotonic operation journal with the
+pre-upload Version set, release annotations, exact bindings, and deployment
+head. Cleanup can recover an uploaded-only Version after a lost response and
+delete it only after exact ownership readback. A fully provisioned retry returns
+the exact retained inventory after live readback; partial progress requires
+cleanup, and a terminal replica identity is never reused.
 
 Provisioning restores only that local sanitized bundle, uploads the same sealed
 Worker/assets, and proves the controller's four fixed replica checks. The
-attestation binds the exact inventory, scanner proof, failure rehearsal, and
-data evidence. A lost create response is retained as `presence-unknown`, and a
-non-terminal progress record blocks re-provisioning until quarantine. Cleanup
-uses the unique replica-bound names and exact retained IDs; KV is discovered by
-exact title and only a single exact namespace ID can be deleted. Before
-provisioning, Worker, D1, KV, and R2 absence is digest-bound. The replica enables
-only its exact derived `workers.dev` origin with preview URLs disabled. Cleanup
-requires the exact sanitized R2 object set and bytes, removes objects before the
-bucket, resumes retained progress monotonically, and proves post-delete absence
-for every resource before terminal evidence. Every terminal step is retained.
+`rehearse` action verifies the exclusive 100%-traffic Version immediately
+before deleting the exact isolated Worker, proves D1/KV/R2 catalog and icon
+bytes survived, and forward-repairs with the same sealed candidate and empty
+pre-deploy head. Foreign or additional Worker Versions block both failure
+injection and cleanup. The attestation binds the exact initial/repaired
+inventories, scanner proof, failure rehearsal, and data evidence. A lost create
+response is retained as `presence-unknown`, and a non-terminal progress record
+blocks re-provisioning until quarantine. A destroyed or quarantined replica ID
+is terminal and cannot be provisioned again. Cleanup uses the unique replica-bound
+names and exact retained IDs; KV is discovered by exact title and only a single
+exact namespace ID can be deleted. Before provisioning, Worker, D1, KV, and R2
+absence is digest-bound. The replica enables only its exact derived
+`workers.dev` origin with preview URLs disabled. Cleanup requires the exact
+sanitized R2 object set and bytes, removes objects before the bucket, resumes
+retained progress monotonically, and proves post-delete absence for every
+resource before terminal evidence. Every terminal step is retained.
 
 Catalog seeding is intentionally absent. `scripts/load-official-listings.ts`
 resolves mutable source metadata and is a separate content-authority concern,

@@ -25,9 +25,13 @@ import {
   destroyExact,
   exactD1DatabaseId,
   exactKvNamespaceId,
+  assertProvisionedOperationIdentity,
+  provisionedProgressResourceIds,
   resolveReplicaAttestationVerifiedAt,
   rehearseForwardRepair,
   recoverForwardRepairCleanupProgress,
+  recoverProvisionCleanupProgress,
+  resolveProvisionRetryInventory,
   validateInventory,
   validateForwardRepairEvidence,
   validateProgress,
@@ -35,6 +39,7 @@ import {
   type Inventory,
   type Progress,
   type ReplicaConfig,
+  type SanitizedSnapshotScan,
 } from "../scripts/store-release-replica-adapter.ts";
 
 const roots: string[] = [];
@@ -84,6 +89,7 @@ function authority(): {
   } as const satisfies ReplicaConfig;
   const envelope = {
     releaseId: config.releaseId,
+    source: { commit: "a".repeat(40) },
     candidate: { artifactDigests },
     replica: { id: config.replicaId },
   } as unknown as ReleaseEnvelope;
@@ -134,7 +140,126 @@ function authority(): {
   return { config, envelope, progress };
 }
 
+function snapshotScanFixture(
+  icon: SanitizedSnapshotScan["icons"][number],
+  overrides: Partial<SanitizedSnapshotScan> = {},
+): SanitizedSnapshotScan {
+  const iconUrl = `{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/${icon.key}`;
+  const listing = { id: "tako/takos", icon_url: iconUrl };
+  return {
+    snapshotDigest: `sha256:${"1".repeat(64)}`,
+    sqlDigest: `sha256:${"2".repeat(64)}`,
+    scannerDigest: `sha256:${"3".repeat(64)}`,
+    sql: "INSERT INTO listings VALUES ('tako/takos')",
+    listing,
+    rowDigest: digestJson(listing),
+    iconSourceReferenceDigest: digestJson({ href: iconUrl }),
+    iconDigest: icon.sha256,
+    source: {
+      rowDigest: `sha256:${"4".repeat(64)}`,
+      iconSourceKind: "public-https-reference",
+      iconSourceReferenceDigest: `sha256:${"5".repeat(64)}`,
+      iconDigest: icon.sha256,
+    },
+    icons: [icon],
+    ...overrides,
+  };
+}
+
 describe("replica cleanup authority", () => {
+  test("binds successful provision retries and forbids replica identity reuse", () => {
+    const value = authority();
+    const ids = provisionedProgressResourceIds(value.progress);
+    expect(ids).toEqual({
+      databaseId: String(value.progress.resources[1]!.id),
+      kvNamespaceId: String(value.progress.resources[2]!.id),
+      versionId: String(value.progress.resources[0]!.id),
+    });
+    expect(() =>
+      provisionedProgressResourceIds({
+        ...value.progress,
+        status: "destroyed",
+      }),
+    ).toThrow("replica_terminal_identity_reuse_forbidden");
+    expect(() =>
+      provisionedProgressResourceIds({
+        ...value.progress,
+        status: "provisioning",
+      }),
+    ).toThrow("replica_partial_progress_requires_quarantine");
+    const operation = { phase: "verified", versionId: ids.versionId };
+    expect(() =>
+      assertProvisionedOperationIdentity(
+        operation,
+        ids.versionId,
+        ids.versionId,
+      ),
+    ).not.toThrow();
+    for (const invalid of [
+      { operation: { ...operation, phase: "deployed" }, owned: ids.versionId },
+      {
+        operation: { ...operation, versionId: "other" },
+        owned: ids.versionId,
+      },
+      { operation, owned: "other" },
+    ]) {
+      expect(() =>
+        assertProvisionedOperationIdentity(
+          invalid.operation,
+          ids.versionId,
+          invalid.owned,
+        ),
+      ).toThrow("replica_provisioned_operation_authority_mismatch");
+    }
+    const draft = {
+      kind: "takosumi.store-release-replica-inventory@v1",
+      status: "verified",
+      surfaceId: "takosumi-store",
+      releaseId: value.progress.releaseId,
+      replicaId: value.progress.replicaId,
+      accountId: value.progress.accountId,
+      target: {
+        ...value.progress.target,
+        databaseId: ids.databaseId,
+        kvNamespaceId: ids.kvNamespaceId,
+        versionId: ids.versionId,
+      },
+      artifactDigests: value.progress.artifactDigests,
+      createdAt: value.progress.createdAt,
+      expiresAt: value.progress.expiresAt,
+      checks: [],
+      remoteEvidence: { preflightAbsenceDigest: "old" },
+      productionFallback: false,
+    } as const satisfies Inventory;
+    const liveRemoteEvidence = {
+      preflightAbsenceDigest: value.progress.preflightAbsenceDigest,
+      deploymentDigest: `sha256:${"8".repeat(64)}`,
+    };
+    const recovered = resolveProvisionRetryInventory({
+      draft,
+      liveRemoteEvidence,
+      retainedInventory: null,
+    });
+    expect(recovered.remoteEvidence).toEqual(liveRemoteEvidence);
+    expect(
+      resolveProvisionRetryInventory({
+        draft,
+        liveRemoteEvidence,
+        retainedInventory: recovered,
+      }),
+    ).toBe(recovered);
+    expect(() =>
+      resolveProvisionRetryInventory({
+        draft,
+        liveRemoteEvidence: {
+          ...liveRemoteEvidence,
+          deploymentDigest: `sha256:${"9".repeat(64)}`,
+        },
+        retainedInventory: recovered,
+      }),
+    ).toThrow("replica_retained_inventory_live_readback_mismatch");
+  });
+
   test("rejects mutable progress redirected to a production identity", () => {
     const value = authority();
     expect(() =>
@@ -404,9 +529,10 @@ describe("replica cleanup authority", () => {
       }
       throw new Error(`unexpected:${args.join(" ")}`);
     }) as Parameters<typeof verifyReplicaStoragePreserved>[0]["runner"];
+    let objectRequests = 0;
     const client: CloudflareReadClient = {
       accountId: inventory.accountId,
-      get: async (path) => {
+      get: async (path, query) => {
         if (path.endsWith("/r2/buckets")) {
           return {
             status: "ok",
@@ -415,10 +541,18 @@ describe("replica cleanup authority", () => {
           };
         }
         if (path.endsWith("/objects")) {
+          objectRequests += 1;
+          if (query?.cursor === "next-page") {
+            return {
+              status: "ok",
+              result: [],
+              resultInfo: null,
+            };
+          }
           return {
             status: "ok",
-            result: { objects: [{ key: iconKey }] },
-            resultInfo: null,
+            result: [{ key: iconKey }],
+            resultInfo: { cursor: "next-page" },
           };
         }
         return { status: "not-found" };
@@ -429,20 +563,12 @@ describe("replica cleanup authority", () => {
         path: `migrations/${name}`,
       })),
     } as unknown as StoreArtifactManifest;
-    const snapshotScan = {
-      snapshotDigest: `sha256:${"1".repeat(64)}`,
-      sqlDigest: `sha256:${"2".repeat(64)}`,
-      scannerDigest: `sha256:${"3".repeat(64)}`,
-      sql: "INSERT INTO listings VALUES ('tako/takos')",
-      icons: [
-        {
-          key: iconKey,
-          mediaType: "image/png",
-          bytes: iconBytes,
-          sha256: iconDigest,
-        },
-      ],
-    };
+    const snapshotScan = snapshotScanFixture({
+      key: iconKey,
+      mediaType: "image/png",
+      bytes: iconBytes,
+      sha256: iconDigest,
+    });
     const verify = () =>
       verifyReplicaStoragePreserved({
         inventory,
@@ -453,6 +579,7 @@ describe("replica cleanup authority", () => {
         cloudflareReadClient: client,
       });
     await expect(verify()).resolves.toMatch(/^sha256:[0-9a-f]{64}$/u);
+    expect(objectRequests).toBe(2);
 
     state.databaseId = "20000000-0000-4000-8000-000000000099";
     await expect(verify()).rejects.toThrow(
@@ -715,26 +842,29 @@ describe("replica cleanup authority", () => {
       join(root, "worker-release-replica-inventory.json"),
       inventory,
     );
-    const snapshotScan = {
-      snapshotDigest: String(inventory.remoteEvidence.snapshotDigest),
-      sqlDigest: String(inventory.remoteEvidence.snapshotSqlDigest),
-      scannerDigest: String(inventory.remoteEvidence.snapshotScannerDigest),
-      sql: "INSERT INTO listings VALUES ('tako/takos')",
-      icons: [
-        {
-          key: iconKey,
-          mediaType: "image/png",
-          bytes: iconBytes,
-          sha256: iconDigest,
-        },
-      ],
-    };
+    const snapshotScan = snapshotScanFixture(
+      {
+        key: iconKey,
+        mediaType: "image/png",
+        bytes: iconBytes,
+        sha256: iconDigest,
+      },
+      {
+        snapshotDigest: String(inventory.remoteEvidence.snapshotDigest),
+        sqlDigest: String(inventory.remoteEvidence.snapshotSqlDigest),
+        scannerDigest: String(inventory.remoteEvidence.snapshotScannerDigest),
+      },
+    );
     let workerPresent = false;
     let deployed = false;
     let scriptEnabled = false;
     const calls: string[][] = [];
     const versionReadback = {
       id: repairedVersionId,
+      annotations: {
+        "workers/message": envelope.releaseId,
+        "workers/tag": "0.1.12",
+      },
       resources: {
         bindings: [
           {
@@ -854,7 +984,7 @@ describe("replica cleanup authority", () => {
         if (path.endsWith("/objects")) {
           return {
             status: "ok",
-            result: { objects: [{ key: iconKey }] },
+            result: [{ key: iconKey }],
             resultInfo: null,
           };
         }
@@ -941,7 +1071,7 @@ describe("replica cleanup authority", () => {
         return Response.json({
           status: "ok",
           software: "takosumi-store",
-          version: "0.1.11",
+          version: "0.1.12",
         });
       }
       if (url.pathname === "/readyz") {
@@ -953,7 +1083,7 @@ describe("replica cleanup authority", () => {
       if (url.pathname === "/.well-known/tcs") {
         return Response.json({
           server: {
-            software: { name: "takosumi-store", version: "0.1.11" },
+            software: { name: "takosumi-store", version: "0.1.12" },
             baseUrl: inventory.target.origin,
           },
         });
@@ -1041,6 +1171,7 @@ describe("replica cleanup authority", () => {
         preDeploymentDigest: digestJson({ versions: [] }),
         phase: "version-uploaded",
         versionId: repairedVersionId,
+        preUploadVersionIds: [],
         updatedAt: "2026-07-22T01:02:03.000Z",
       },
     );
@@ -1070,6 +1201,8 @@ describe("replica cleanup authority", () => {
       config: value.config,
       evidenceDirectory: root,
       readbackListingPath: "/tcs/v1/listings/tako/takos",
+      runner,
+      cwd: root,
     });
     expect(
       cleanupProgress.resources.find((resource) => resource.type === "worker")
@@ -1132,6 +1265,169 @@ describe("replica cleanup authority", () => {
     }
   });
 
+  test("recovers an initial provision upload intent for cleanup", async () => {
+    const value = authority();
+    const evidence = await mkdtemp(
+      join(tmpdir(), "store-replica-provision-recovery-"),
+    );
+    roots.push(evidence);
+    await chmod(evidence, 0o700);
+    const workerVersionId = value.progress.resources.find(
+      (resource) => resource.type === "worker",
+    )!.id!;
+    const databaseId = value.progress.resources.find(
+      (resource) => resource.type === "d1",
+    )!.id!;
+    const kvNamespaceId = value.progress.resources.find(
+      (resource) => resource.type === "kv",
+    )!.id!;
+    const target = {
+      configPath: "replica-generated.toml",
+      accountId: value.config.target.accountId,
+      workerName: value.config.target.workerName,
+      origin: value.config.target.origin,
+      databaseName: value.config.target.databaseName,
+      databaseId,
+      kvNamespaceId,
+      iconsBucketName: value.config.target.iconsBucketName,
+      publishCapability: false,
+      compatibilityDate: "2026-06-25",
+      compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+      requiredVarNames: ["APP_URL"],
+      requiredSecretNames: [],
+      customDomainHostname: new URL(value.config.target.origin).hostname,
+      readbackListingPath: "/tcs/v1/listings/tako/takos",
+    };
+    await writePrivateJson(
+      join(evidence, "worker-release-replica-provision-operation.json"),
+      {
+        kind: "takosumi.store-release-operation@v1",
+        environment: "replica-provision",
+        surfaceId: "takosumi-store",
+        releaseId: value.envelope.releaseId,
+        sourceCommit: value.envelope.source.commit,
+        artifactDigests: value.envelope.candidate.artifactDigests,
+        targetFingerprint: digestJson(target),
+        target: {
+          accountId: target.accountId,
+          workerName: target.workerName,
+          databaseId: target.databaseId,
+          kvNamespaceId: target.kvNamespaceId,
+          iconsBucketName: target.iconsBucketName,
+          origin: target.origin,
+        },
+        preDeploymentDigest: digestJson({ versions: [] }),
+        phase: "upload-intent-recorded",
+        versionId: null,
+        preUploadVersionIds: [],
+        updatedAt: "2026-07-22T01:02:03.000Z",
+      },
+    );
+    let ambiguous = false;
+    let foreignAnnotation = false;
+    const runner = ((args: readonly string[]): string => {
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify({
+          id: workerVersionId,
+          annotations: {
+            "workers/message": foreignAnnotation
+              ? "foreign-release"
+              : value.envelope.releaseId,
+            "workers/tag": "0.1.12",
+          },
+          resources: {
+            bindings: [
+              {
+                name: "DB",
+                type: "d1",
+                id: databaseId,
+                database_id: databaseId,
+              },
+              {
+                name: "KV",
+                type: "kv_namespace",
+                namespace_id: kvNamespaceId,
+              },
+              {
+                name: "ICONS",
+                type: "r2_bucket",
+                bucket_name: target.iconsBucketName,
+              },
+              { name: "ASSETS", type: "assets" },
+              { name: "APP_URL", type: "plain_text" },
+            ],
+          },
+        });
+      }
+      throw new Error(`unexpected_runner:${args.join(" ")}`);
+    }) as import("../scripts/store-release-common.ts").WranglerRunner;
+    runner.inspect = (args) => {
+      if (args[0] === "versions" && args[1] === "list") {
+        return {
+          status: "ok",
+          stdout: JSON.stringify([
+            { id: workerVersionId },
+            ...(ambiguous
+              ? [{ id: "90000000-0000-4000-8000-000000000009" }]
+              : []),
+          ]),
+        };
+      }
+      return { status: "failed", stdout: "" };
+    };
+    const partial: Progress = {
+      ...value.progress,
+      status: "provisioning",
+      resources: value.progress.resources.map((resource) =>
+        resource.type === "worker"
+          ? { ...resource, id: undefined, state: "presence-unknown" as const }
+          : resource,
+      ),
+    };
+    const recovered = await recoverProvisionCleanupProgress({
+      progress: partial,
+      envelope: value.envelope,
+      config: value.config,
+      evidenceDirectory: evidence,
+      readbackListingPath: target.readbackListingPath,
+      runner,
+      cwd: evidence,
+    });
+    expect(
+      recovered.resources.find((resource) => resource.type === "worker")?.id,
+    ).toBe(workerVersionId);
+    expect(
+      recovered.completedSteps.some((step) =>
+        step.startsWith("provision-cleanup-recovery:"),
+      ),
+    ).toBe(true);
+    ambiguous = true;
+    await expect(
+      recoverProvisionCleanupProgress({
+        progress: partial,
+        envelope: value.envelope,
+        config: value.config,
+        evidenceDirectory: evidence,
+        readbackListingPath: target.readbackListingPath,
+        runner,
+        cwd: evidence,
+      }),
+    ).rejects.toThrow("replica_worker_upload_recovery_ambiguous");
+    ambiguous = false;
+    foreignAnnotation = true;
+    await expect(
+      recoverProvisionCleanupProgress({
+        progress: partial,
+        envelope: value.envelope,
+        config: value.config,
+        evidenceDirectory: evidence,
+        readbackListingPath: target.readbackListingPath,
+        runner,
+        cwd: evidence,
+      }),
+    ).rejects.toThrow("replica_worker_owned_version_annotation_mismatch");
+  });
+
   test("resumes partial cleanup and proves remote absence before terminal state", async () => {
     const value = authority();
     const evidence = await mkdtemp(join(tmpdir(), "store-replica-cleanup-"));
@@ -1150,11 +1446,14 @@ describe("replica cleanup authority", () => {
     };
     const state = {
       worker: true,
+      deployed: true,
+      scriptEnabled: true,
       d1: true,
       kv: true,
       r2: true,
       object: true,
       failKvOnce: true,
+      foreignVersion: false,
     };
     const calls: string[][] = [];
     const runner = ((args: readonly string[]): string => {
@@ -1199,14 +1498,65 @@ describe("replica cleanup authority", () => {
       if (args[0] === "kv" && args[1] === "key" && args[2] === "list") {
         return "[]";
       }
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify({
+          id: value.progress.resources[0]!.id,
+          annotations: {
+            "workers/message": value.envelope.releaseId,
+            "workers/tag": "0.1.12",
+          },
+          resources: {
+            bindings: [
+              {
+                name: "DB",
+                type: "d1",
+                id: value.progress.resources[1]!.id,
+                database_id: value.progress.resources[1]!.id,
+              },
+              {
+                name: "KV",
+                type: "kv_namespace",
+                namespace_id: value.progress.resources[2]!.id,
+              },
+              {
+                name: "ICONS",
+                type: "r2_bucket",
+                bucket_name: value.config.target.iconsBucketName,
+              },
+              { name: "ASSETS", type: "assets" },
+              { name: "APP_URL", type: "plain_text" },
+            ],
+          },
+        });
+      }
       return "";
     }) as import("../scripts/store-release-common.ts").WranglerRunner;
     runner.inspect = (args) => {
+      if (args[0] === "deployments") {
+        return state.deployed
+          ? {
+              status: "ok",
+              stdout: JSON.stringify({
+                versions: [
+                  {
+                    version_id: value.progress.resources[0]!.id,
+                    percentage: 100,
+                  },
+                ],
+              }),
+            }
+          : { status: "not-found", stdout: "" };
+      }
       if (args[0] === "versions") {
         return state.worker
           ? {
               status: "ok",
-              stdout: JSON.stringify([{ id: value.progress.resources[0]!.id }]),
+              stdout: JSON.stringify([
+                { id: value.progress.resources[0]!.id },
+                ...(state.foreignVersion
+                  ? [{ id: "90000000-0000-4000-8000-000000000009" }]
+                  : []),
+              ]),
             }
           : { status: "not-found", stdout: "" };
       }
@@ -1223,7 +1573,11 @@ describe("replica cleanup authority", () => {
       async get(path) {
         if (path.includes("/workers/scripts/")) {
           return state.worker
-            ? { status: "ok", result: { enabled: true }, resultInfo: null }
+            ? {
+                status: "ok",
+                result: { enabled: state.scriptEnabled },
+                resultInfo: null,
+              }
             : { status: "not-found" };
         }
         if (path.endsWith("/r2/buckets")) {
@@ -1240,7 +1594,7 @@ describe("replica cleanup authority", () => {
         if (path.includes("/objects")) {
           return {
             status: "ok",
-            result: { objects: state.object ? [{ key: icon.key }] : [] },
+            result: state.object ? [{ key: icon.key }] : [],
             resultInfo: null,
           };
         }
@@ -1249,19 +1603,28 @@ describe("replica cleanup authority", () => {
     };
     const options = {
       inventory: value.progress,
+      envelope: value.envelope,
       runner,
       cwd: evidence,
       progressPath,
       action: "destroy" as const,
-      snapshotScan: {
+      snapshotScan: snapshotScanFixture(icon, {
         snapshotDigest: "",
         sqlDigest: "",
         scannerDigest: "",
         sql: "",
-        icons: [icon],
-      },
+      }),
       cloudflareReadClient,
+      readbackListingPath: "/tcs/v1/listings/tako/takos",
     };
+    state.foreignVersion = true;
+    await expect(destroyExact(options)).rejects.toThrow(
+      "replica_worker_inventory_not_exclusive",
+    );
+    expect(calls.filter((args) => args[0] === "delete")).toHaveLength(0);
+    state.foreignVersion = false;
+    state.deployed = false;
+    state.scriptEnabled = true;
     await expect(destroyExact(options)).rejects.toThrow(
       "injected_kv_delete_failure",
     );
@@ -1283,5 +1646,8 @@ describe("replica cleanup authority", () => {
       ),
     ).toBe(true);
     expect(calls.filter((args) => args[0] === "delete")).toHaveLength(1);
+    expect(
+      calls.find((args) => args[0] === "d1" && args[1] === "delete")?.[2],
+    ).toBe(value.progress.resources[1]!.id);
   });
 });
