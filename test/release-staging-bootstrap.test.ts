@@ -13,6 +13,8 @@ import { join } from "node:path";
 import {
   assertBootstrapAuthorityActive,
   assertStagingOnlyEnvironment,
+  exactD1Id,
+  exactKvId,
   makeStagingConfig,
   provisionStoreStaging,
   quarantinedProgress,
@@ -149,6 +151,91 @@ describe("fixed one-time Store staging bootstrap", () => {
     ).toThrow("d1_ambiguous");
   });
 
+  test("reads D1 and paginated KV ownership directly from Cloudflare API", async () => {
+    const reads: string[] = [];
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path, query) {
+        reads.push(`${path}?${new URLSearchParams(query).toString()}`);
+        if (path.endsWith("/d1/database")) {
+          return {
+            status: "ok",
+            result: [
+              { uuid: databaseId, name: rawPolicy.staging.databaseName },
+            ],
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/storage/kv/namespaces")) {
+          const page = Number(query?.page);
+          return {
+            status: "ok",
+            result:
+              page === 2
+                ? [
+                    {
+                      id: kvNamespaceId,
+                      title: rawPolicy.staging.kvNamespaceName,
+                    },
+                  ]
+                : [],
+            resultInfo: { total_pages: 2 },
+          };
+        }
+        throw new Error(`unexpected_read:${path}`);
+      },
+    };
+    expect(await exactD1Id(client, rawPolicy.staging.databaseName)).toBe(
+      databaseId,
+    );
+    expect(await exactKvId(client, rawPolicy.staging.kvNamespaceName)).toBe(
+      kvNamespaceId,
+    );
+    expect(reads).toEqual([
+      `/accounts/${accountId}/d1/database?name=takosumi-store-staging-db&per_page=100`,
+      `/accounts/${accountId}/storage/kv/namespaces?title=takosumi-store-staging-kv&per_page=100&page=1`,
+      `/accounts/${accountId}/storage/kv/namespaces?title=takosumi-store-staging-kv&per_page=100&page=2`,
+    ]);
+  });
+
+  test("fails closed when direct Cloudflare API ownership is ambiguous", async () => {
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path) {
+        if (path.endsWith("/d1/database")) {
+          return {
+            status: "ok",
+            result: [
+              { uuid: databaseId, name: rawPolicy.staging.databaseName },
+              {
+                uuid: "99999999-9999-4999-8999-999999999999",
+                name: rawPolicy.staging.databaseName,
+              },
+            ],
+            resultInfo: null,
+          };
+        }
+        return {
+          status: "ok",
+          result: [
+            { id: kvNamespaceId, title: rawPolicy.staging.kvNamespaceName },
+            {
+              id: "9".repeat(32),
+              title: rawPolicy.staging.kvNamespaceName,
+            },
+          ],
+          resultInfo: { total_pages: 1 },
+        };
+      },
+    };
+    await expect(
+      exactD1Id(client, rawPolicy.staging.databaseName),
+    ).rejects.toThrow("bootstrap_d1_name_ambiguous");
+    await expect(
+      exactKvId(client, rawPolicy.staging.kvNamespaceName),
+    ).rejects.toThrow("bootstrap_kv_name_ambiguous");
+  });
+
   test("adoption permanently revokes cleanup and quarantine retains backing storage", () => {
     const progress: BootstrapProgress = {
       kind: "takosumi.store-staging-bootstrap-progress@v1",
@@ -208,8 +295,6 @@ describe("fixed one-time Store staging bootstrap", () => {
     let firstMutationObserved = false;
     const runner = ((args: readonly string[]) => {
       const command = args.join(" ");
-      if (command === "d1 list --json" || command === "kv namespace list")
-        return "[]";
       if (command === `d1 create ${policy.staging.databaseName}`) {
         firstMutationObserved = true;
         throw new Error("simulated_lost_response");
@@ -220,7 +305,12 @@ describe("fixed one-time Store staging bootstrap", () => {
     const client: CloudflareReadClient = {
       accountId,
       async get(path) {
-        if (path.endsWith("/r2/buckets") || path.endsWith("/workers/domains")) {
+        if (
+          path.endsWith("/d1/database") ||
+          path.endsWith("/storage/kv/namespaces") ||
+          path.endsWith("/r2/buckets") ||
+          path.endsWith("/workers/domains")
+        ) {
           return { status: "ok", result: [], resultInfo: null };
         }
         if (path === "/zones") {

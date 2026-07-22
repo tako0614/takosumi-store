@@ -376,10 +376,18 @@ function targetPolicy(
   };
 }
 
-function exactD1Id(output: string, name: string): string | null {
-  const value = parseJsonOutput(output, "bootstrap_d1_list");
-  if (!Array.isArray(value)) throw new Error("bootstrap_d1_list_invalid");
-  const matches = value.filter(
+export async function exactD1Id(
+  client: CloudflareReadClient,
+  name: string,
+): Promise<string | null> {
+  const response = await client.get(
+    `/accounts/${client.accountId}/d1/database`,
+    { name, per_page: "100" },
+  );
+  if (response.status === "not-found") return null;
+  if (!Array.isArray(response.result))
+    throw new Error("bootstrap_d1_list_invalid");
+  const matches = response.result.filter(
     (entry) =>
       isRecord(entry) && (entry.name === name || entry.database_name === name),
   );
@@ -390,15 +398,37 @@ function exactD1Id(output: string, name: string): string | null {
   return id.toLowerCase();
 }
 
-function exactKvId(output: string, name: string): string | null {
-  const value = parseJsonOutput(output, "bootstrap_kv_list");
-  if (!Array.isArray(value)) throw new Error("bootstrap_kv_list_invalid");
-  const matches = value.filter(
-    (entry) => isRecord(entry) && entry.title === name,
-  );
+export async function exactKvId(
+  client: CloudflareReadClient,
+  name: string,
+): Promise<string | null> {
+  const matches: unknown[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const response = await client.get(
+      `/accounts/${client.accountId}/storage/kv/namespaces`,
+      { title: name, per_page: "100", page: String(page) },
+    );
+    if (response.status === "not-found") return null;
+    if (!Array.isArray(response.result))
+      throw new Error("bootstrap_kv_list_invalid");
+    matches.push(
+      ...response.result.filter(
+        (entry) => isRecord(entry) && entry.title === name,
+      ),
+    );
+    const totalPages =
+      isRecord(response.resultInfo) &&
+      typeof response.resultInfo.total_pages === "number"
+        ? response.resultInfo.total_pages
+        : page;
+    if (page >= totalPages) break;
+    if (page === 100) throw new Error("bootstrap_kv_pagination_unbounded");
+  }
   if (matches.length > 1) throw new Error("bootstrap_kv_name_ambiguous");
   if (matches.length === 0) return null;
-  const id = String(matches[0]!.id ?? "");
+  const match = matches[0];
+  if (!isRecord(match)) throw new Error("bootstrap_kv_list_invalid");
+  const id = String(match.id ?? "");
   if (!KV_ID.test(id)) throw new Error("bootstrap_kv_id_invalid");
   return id;
 }
@@ -534,16 +564,8 @@ async function assertAbsent(
   const target = policy.staging;
   const absence = {
     worker: workerState(runner, cwd, target.workerName) === "absent",
-    d1:
-      exactD1Id(
-        runner(["d1", "list", "--json"], { cwd }),
-        target.databaseName,
-      ) === null,
-    kv:
-      exactKvId(
-        runner(["kv", "namespace", "list"], { cwd }),
-        target.kvNamespaceName,
-      ) === null,
+    d1: (await exactD1Id(client, target.databaseName)) === null,
+    kv: (await exactKvId(client, target.kvNamespaceName)) === null,
     r2: !(await exactR2(client, target.iconsBucketName)),
     domain: !(await exactDomain(client, target.customDomainHostname)),
     dns: !(await dnsRecordPresent(client, target.customDomainHostname)),
@@ -636,10 +658,7 @@ export async function provisionStoreStaging(options: {
       "bootstrap_d1_create_id",
     );
   } catch (error) {
-    const recovered = exactD1Id(
-      options.runner(["d1", "list", "--json"], { cwd: options.source }),
-      target.databaseName,
-    );
+    const recovered = await exactD1Id(options.client, target.databaseName);
     if (!recovered) {
       await writeProgress(
         options.evidence,
@@ -662,10 +681,7 @@ export async function provisionStoreStaging(options: {
       "bootstrap_kv_create_id",
     );
   } catch (error) {
-    const recovered = exactKvId(
-      options.runner(["kv", "namespace", "list"], { cwd: options.source }),
-      target.kvNamespaceName,
-    );
+    const recovered = await exactKvId(options.client, target.kvNamespaceName);
     if (!recovered) {
       await writeProgress(
         options.evidence,
@@ -1179,14 +1195,9 @@ async function assertBootstrapStillOwnsTarget(
     inventory.target.kvNamespaceId,
   );
   if (
-    exactD1Id(
-      runner(["d1", "list", "--json"], { cwd }),
-      target.databaseName,
-    ) !== target.databaseId ||
-    exactKvId(
-      runner(["kv", "namespace", "list"], { cwd }),
-      inventory.target.kvNamespaceName,
-    ) !== target.kvNamespaceId ||
+    (await exactD1Id(client, target.databaseName)) !== target.databaseId ||
+    (await exactKvId(client, inventory.target.kvNamespaceName)) !==
+      target.kvNamespaceId ||
     !(await exactR2(client, target.iconsBucketName))
   )
     throw new Error("bootstrap_storage_ownership_mismatch");
@@ -1543,14 +1554,8 @@ export async function runStoreStagingBootstrapAdapter(options: {
       }
       if (
         workerState(runner, source, inventory.target.workerName) !== "absent" ||
-        exactD1Id(
-          runner(["d1", "list", "--json"], { cwd: source }),
-          inventory.target.databaseName,
-        ) !== null ||
-        exactKvId(
-          runner(["kv", "namespace", "list"], { cwd: source }),
-          inventory.target.kvNamespaceName,
-        ) !== null ||
+        (await exactD1Id(client, inventory.target.databaseName)) !== null ||
+        (await exactKvId(client, inventory.target.kvNamespaceName)) !== null ||
         (await exactR2(client, inventory.target.iconsBucketName)) ||
         (await exactDomain(client, inventory.target.customDomainHostname))
       )
