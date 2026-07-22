@@ -450,7 +450,7 @@ async function exactR2(
 ): Promise<boolean> {
   const response = await client.get(
     `/accounts/${client.accountId}/r2/buckets`,
-    { name },
+    { name_contains: name, per_page: "1000" },
   );
   if (response.status === "not-found") return false;
   const values = Array.isArray(response.result)
@@ -679,19 +679,10 @@ async function readOrCreateProgress(options: {
       throw error;
     });
   if (progressPresent) {
-    const bytes = await readPrivateFile(progressPath, {
-      expectedDirectory: options.evidence,
-    });
-    if (
-      !SHA256.test(options.envelope.authority.recoveryProgressDigest ?? "") ||
-      sha256Bytes(bytes) !== options.envelope.authority.recoveryProgressDigest
-    ) {
-      throw new Error("bootstrap_recovery_progress_digest_mismatch");
-    }
-    return validateResumableProgress(
-      JSON.parse(bytes.toString("utf8")),
+    return readSealedRecoveryProgress(
       options.envelope,
       options.policy.staging,
+      options.evidence,
     );
   }
   if (options.envelope.authority.recoveryProgressDigest !== undefined)
@@ -723,6 +714,89 @@ async function readOrCreateProgress(options: {
   };
   await writePrivateJson(progressPath, progress);
   return progress;
+}
+
+async function readSealedRecoveryProgress(
+  envelope: BootstrapEnvelope,
+  target: BootstrapStagingTarget,
+  evidence: string,
+): Promise<BootstrapProgress> {
+  const bytes = await readPrivateFile(join(evidence, PROGRESS_FILE), {
+    expectedDirectory: evidence,
+  });
+  if (
+    !SHA256.test(envelope.authority.recoveryProgressDigest ?? "") ||
+    sha256Bytes(bytes) !== envelope.authority.recoveryProgressDigest
+  ) {
+    throw new Error("bootstrap_recovery_progress_digest_mismatch");
+  }
+  return validateResumableProgress(
+    JSON.parse(bytes.toString("utf8")),
+    envelope,
+    target,
+  );
+}
+
+export async function planStoreStagingRecovery(options: {
+  envelope: BootstrapEnvelope;
+  policy: BootstrapPolicy;
+  evidence: string;
+  source: string;
+  runner: WranglerRunner;
+  client: CloudflareReadClient;
+}): Promise<JsonObject> {
+  const target = options.policy.staging;
+  const progress = await readSealedRecoveryProgress(
+    options.envelope,
+    target,
+    options.evidence,
+  );
+  const databaseId = await exactD1Id(options.client, target.databaseName);
+  const kvNamespaceId = await exactKvId(options.client, target.kvNamespaceName);
+  const r2Present = await exactR2(options.client, target.iconsBucketName);
+  const workerPresent =
+    workerState(options.runner, options.source, target.workerName) ===
+    "present";
+  const domain = await exactDomain(
+    options.client,
+    target.customDomainHostname,
+    target.workerName,
+  );
+  const recordedD1 = progressResource(progress, "d1");
+  const recordedKv = progressResource(progress, "kv");
+  const recordedR2 = progressResource(progress, "r2");
+  const recordedWorker = progressResource(progress, "worker");
+  const recordedDomain = progressResource(progress, "custom-domain");
+  if (
+    (recordedD1.state === "present" && databaseId !== recordedD1.id) ||
+    (recordedKv.state === "present" && kvNamespaceId !== recordedKv.id) ||
+    (recordedR2.state === "present" && !r2Present) ||
+    (recordedWorker.state === "present" && !workerPresent) ||
+    (recordedWorker.state !== "present" && workerPresent) ||
+    (recordedDomain.state === "present" && !domain) ||
+    (recordedDomain.state !== "present" && domain)
+  ) {
+    throw new Error("bootstrap_recovery_remote_state_mismatch");
+  }
+  return {
+    progressDigest: options.envelope.authority.recoveryProgressDigest!,
+    exactRemote: {
+      d1: { present: databaseId !== null, id: databaseId },
+      kv: { present: kvNamespaceId !== null, id: kvNamespaceId },
+      r2: { present: r2Present },
+      worker: { present: workerPresent },
+      customDomain: { present: domain !== null },
+    },
+    nextAbsentResource:
+      [
+        ["d1", databaseId !== null],
+        ["kv", kvNamespaceId !== null],
+        ["r2", r2Present],
+        ["worker", workerPresent],
+        ["custom-domain", domain !== null],
+      ].find(([, present]) => present === false)?.[0] ?? null,
+    productionFallback: false,
+  };
 }
 
 async function writeProgress(
@@ -1483,17 +1557,25 @@ export async function runStoreStagingBootstrapAdapter(options: {
 
   let evidenceValue: JsonObject;
   if (action === "plan") {
-    const absence = await assertAbsent(
-      policyRecord.policy,
-      runner,
-      source,
-      client,
-    );
+    const recovery = envelope.authority.recoveryProgressDigest
+      ? await planStoreStagingRecovery({
+          envelope,
+          policy: policyRecord.policy,
+          evidence,
+          source,
+          runner,
+          client,
+        })
+      : null;
+    const absence = recovery
+      ? null
+      : await assertAbsent(policyRecord.policy, runner, source, client);
     evidenceValue = {
       kind: "takosumi.store-staging-bootstrap-plan@v1",
       operationId: envelope.operationId,
       target: policyRecord.policy.staging,
-      absenceDigest: digestJson(absence),
+      ...(absence ? { absenceDigest: digestJson(absence) } : {}),
+      ...(recovery ? { recovery, recoveryDigest: digestJson(recovery) } : {}),
       productionFallback: false,
     };
   } else if (action === "provision") {
