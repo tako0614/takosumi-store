@@ -110,7 +110,7 @@ function installLiveFetchMock(): void {
       return Response.json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.10",
+        version: "0.1.11",
       });
     }
     if (url.pathname === "/readyz") {
@@ -122,7 +122,7 @@ function installLiveFetchMock(): void {
     if (url.pathname === "/.well-known/tcs") {
       return Response.json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.10" },
+          software: { name: "takosumi-store", version: "0.1.11" },
           baseUrl: "https://store.takosumi.com",
         },
       });
@@ -201,7 +201,7 @@ describe("release operation journal retry", () => {
       };
       const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
       const envelope = {
-        releaseId: "takosumi-store-0.1.10-retry",
+        releaseId: "takosumi-store-0.1.11-retry",
         source: { commit: "d".repeat(40) },
         candidate: { artifactDigests },
       } as unknown as ReleaseEnvelope;
@@ -276,5 +276,103 @@ describe("release operation journal retry", () => {
         calls.filter((args) => args[0] === "versions" && args[1] === "deploy"),
       ).toHaveLength(phase === "deployed" || phase === "verified" ? 0 : 1);
     }
+  });
+
+  test("recognizes an exact deployment after a lost deploy response", async () => {
+    installLiveFetchMock();
+    const root = await mkdtemp(join(tmpdir(), "store-journal-lost-deploy-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const journalPath = join(root, "output/operation.json");
+    const releaseTarget = target();
+    const currentDeployment = {
+      id: "20000000-0000-4000-8000-000000000001",
+      versions: [{ version_id: versionId, percentage: 100 }],
+    };
+    const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
+    const envelope = {
+      releaseId: "takosumi-store-0.1.11-lost-deploy",
+      source: { commit: "d".repeat(40) },
+      candidate: { artifactDigests },
+    } as unknown as ReleaseEnvelope;
+    const authority = {
+      kind: "takosumi.store-release-operation@v1",
+      environment: "replica-forward-repair",
+      surfaceId: "takosumi-store",
+      releaseId: envelope.releaseId,
+      sourceCommit: envelope.source.commit,
+      artifactDigests,
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      target: {
+        accountId: releaseTarget.accountId,
+        workerName: releaseTarget.workerName,
+        databaseId: releaseTarget.databaseId,
+        kvNamespaceId: releaseTarget.kvNamespaceId,
+        iconsBucketName: releaseTarget.iconsBucketName,
+        origin: releaseTarget.origin,
+      },
+      preDeploymentDigest: digestJson({ versions: [] }),
+    };
+    await writePrivateJson(journalPath, {
+      ...authority,
+      phase: "version-uploaded",
+      versionId,
+      updatedAt: "2026-07-22T00:00:00.000Z",
+    });
+    const calls: string[][] = [];
+    const runner = (args: readonly string[]): string => {
+      calls.push([...args]);
+      if (args[0] === "deployments") return JSON.stringify(currentDeployment);
+      if (args[0] === "d1" && args[1] === "migrations")
+        return "No migrations to apply.";
+      if (args[0] === "d1" && args[1] === "execute") {
+        return JSON.stringify([
+          { results: migrationNames.map((name) => ({ name })) },
+        ]);
+      }
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify(versionReadback(releaseTarget));
+      }
+      return "";
+    };
+    const manifest = {
+      migrations: migrationNames.map((name) => ({
+        path: `migrations/${name}`,
+      })),
+      assets: [
+        {
+          path: "assets/assets/index-review.js",
+          sha256: sha256Bytes(staticBytes),
+        },
+        { path: "assets/index.html", sha256: sha256Bytes(indexBytes) },
+      ],
+    } as unknown as StoreArtifactManifest;
+    await expect(
+      deploySealedStore({
+        runner,
+        cwd: root,
+        target: releaseTarget,
+        envelope,
+        manifest,
+        candidateChecks: [],
+        readTopology: async () => ({
+          mode: "custom-domain",
+          hostname: "store.takosumi.com",
+          workerName: "takosumi-store",
+        }),
+        journal: {
+          path: journalPath,
+          environment: "replica-forward-repair",
+          targetFingerprint: authority.targetFingerprint,
+        },
+      }),
+    ).resolves.toMatchObject({ versionId });
+    expect(
+      calls.filter((args) => args[0] === "versions" && args[1] === "deploy"),
+    ).toHaveLength(0);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({
+      phase: "verified",
+      versionId,
+    });
   });
 });

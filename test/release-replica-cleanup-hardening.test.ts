@@ -1,31 +1,47 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  canonicalJson,
   digestJson,
   sha256Bytes,
   writePrivateJson,
   type CloudflareReadClient,
   type ReleaseEnvelope,
+  type StoreArtifactManifest,
 } from "../scripts/store-release-common.ts";
 import {
   assertInventoryDigest,
   destroyExact,
   exactD1DatabaseId,
   exactKvNamespaceId,
+  resolveReplicaAttestationVerifiedAt,
+  rehearseForwardRepair,
+  recoverForwardRepairCleanupProgress,
   validateInventory,
+  validateForwardRepairEvidence,
   validateProgress,
+  verifyReplicaStoragePreserved,
   type Inventory,
   type Progress,
   type ReplicaConfig,
 } from "../scripts/store-release-replica-adapter.ts";
 
 const roots: string[] = [];
+const originalFetch = globalThis.fetch;
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -275,6 +291,845 @@ describe("replica cleanup authority", () => {
         value.config,
       ),
     ).toThrow("replica_inventory_authority_mismatch");
+
+    const rehearsalDigest = `sha256:${"8".repeat(64)}`;
+    const rehearsed = {
+      ...inventory,
+      checks: inventory.checks.map((check, index) =>
+        index === inventory.checks.length - 1
+          ? { ...check, bindingDigest: rehearsalDigest }
+          : check,
+      ),
+      remoteEvidence: {
+        ...inventory.remoteEvidence,
+        failureRehearsalDigest: rehearsalDigest,
+      },
+    };
+    expect(() =>
+      validateInventory(rehearsed, boundEnvelope, value.config, {
+        requireRehearsal: true,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateInventory(
+        {
+          ...rehearsed,
+          checks: inventory.checks,
+        },
+        boundEnvelope,
+        value.config,
+        { requireRehearsal: true },
+      ),
+    ).toThrow("replica_inventory_rehearsal_check_binding_mismatch");
+  });
+
+  test("proves exact live D1, KV, R2, catalog, and icon preservation", async () => {
+    const value = authority();
+    const root = await mkdtemp(join(tmpdir(), "store-replica-storage-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const iconBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+    ]);
+    const iconDigest = sha256Bytes(iconBytes);
+    const iconKey = `icons/${iconDigest.slice(7)}`;
+    const migrationNames = [
+      "0001_init.sql",
+      "0002_accounts.sql",
+      "0003_scope_slug.sql",
+      "0004_tags.sql",
+      "0005_install_experience.sql",
+      "0006_source_identity.sql",
+    ];
+    const inventory = {
+      kind: "takosumi.store-release-replica-inventory@v1",
+      status: "verified",
+      surfaceId: "takosumi-store",
+      releaseId: value.config.releaseId,
+      replicaId: value.config.replicaId,
+      accountId: value.config.target.accountId,
+      target: {
+        ...value.config.target,
+        databaseId: value.progress.resources[1]!.id!,
+        kvNamespaceId: value.progress.resources[2]!.id!,
+        versionId: value.progress.resources[0]!.id!,
+      },
+      artifactDigests: value.progress.artifactDigests,
+      createdAt: value.config.createdAt,
+      expiresAt: value.config.expiresAt,
+      checks: [],
+      remoteEvidence: {},
+      productionFallback: false,
+    } as const satisfies Inventory;
+    const state = {
+      databaseId: inventory.target.databaseId,
+      kvNamespaceId: inventory.target.kvNamespaceId,
+      bucketName: inventory.target.iconsBucketName,
+      iconBytes,
+    };
+    const runner = ((args: readonly string[]): string => {
+      if (args[0] === "d1" && args[1] === "list") {
+        return JSON.stringify([
+          { name: inventory.target.databaseName, uuid: state.databaseId },
+        ]);
+      }
+      if (args[0] === "kv" && args[1] === "namespace") {
+        return JSON.stringify([
+          { title: inventory.target.kvNamespaceName, id: state.kvNamespaceId },
+        ]);
+      }
+      if (args[0] === "d1" && args[1] === "migrations") {
+        return "No migrations to apply.";
+      }
+      if (args[0] === "d1" && args[1] === "execute") {
+        const command = args[args.indexOf("--command") + 1] ?? "";
+        return command.includes("d1_migrations")
+          ? JSON.stringify([
+              { results: migrationNames.map((name) => ({ name })) },
+            ])
+          : JSON.stringify([
+              {
+                results: [
+                  {
+                    id: "tako/takos",
+                    icon_url: `${inventory.target.origin}/${iconKey}`,
+                  },
+                ],
+              },
+            ]);
+      }
+      if (args[0] === "r2" && args[1] === "object" && args[2] === "get") {
+        writeFileSync(args[args.indexOf("--file") + 1]!, state.iconBytes);
+        return "";
+      }
+      throw new Error(`unexpected:${args.join(" ")}`);
+    }) as Parameters<typeof verifyReplicaStoragePreserved>[0]["runner"];
+    const client: CloudflareReadClient = {
+      accountId: inventory.accountId,
+      get: async (path) => {
+        if (path.endsWith("/r2/buckets")) {
+          return {
+            status: "ok",
+            result: { buckets: [{ name: state.bucketName }] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/objects")) {
+          return {
+            status: "ok",
+            result: { objects: [{ key: iconKey }] },
+            resultInfo: null,
+          };
+        }
+        return { status: "not-found" };
+      },
+    };
+    const manifest = {
+      migrations: migrationNames.map((name) => ({
+        path: `migrations/${name}`,
+      })),
+    } as unknown as StoreArtifactManifest;
+    const snapshotScan = {
+      snapshotDigest: `sha256:${"1".repeat(64)}`,
+      sqlDigest: `sha256:${"2".repeat(64)}`,
+      scannerDigest: `sha256:${"3".repeat(64)}`,
+      sql: "INSERT INTO listings VALUES ('tako/takos')",
+      icons: [
+        {
+          key: iconKey,
+          mediaType: "image/png",
+          bytes: iconBytes,
+          sha256: iconDigest,
+        },
+      ],
+    };
+    const verify = () =>
+      verifyReplicaStoragePreserved({
+        inventory,
+        runner,
+        cwd: root,
+        manifest,
+        snapshotScan,
+        cloudflareReadClient: client,
+      });
+    await expect(verify()).resolves.toMatch(/^sha256:[0-9a-f]{64}$/u);
+
+    state.databaseId = "20000000-0000-4000-8000-000000000099";
+    await expect(verify()).rejects.toThrow(
+      "replica_d1_inventory_identity_mismatch",
+    );
+    state.databaseId = inventory.target.databaseId;
+    state.kvNamespaceId = "a".repeat(32);
+    await expect(verify()).rejects.toThrow(
+      "replica_kv_namespace_inventory_identity_mismatch",
+    );
+    state.kvNamespaceId = inventory.target.kvNamespaceId;
+    state.bucketName = "substituted-bucket";
+    await expect(verify()).rejects.toThrow(
+      "replica_forward_repair_r2_storage_missing",
+    );
+    state.bucketName = inventory.target.iconsBucketName;
+    state.iconBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await expect(verify()).rejects.toThrow(
+      "replica_forward_repair_icon_digest_mismatch",
+    );
+  });
+
+  test("reuses an exact retained attestation timestamp and rejects drift", async () => {
+    const value = authority();
+    const root = await mkdtemp(join(tmpdir(), "store-replica-attestation-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const path = join(root, "worker-release-replica-attestation.json");
+    const failureDigest = `sha256:${"8".repeat(64)}`;
+    const snapshotDigest = `sha256:${"7".repeat(64)}`;
+    const configFingerprint = `sha256:${"6".repeat(64)}`;
+    const migrationPlanDigest = `sha256:${"5".repeat(64)}`;
+    const snapshotCiphertextDigest = `sha256:${"4".repeat(64)}`;
+    const provenanceDigest = `sha256:${"3".repeat(64)}`;
+    const checks = [
+      "fresh Store Worker exact Version, bindings, and asset readback",
+      "fresh D1 migration lineage and sanitized catalog integrity",
+      "TCS ServerInfo, listings, SPA, and API fallback behavior",
+      "isolated target cleanup and forward-repair rehearsal",
+    ].map((name, index) => ({
+      name,
+      bindingDigest:
+        index === 3 ? failureDigest : `sha256:${String(index + 1).repeat(64)}`,
+    }));
+    const inventory: Inventory = {
+      kind: "takosumi.store-release-replica-inventory@v1",
+      status: "verified",
+      surfaceId: "takosumi-store",
+      releaseId: value.config.releaseId,
+      replicaId: value.config.replicaId,
+      accountId: value.config.target.accountId,
+      target: {
+        ...value.config.target,
+        databaseId: value.progress.resources[1]!.id!,
+        kvNamespaceId: value.progress.resources[2]!.id!,
+        versionId: value.progress.resources[0]!.id!,
+      },
+      artifactDigests: value.progress.artifactDigests,
+      createdAt: value.config.createdAt,
+      expiresAt: value.config.expiresAt,
+      checks,
+      remoteEvidence: { failureRehearsalDigest: failureDigest },
+      productionFallback: false,
+    };
+    const envelope = {
+      releaseId: value.config.releaseId,
+      source: { commit: "a".repeat(40) },
+      controllerSource: { commit: "b".repeat(40) },
+      authority: { replicaAdapterDigest: `sha256:${"4".repeat(64)}` },
+      candidate: { artifactDigests: inventory.artifactDigests },
+      replica: {
+        id: value.config.replicaId,
+        configFingerprint,
+        migrationPlanDigest,
+        data: { snapshotDigest, snapshotCiphertextDigest, provenanceDigest },
+      },
+    } as unknown as ReleaseEnvelope;
+    const verifiedAt = "2026-07-22T01:02:03.000Z";
+    const resolve = () =>
+      resolveReplicaAttestationVerifiedAt({
+        path,
+        evidenceDirectory: root,
+        envelope,
+        config: value.config,
+        inventory,
+        failureRehearsalDigest: failureDigest,
+        failureVerifiedAt: verifiedAt,
+      });
+    await expect(resolve()).resolves.toBe(verifiedAt);
+    const attestation = {
+      kind: "takos.release-safety-replica-attestation@v1",
+      status: "verified",
+      surfaceId: "takosumi-store",
+      releaseId: envelope.releaseId,
+      sourceCommit: envelope.source.commit,
+      controllerCommit: envelope.controllerSource.commit,
+      replicaAdapterDigest: envelope.authority.replicaAdapterDigest,
+      replicaId: value.config.replicaId,
+      accessPolicy: "replica-only-no-production-fallback",
+      createdAt: value.config.createdAt,
+      verifiedAt,
+      expiresAt: value.config.expiresAt,
+      configFingerprint,
+      migrationPlanDigest,
+      targetInventoryDigest: digestJson(inventory),
+      artifactDigests: inventory.artifactDigests,
+      checks: checks.map((check) => ({ ...check, status: "passed" })),
+      failureRehearsal: {
+        status: "passed",
+        strategy: "forward-repair-after-database-mutation",
+        bindingDigest: failureDigest,
+      },
+      data: {
+        source: "encrypted-anonymized-production-snapshot",
+        snapshotDigest,
+        snapshotCiphertextDigest,
+        provenanceDigest,
+        piiScan: "passed",
+        secretScan: "passed",
+        referentialIntegrity: "passed",
+      },
+      productionFallback: false,
+    };
+    await writePrivateJson(path, attestation);
+    await expect(resolve()).resolves.toBe(verifiedAt);
+    await writePrivateJson(
+      path,
+      { ...attestation, verifiedAt: "2026-07-22T01:02:04.000Z" },
+      { replace: true },
+    );
+    await expect(resolve()).rejects.toThrow(
+      "replica_attestation_authority_mismatch",
+    );
+  });
+
+  test("resumes retained post-delete and post-deploy forward-repair phases", async () => {
+    const value = authority();
+    const root = await mkdtemp(join(tmpdir(), "store-replica-post-delete-"));
+    const artifactRoot = await mkdtemp(
+      join(tmpdir(), "store-replica-artifact-"),
+    );
+    roots.push(root, artifactRoot);
+    await Promise.all([chmod(root, 0o700), chmod(artifactRoot, 0o700)]);
+    await Promise.all([
+      mkdir(join(artifactRoot, "assets/assets"), { recursive: true }),
+      mkdir(join(artifactRoot, "migrations"), { recursive: true }),
+    ]);
+    const workerBytes = Buffer.from(
+      "export default {fetch(){return new Response('ok')}}",
+    );
+    const staticBytes = Buffer.from("sealed-static");
+    const indexBytes = Buffer.from("<main>sealed</main>");
+    const iconBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+    ]);
+    const iconDigest = sha256Bytes(iconBytes);
+    const iconKey = `icons/${iconDigest.slice(7)}`;
+    const migrationNames = [
+      "0001_init.sql",
+      "0002_accounts.sql",
+      "0003_scope_slug.sql",
+      "0004_tags.sql",
+      "0005_install_experience.sql",
+      "0006_source_identity.sql",
+    ];
+    await Promise.all([
+      writeFile(join(artifactRoot, "worker.mjs"), workerBytes),
+      writeFile(
+        join(artifactRoot, "assets/assets/index-review.js"),
+        staticBytes,
+      ),
+      writeFile(join(artifactRoot, "assets/index.html"), indexBytes),
+      writeFile(join(artifactRoot, "assets/tako.png"), iconBytes),
+      ...migrationNames.map((name) =>
+        writeFile(join(artifactRoot, "migrations", name), "SELECT 1;"),
+      ),
+    ]);
+    const initialVersionId = value.progress.resources[0]!.id!;
+    const repairedVersionId = "20000000-0000-4000-8000-000000000002";
+    const inventory: Inventory = {
+      kind: "takosumi.store-release-replica-inventory@v1",
+      status: "verified",
+      surfaceId: "takosumi-store",
+      releaseId: value.config.releaseId,
+      replicaId: value.config.replicaId,
+      accountId: value.config.target.accountId,
+      target: {
+        ...value.config.target,
+        databaseId: value.progress.resources[1]!.id!,
+        kvNamespaceId: value.progress.resources[2]!.id!,
+        versionId: initialVersionId,
+      },
+      artifactDigests: value.progress.artifactDigests,
+      createdAt: value.config.createdAt,
+      expiresAt: value.config.expiresAt,
+      checks: [
+        "fresh Store Worker exact Version, bindings, and asset readback",
+        "fresh D1 migration lineage and sanitized catalog integrity",
+        "TCS ServerInfo, listings, SPA, and API fallback behavior",
+        "isolated target cleanup and forward-repair rehearsal",
+      ].map((name, index) => ({
+        name,
+        bindingDigest: `sha256:${String(index + 1).repeat(64)}`,
+      })),
+      remoteEvidence: {
+        versionDigest: `sha256:${"1".repeat(64)}`,
+        deploymentDigest: `sha256:${"2".repeat(64)}`,
+        migrationLineageDigest: `sha256:${"3".repeat(64)}`,
+        snapshotDigest: `sha256:${"4".repeat(64)}`,
+        snapshotSqlDigest: `sha256:${"5".repeat(64)}`,
+        snapshotScannerDigest: `sha256:${"6".repeat(64)}`,
+        iconReadbackDigest: `sha256:${"7".repeat(64)}`,
+        topologyDigest: `sha256:${"8".repeat(64)}`,
+        preflightAbsenceDigest: value.progress.preflightAbsenceDigest,
+      },
+      productionFallback: false,
+    };
+    const configFingerprint = `sha256:${"9".repeat(64)}`;
+    const manifest = {
+      worker: {
+        path: "worker.mjs",
+        sha256: sha256Bytes(workerBytes),
+        size: workerBytes.byteLength,
+      },
+      migrations: migrationNames.map((name) => ({
+        path: `migrations/${name}`,
+      })),
+      assets: [
+        {
+          path: "assets/assets/index-review.js",
+          sha256: sha256Bytes(staticBytes),
+          size: staticBytes.byteLength,
+        },
+        {
+          path: "assets/index.html",
+          sha256: sha256Bytes(indexBytes),
+          size: indexBytes.byteLength,
+        },
+        {
+          path: "assets/tako.png",
+          sha256: iconDigest,
+          size: iconBytes.byteLength,
+        },
+      ],
+    } as unknown as StoreArtifactManifest;
+    const envelope = {
+      releaseId: value.config.releaseId,
+      source: { commit: "a".repeat(40) },
+      controllerSource: { commit: "b".repeat(40) },
+      authority: { replicaAdapterDigest: `sha256:${"a".repeat(64)}` },
+      candidate: { artifactDigests: inventory.artifactDigests },
+      replica: {
+        id: value.config.replicaId,
+        configFingerprint,
+        migrationPlanDigest: `sha256:${"b".repeat(64)}`,
+        data: { snapshotDigest: inventory.remoteEvidence.snapshotDigest },
+      },
+    } as unknown as ReleaseEnvelope;
+    await writePrivateJson(
+      join(root, "worker-release-replica-inventory.json"),
+      inventory,
+    );
+    const snapshotScan = {
+      snapshotDigest: String(inventory.remoteEvidence.snapshotDigest),
+      sqlDigest: String(inventory.remoteEvidence.snapshotSqlDigest),
+      scannerDigest: String(inventory.remoteEvidence.snapshotScannerDigest),
+      sql: "INSERT INTO listings VALUES ('tako/takos')",
+      icons: [
+        {
+          key: iconKey,
+          mediaType: "image/png",
+          bytes: iconBytes,
+          sha256: iconDigest,
+        },
+      ],
+    };
+    let workerPresent = false;
+    let deployed = false;
+    let scriptEnabled = false;
+    const calls: string[][] = [];
+    const versionReadback = {
+      id: repairedVersionId,
+      resources: {
+        bindings: [
+          {
+            name: "DB",
+            type: "d1",
+            id: inventory.target.databaseId,
+            database_id: inventory.target.databaseId,
+          },
+          {
+            name: "KV",
+            type: "kv_namespace",
+            namespace_id: inventory.target.kvNamespaceId,
+          },
+          {
+            name: "ICONS",
+            type: "r2_bucket",
+            bucket_name: inventory.target.iconsBucketName,
+          },
+          { name: "ASSETS", type: "assets" },
+          { name: "APP_URL", type: "plain_text" },
+        ],
+      },
+    };
+    const deployment = {
+      id: "30000000-0000-4000-8000-000000000003",
+      versions: [{ version_id: repairedVersionId, percentage: 100 }],
+    };
+    const runner = ((args: readonly string[]): string => {
+      calls.push([...args]);
+      if (args[0] === "d1" && args[1] === "list") {
+        return JSON.stringify([
+          {
+            name: inventory.target.databaseName,
+            uuid: inventory.target.databaseId,
+          },
+        ]);
+      }
+      if (args[0] === "kv" && args[1] === "namespace") {
+        return JSON.stringify([
+          {
+            title: inventory.target.kvNamespaceName,
+            id: inventory.target.kvNamespaceId,
+          },
+        ]);
+      }
+      if (args[0] === "d1" && args[1] === "migrations") {
+        return args[2] === "list" ? "No migrations to apply." : "";
+      }
+      if (args[0] === "d1" && args[1] === "execute") {
+        const command = args[args.indexOf("--command") + 1] ?? "";
+        return command.includes("d1_migrations")
+          ? JSON.stringify([
+              { results: migrationNames.map((name) => ({ name })) },
+            ])
+          : JSON.stringify([
+              {
+                results: [
+                  {
+                    id: "tako/takos",
+                    icon_url: `${inventory.target.origin}/${iconKey}`,
+                  },
+                ],
+              },
+            ]);
+      }
+      if (args[0] === "r2" && args[1] === "object" && args[2] === "get") {
+        writeFileSync(args[args.indexOf("--file") + 1]!, iconBytes);
+        return "";
+      }
+      if (args[0] === "versions" && args[1] === "upload") {
+        workerPresent = true;
+        return `Version ID: ${repairedVersionId}`;
+      }
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify(versionReadback);
+      }
+      if (args[0] === "versions" && args[1] === "deploy") {
+        deployed = true;
+        return "";
+      }
+      if (args[0] === "triggers") {
+        scriptEnabled = true;
+        return "";
+      }
+      throw new Error(`unexpected:${args.join(" ")}`);
+    }) as Parameters<typeof rehearseForwardRepair>[0]["runner"];
+    runner.inspect = (args) => {
+      calls.push([...args]);
+      if (args[0] === "versions" && args[1] === "list") {
+        return workerPresent
+          ? {
+              status: "ok",
+              stdout: JSON.stringify([{ id: repairedVersionId }]),
+            }
+          : { status: "not-found", stdout: "" };
+      }
+      if (args[0] === "deployments") {
+        return workerPresent
+          ? {
+              status: "ok",
+              stdout: JSON.stringify(deployed ? deployment : { versions: [] }),
+            }
+          : { status: "not-found", stdout: "" };
+      }
+      return { status: "failed", stdout: "" };
+    };
+    const client: CloudflareReadClient = {
+      accountId: inventory.accountId,
+      get: async (path) => {
+        if (path.endsWith("/r2/buckets")) {
+          return {
+            status: "ok",
+            result: { buckets: [{ name: inventory.target.iconsBucketName }] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/objects")) {
+          return {
+            status: "ok",
+            result: { objects: [{ key: iconKey }] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/workers/subdomain")) {
+          return {
+            status: "ok",
+            result: { subdomain: "account" },
+            resultInfo: null,
+          };
+        }
+        if (
+          path.includes(
+            `/workers/scripts/${inventory.target.workerName}/subdomain`,
+          )
+        ) {
+          return scriptEnabled
+            ? {
+                status: "ok",
+                result: { enabled: true, previews_enabled: false },
+                resultInfo: null,
+              }
+            : { status: "not-found" };
+        }
+        return { status: "not-found" };
+      },
+    };
+    const storagePreservationDigest = await verifyReplicaStoragePreserved({
+      inventory,
+      runner,
+      cwd: root,
+      manifest,
+      snapshotScan,
+      cloudflareReadClient: client,
+    });
+    const workerAbsentProgress = {
+      kind: "takosumi.store-replica-forward-repair-progress@v1",
+      status: "worker-absent",
+      surfaceId: "takosumi-store",
+      releaseId: envelope.releaseId,
+      replicaId: value.config.replicaId,
+      initialInventoryDigest: digestJson(inventory),
+      target: inventory.target,
+      removedVersionId: initialVersionId,
+      workerAbsenceDigest: digestJson({
+        kind: "takosumi.store-replica-worker-absence@v1",
+        workerName: inventory.target.workerName,
+        removedVersionId: initialVersionId,
+        versionAbsent: true,
+        subdomainAbsent: true,
+      }),
+      storagePreservationDigest,
+    } as const;
+    const forwardProgressPath = join(
+      root,
+      "worker-release-replica-forward-repair-progress.json",
+    );
+    await writePrivateJson(forwardProgressPath, {
+      ...workerAbsentProgress,
+      target: {
+        ...workerAbsentProgress.target,
+        workerName: value.config.productionTarget.workerName,
+      },
+    });
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers();
+      if (url.pathname === "/tcs/v1/listings/tako/takos") {
+        headers.set("access-control-allow-origin", "*");
+        headers.set("access-control-allow-methods", "GET, OPTIONS");
+        if (init?.method === "OPTIONS")
+          return new Response(null, { status: 204, headers });
+        return Response.json(
+          {
+            id: "tako/takos",
+            scope: "tako",
+            slug: "takos",
+            source: { git: "https://github.com/tako0614/takos.git" },
+            iconUrl: `${inventory.target.origin}/${iconKey}`,
+          },
+          { headers },
+        );
+      }
+      if (url.pathname === "/healthz") {
+        return Response.json({
+          status: "ok",
+          software: "takosumi-store",
+          version: "0.1.11",
+        });
+      }
+      if (url.pathname === "/readyz") {
+        return Response.json({
+          status: "ready",
+          capabilities: { publish: false },
+        });
+      }
+      if (url.pathname === "/.well-known/tcs") {
+        return Response.json({
+          server: {
+            software: { name: "takosumi-store", version: "0.1.11" },
+            baseUrl: inventory.target.origin,
+          },
+        });
+      }
+      if (url.pathname === `/${iconKey}`) {
+        return new Response(iconBytes, {
+          headers: { "content-type": "image/png" },
+        });
+      }
+      if (url.pathname === "/tcs/v1/release-safety-not-found") {
+        return Response.json({ error: { code: "not_found" } }, { status: 404 });
+      }
+      if (url.pathname === "/assets/index-review.js")
+        return new Response(staticBytes);
+      if (url.pathname.startsWith("/release-safety/")) {
+        return new Response(indexBytes, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response("missing", { status: 500 });
+    }) as typeof fetch;
+    const run = () =>
+      rehearseForwardRepair({
+        envelope,
+        config: value.config,
+        artifactRoot,
+        manifest,
+        runner,
+        evidenceDirectory: root,
+        snapshotScan,
+        readbackListingPath: "/tcs/v1/listings/tako/takos",
+        cloudflareReadClient: client,
+        initialInventory: inventory,
+      });
+    await expect(run()).rejects.toThrow(
+      "replica_forward_repair_progress_authority_mismatch",
+    );
+    await writePrivateJson(forwardProgressPath, workerAbsentProgress, {
+      replace: true,
+    });
+    workerPresent = true;
+    deployed = true;
+    scriptEnabled = true;
+    await expect(run()).rejects.toThrow(
+      "replica_forward_repair_intervening_worker_present",
+    );
+    workerPresent = false;
+    deployed = false;
+    scriptEnabled = false;
+    const repairTarget = {
+      configPath: "replica-generated.toml",
+      accountId: inventory.accountId,
+      workerName: inventory.target.workerName,
+      origin: inventory.target.origin,
+      databaseName: inventory.target.databaseName,
+      databaseId: inventory.target.databaseId,
+      kvNamespaceId: inventory.target.kvNamespaceId,
+      iconsBucketName: inventory.target.iconsBucketName,
+      publishCapability: false,
+      compatibilityDate: "2026-06-25",
+      compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+      requiredVarNames: ["APP_URL"],
+      requiredSecretNames: [],
+      customDomainHostname: new URL(inventory.target.origin).hostname,
+      readbackListingPath: "/tcs/v1/listings/tako/takos",
+    };
+    await writePrivateJson(
+      join(root, "worker-release-replica-forward-repair-operation.json"),
+      {
+        kind: "takosumi.store-release-operation@v1",
+        environment: "replica-forward-repair",
+        surfaceId: "takosumi-store",
+        releaseId: envelope.releaseId,
+        sourceCommit: envelope.source.commit,
+        artifactDigests: envelope.candidate.artifactDigests,
+        targetFingerprint: digestJson(repairTarget),
+        target: {
+          accountId: repairTarget.accountId,
+          workerName: repairTarget.workerName,
+          databaseId: repairTarget.databaseId,
+          kvNamespaceId: repairTarget.kvNamespaceId,
+          iconsBucketName: repairTarget.iconsBucketName,
+          origin: repairTarget.origin,
+        },
+        preDeploymentDigest: digestJson({ versions: [] }),
+        phase: "version-uploaded",
+        versionId: repairedVersionId,
+        updatedAt: "2026-07-22T01:02:03.000Z",
+      },
+    );
+    workerPresent = true;
+    deployed = true;
+    scriptEnabled = true;
+    const repaired = await run();
+    expect(repaired.target.versionId).toBe(repairedVersionId);
+    expect(repaired.checks[3]!.bindingDigest).toBe(
+      String(repaired.remoteEvidence.failureRehearsalDigest),
+    );
+    expect(calls.filter((args) => args[0] === "delete")).toHaveLength(0);
+    expect(
+      calls.filter((args) => args[0] === "versions" && args[1] === "upload"),
+    ).toHaveLength(0);
+    expect(
+      calls.filter((args) => args[0] === "versions" && args[1] === "deploy"),
+    ).toHaveLength(0);
+    const repeated = await run();
+    expect(canonicalJson(repeated)).toBe(canonicalJson(repaired));
+    expect(
+      calls.filter((args) => args[0] === "versions" && args[1] === "upload"),
+    ).toHaveLength(0);
+    const cleanupProgress = await recoverForwardRepairCleanupProgress({
+      progress: value.progress,
+      envelope,
+      config: value.config,
+      evidenceDirectory: root,
+      readbackListingPath: "/tcs/v1/listings/tako/takos",
+    });
+    expect(
+      cleanupProgress.resources.find((resource) => resource.type === "worker")
+        ?.id,
+    ).toBe(repairedVersionId);
+    expect(
+      cleanupProgress.completedSteps.some((step) =>
+        step.startsWith("forward-repair-cleanup-recovery:"),
+      ),
+    ).toBe(true);
+    const failureEvidence = JSON.parse(
+      await readFile(
+        join(root, "worker-release-replica-forward-repair-rehearsal.json"),
+        "utf8",
+      ),
+    );
+    const repairedProgress = JSON.parse(
+      await readFile(forwardProgressPath, "utf8"),
+    );
+    expect(() =>
+      validateForwardRepairEvidence(
+        failureEvidence,
+        envelope,
+        value.config,
+        repaired,
+        inventory,
+        repairedProgress,
+      ),
+    ).not.toThrow();
+    for (const tampered of [
+      {
+        ...failureEvidence,
+        initialInventoryDigest: `sha256:${"0".repeat(64)}`,
+      },
+      {
+        ...failureEvidence,
+        forwardRepair: {
+          ...failureEvidence.forwardRepair,
+          versionDigest: `sha256:${"0".repeat(64)}`,
+        },
+      },
+      {
+        ...failureEvidence,
+        failureInjection: {
+          ...failureEvidence.failureInjection,
+          storagePreservationDigest: `sha256:${"0".repeat(64)}`,
+        },
+      },
+    ]) {
+      expect(() =>
+        validateForwardRepairEvidence(
+          tampered,
+          envelope,
+          value.config,
+          repaired,
+          inventory,
+          repairedProgress,
+        ),
+      ).toThrow("replica_forward_repair_evidence_authority_mismatch");
+    }
   });
 
   test("resumes partial cleanup and proves remote absence before terminal state", async () => {

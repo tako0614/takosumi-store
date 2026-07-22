@@ -543,11 +543,16 @@ export async function deploySealedStore(options: {
       ) {
         throw new Error("release_operation_journal_version_invalid");
       }
+      const uploadedVersionAlreadyDeployed =
+        phase === "version-uploaded" &&
+        typeof journal.versionId === "string" &&
+        deploymentHasExactVersionAtFullTraffic(liveBefore, journal.versionId);
       if (
         ["intent-recorded", "schema-applied", "version-uploaded"].includes(
           phase,
         ) &&
-        liveBeforeDigest !== preDeploymentDigest
+        liveBeforeDigest !== preDeploymentDigest &&
+        !uploadedVersionAlreadyDeployed
       ) {
         throw new Error("release_deployment_head_changed_before_promotion");
       }
@@ -721,25 +726,40 @@ export async function deploySealedStore(options: {
     if (!deploymentHasExactVersionAtFullTraffic(prePromotion, versionId)) {
       throw new Error("worker_resumed_deployment_readback_mismatch");
     }
+  } else if (
+    phaseBeforeDeploy === "version-uploaded" &&
+    deploymentHasExactVersionAtFullTraffic(prePromotion, versionId)
+  ) {
+    await retainPhase("deployed", versionId);
   } else {
     if (options.journal && digestJson(prePromotion) !== preDeploymentDigest) {
       throw new Error("worker_deployment_head_changed_during_release");
     }
-    options.runner(
-      [
-        "versions",
-        "deploy",
-        `${versionId}@100%`,
-        "--name",
-        options.target.workerName,
-        "--config",
-        config,
-        "--yes",
-        "--message",
-        options.envelope.releaseId,
-      ],
-      { cwd: options.cwd },
-    );
+    try {
+      options.runner(
+        [
+          "versions",
+          "deploy",
+          `${versionId}@100%`,
+          "--name",
+          options.target.workerName,
+          "--config",
+          config,
+          "--yes",
+          "--message",
+          options.envelope.releaseId,
+        ],
+        { cwd: options.cwd },
+      );
+    } catch (error) {
+      const recovered = parseJsonOutput(
+        options.runner(deploymentStatusArgs, { cwd: options.cwd }),
+        "worker_deployment_lost_response_readback",
+      );
+      if (!deploymentHasExactVersionAtFullTraffic(recovered, versionId)) {
+        throw error;
+      }
+    }
     await retainPhase("deployed", versionId);
   }
   const deployments = parseJsonOutput(

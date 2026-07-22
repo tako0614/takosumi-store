@@ -83,11 +83,11 @@ names are rejected for every bootstrap action.
 ## Build once
 
 The release commit must be clean canonical `main`, pushed to `origin/main`,
-and be the peeled commit of a pushed, signed, annotated `v0.1.10` tag.
+and be the peeled commit of a pushed, signed, annotated `v0.1.11` tag.
 
 ```bash
 bun run release:candidate -- \
-  --evidence-directory /absolute/operator/evidence/store-0.1.10 \
+  --evidence-directory /absolute/operator/evidence/store-0.1.11 \
   --operator-root /absolute/operator/root
 ```
 
