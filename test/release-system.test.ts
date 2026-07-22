@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,7 +24,10 @@ import {
   type StoreReleasePolicy,
   type TargetPolicy,
 } from "../scripts/store-release-common.ts";
-import { deploySealedStore } from "../scripts/store-release-fixed-adapter.ts";
+import {
+  deploySealedStore,
+  ensureStagingCanary,
+} from "../scripts/store-release-fixed-adapter.ts";
 import { scanSanitizedSnapshot } from "../scripts/store-release-replica-adapter.ts";
 
 const temporaryRoots: string[] = [];
@@ -199,6 +209,117 @@ describe("Store release policy and realized config", () => {
 });
 
 describe("release mutation safety", () => {
+  test("seeds the staging canary from a sealed content-addressed asset without overwriting conflicts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-staging-canary-test-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "artifact/assets"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    const icon = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+    ]);
+    await writeFile(join(root, "artifact/assets/tako.png"), icon);
+    const digest = sha256Bytes(icon);
+    const staging = policy().staging;
+    const iconUrl = `${staging.origin}/icons/${digest.slice(7)}`;
+    const canaryRow = {
+      id: "tako/takos",
+      scope: "tako",
+      slug: "takos",
+      git: "https://github.com/tako0614/takos.git",
+      ref: "",
+      path: "deploy/opentofu",
+      kind: "worker",
+      surface: "service",
+      provider: "cloudflare",
+      category: "workspace",
+      tags: '["workspace","ai"]',
+      suggested_name: "takos",
+      name_ja: "Takos",
+      name_en: "Takos",
+      description_ja: "AI workspace",
+      description_en: "AI workspace",
+      badge_ja: "Installable",
+      badge_en: "Installable",
+      icon_url: iconUrl,
+      inputs: "[]",
+      output_allowlist: "[]",
+      publisher_handle: "tako",
+      publisher_display_name: "Takos",
+      status: "visible",
+      created_at: "2026-07-22T00:00:00.000Z",
+      updated_at: "2026-07-22T00:00:00.000Z",
+    };
+    const calls: string[][] = [];
+    const runner = (args: readonly string[]): string => {
+      calls.push([...args]);
+      if (args[0] === "d1") {
+        return JSON.stringify([
+          {
+            results: [canaryRow],
+          },
+        ]);
+      }
+      return "";
+    };
+    const result = await ensureStagingCanary({
+      runner,
+      cwd: root,
+      target: staging,
+      manifest: {
+        assets: [
+          {
+            path: "assets/tako.png",
+            sha256: digest,
+            size: icon.byteLength,
+          },
+        ],
+      } as unknown as StoreArtifactManifest,
+    });
+    expect(result).toEqual({
+      id: "tako/takos",
+      sourceGit: "https://github.com/tako0614/takos.git",
+      sourcePath: "deploy/opentofu",
+      iconDigest: digest,
+    });
+    expect(calls[0]).toContain(
+      `${staging.iconsBucketName}/icons/${digest.slice(7)}`,
+    );
+    expect(calls[1]?.join(" ")).toContain("INSERT OR IGNORE INTO listings");
+    expect(calls[1]?.join(" ")).not.toContain("ON CONFLICT");
+
+    const conflictRunner = (args: readonly string[]): string =>
+      args[0] === "d1"
+        ? JSON.stringify([
+            {
+              results: [
+                {
+                  ...canaryRow,
+                  status: "hidden",
+                },
+              ],
+            },
+          ])
+        : "";
+    await expect(
+      ensureStagingCanary({
+        runner: conflictRunner,
+        cwd: root,
+        target: staging,
+        manifest: {
+          assets: [
+            {
+              path: "assets/tako.png",
+              sha256: digest,
+              size: icon.byteLength,
+            },
+          ],
+        } as unknown as StoreArtifactManifest,
+      }),
+    ).rejects.toThrow("staging_canary_readback_mismatch");
+  });
+
   test("retains schema-applied authority when upload fails after D1 mutation", async () => {
     const root = await mkdtemp(join(tmpdir(), "store-release-journal-test-"));
     temporaryRoots.push(root);
@@ -230,7 +351,7 @@ describe("release mutation safety", () => {
       return "";
     };
     const envelope = {
-      releaseId: "takosumi-store-0.1.8-attempt-1",
+      releaseId: "takosumi-store-0.1.9-attempt-1",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests: ["sha256:a", "sha256:b", "sha256:c"] },
     } as unknown as ReleaseEnvelope;

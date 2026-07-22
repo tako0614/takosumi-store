@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  CANONICAL_CANARY_SOURCE_GIT,
   PRODUCTION_ATTESTATION_FILE,
   STAGING_ATTESTATION_FILE,
   SURFACE_ID,
@@ -310,6 +311,138 @@ export function migrationLineageMatches(
   );
 }
 
+const STAGING_CANARY_ASSET_PATH = "assets/tako.png";
+const STAGING_CANARY_TIMESTAMP = "2026-07-22T00:00:00.000Z";
+
+function sqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function findCanaryRow(value: unknown): JsonObject | null {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = findCanaryRow(entry);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const object = value as JsonObject;
+  if (object.id === "tako/takos") return object;
+  for (const child of Object.values(object)) {
+    const found = findCanaryRow(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Materialize the one fixed public canary required by the staging readback.
+ *
+ * This is deliberately staging-only, content-addressed, and insert-only. A
+ * conflicting retained row blocks the release instead of being overwritten.
+ */
+export async function ensureStagingCanary(options: {
+  readonly runner: WranglerRunner;
+  readonly cwd: string;
+  readonly target: TargetPolicy;
+  readonly manifest: StoreArtifactManifest;
+}): Promise<JsonObject> {
+  const asset = options.manifest.assets.find(
+    (entry) => entry.path === STAGING_CANARY_ASSET_PATH,
+  );
+  if (!asset) throw new Error("staging_canary_asset_missing");
+  const iconPath = join(options.cwd, "artifact", asset.path);
+  const iconBytes = await readFile(iconPath);
+  const iconDigest = sha256Bytes(iconBytes);
+  if (iconDigest !== asset.sha256 || iconBytes.byteLength !== asset.size) {
+    throw new Error("staging_canary_asset_digest_mismatch");
+  }
+  const iconKey = `icons/${iconDigest.slice("sha256:".length)}`;
+  const iconUrl = `${options.target.origin.replace(/\/$/u, "")}/${iconKey}`;
+  options.runner(
+    [
+      "r2",
+      "object",
+      "put",
+      `${options.target.iconsBucketName}/${iconKey}`,
+      "--remote",
+      "--force",
+      "--config",
+      "wrangler.toml",
+      "--file",
+      `artifact/${asset.path}`,
+      "--content-type",
+      "image/png",
+      "--cache-control",
+      "public, max-age=31536000, immutable",
+    ],
+    { cwd: options.cwd },
+  );
+  const values: Record<string, string> = {
+    id: "tako/takos",
+    scope: "tako",
+    slug: "takos",
+    git: CANONICAL_CANARY_SOURCE_GIT,
+    ref: "",
+    path: "deploy/opentofu",
+    kind: "worker",
+    surface: "service",
+    provider: "cloudflare",
+    category: "workspace",
+    tags: '["workspace","ai"]',
+    suggested_name: "takos",
+    name_ja: "Takos",
+    name_en: "Takos",
+    description_ja: "AI workspace",
+    description_en: "AI workspace",
+    badge_ja: "Installable",
+    badge_en: "Installable",
+    icon_url: iconUrl,
+    inputs: "[]",
+    output_allowlist: "[]",
+    publisher_handle: "tako",
+    publisher_display_name: "Takos",
+    status: "visible",
+    created_at: STAGING_CANARY_TIMESTAMP,
+    updated_at: STAGING_CANARY_TIMESTAMP,
+  };
+  const columns = Object.keys(values);
+  const command = [
+    `INSERT OR IGNORE INTO listings (${columns.join(", ")}) VALUES (${columns
+      .map((column) => sqlLiteral(values[column]!))
+      .join(", ")});`,
+    `SELECT ${columns.join(", ")} FROM listings WHERE id = 'tako/takos';`,
+  ].join(" ");
+  const readback = parseJsonOutput(
+    options.runner(
+      [
+        "d1",
+        "execute",
+        options.target.databaseName,
+        "--remote",
+        "--config",
+        "wrangler.toml",
+        "--command",
+        command,
+        "--json",
+      ],
+      { cwd: options.cwd },
+    ),
+    "staging_canary_readback",
+  );
+  const row = findCanaryRow(readback);
+  if (!row || columns.some((column) => row[column] !== values[column])) {
+    throw new Error("staging_canary_readback_mismatch");
+  }
+  return {
+    id: row.id,
+    sourceGit: row.git,
+    sourcePath: row.path,
+    iconDigest,
+  };
+}
+
 export async function deploySealedStore(options: {
   readonly runner: WranglerRunner;
   readonly cwd: string;
@@ -528,6 +661,14 @@ export async function deploySealedStore(options: {
   );
   if (!migrationLineageMatches(migrationLineage, options.manifest)) {
     throw new Error("d1_migration_lineage_mismatch");
+  }
+  if (options.journal?.environment === "staging") {
+    await ensureStagingCanary({
+      runner: options.runner,
+      cwd: options.cwd,
+      target: options.target,
+      manifest: options.manifest,
+    });
   }
   let versionId =
     typeof journal?.versionId === "string" ? journal.versionId : null;
