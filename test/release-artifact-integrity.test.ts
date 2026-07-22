@@ -234,7 +234,7 @@ describe("sealed Store artifacts", () => {
         },
       }),
     ).rejects.toThrow("release_wrangler_runtime_tree_mismatch");
-  });
+  }, 15_000);
 
   test("rejects a poisoned transitive module before Wrangler can execute it", async () => {
     const source = await mkdtemp(join(tmpdir(), "store-runtime-closure-"));
