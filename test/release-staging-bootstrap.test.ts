@@ -14,7 +14,9 @@ import {
   assertBootstrapAuthorityActive,
   assertStagingOnlyEnvironment,
   exactD1Id,
+  exactDomain,
   exactKvId,
+  exactR2,
   exactWorkerPresent,
   makeStagingConfig,
   planStoreStagingRecovery,
@@ -291,6 +293,78 @@ describe("fixed one-time Store staging bootstrap", () => {
         "store-staging-bootstrap-test-0001",
       ),
     ).toMatchObject({ id: versionId });
+  });
+
+  test("reads exact R2 and custom-domain present and absent states", async () => {
+    let bucketPresent = false;
+    let domainOwner: string | null = null;
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path, query) {
+        if (path.endsWith("/r2/buckets")) {
+          expect(query).toEqual({
+            name_contains: rawPolicy.staging.iconsBucketName,
+            per_page: "1000",
+          });
+          return {
+            status: "ok",
+            result: {
+              buckets: bucketPresent
+                ? [{ name: rawPolicy.staging.iconsBucketName }]
+                : [],
+            },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/workers/domains")) {
+          expect(query).toEqual({
+            hostname: rawPolicy.staging.customDomainHostname,
+          });
+          return {
+            status: "ok",
+            result: domainOwner
+              ? [
+                  {
+                    id: "domain-1",
+                    hostname: rawPolicy.staging.customDomainHostname,
+                    service: domainOwner,
+                  },
+                ]
+              : [],
+            resultInfo: null,
+          };
+        }
+        throw new Error(`unexpected_topology_read:${path}`);
+      },
+    };
+    expect(
+      await exactR2(client, rawPolicy.staging.iconsBucketName),
+    ).toBeFalse();
+    expect(
+      await exactDomain(
+        client,
+        rawPolicy.staging.customDomainHostname,
+        rawPolicy.staging.workerName,
+      ),
+    ).toBeNull();
+    bucketPresent = true;
+    domainOwner = rawPolicy.staging.workerName;
+    expect(await exactR2(client, rawPolicy.staging.iconsBucketName)).toBeTrue();
+    expect(
+      await exactDomain(
+        client,
+        rawPolicy.staging.customDomainHostname,
+        rawPolicy.staging.workerName,
+      ),
+    ).toMatchObject({ service: rawPolicy.staging.workerName });
+    domainOwner = "wrong-worker";
+    await expect(
+      exactDomain(
+        client,
+        rawPolicy.staging.customDomainHostname,
+        rawPolicy.staging.workerName,
+      ),
+    ).rejects.toThrow("bootstrap_domain_owner_mismatch");
   });
 
   test("adoption permanently revokes cleanup and quarantine retains backing storage", () => {
