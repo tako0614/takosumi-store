@@ -392,3 +392,23 @@ describe("fresh replica evidence", () => {
     }
   });
 });
+
+describe("deploy entrypoint custody", () => {
+  test("keeps raw Wrangler deployment out of the supported Store paths", async () => {
+    const packageJson = JSON.parse(
+      await readFile(join(import.meta.dir, "..", "package.json"), "utf8"),
+    ) as { scripts?: Record<string, string> };
+    const deployDocs = await readFile(
+      join(import.meta.dir, "..", "docs", "deploy.md"),
+      "utf8",
+    );
+
+    expect(packageJson.scripts?.deploy).toBeUndefined();
+    expect(packageJson.scripts?.["deploy:self-host"]).toBe(
+      "bun scripts/self-host-deploy.ts",
+    );
+    expect(deployDocs).not.toContain("bunx wrangler deploy");
+    expect(deployDocs).not.toContain("An official deployment can use");
+    expect(deployDocs).toContain("bun run deploy:self-host");
+  });
+});
