@@ -13,5 +13,12 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["spec", "src", "test", "web/src"]
+  "include": [
+    "spec",
+    "src",
+    "test",
+    "web/src",
+    "scripts/store-release*.ts",
+    "scripts/self-host-deploy.ts"
+  ]
 }

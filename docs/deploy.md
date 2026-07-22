@@ -19,17 +19,20 @@ this repository does not claim that the Store is preinstalled or featured.
 
 ```bash
 bun install
-# provision backing resources, then copy wrangler.toml outside the repository
-# and replace every example value in that operator-owned configuration:
+# Provision uniquely named self-host resources. Do not reuse any of the
+# official Store identities. Then copy wrangler.toml outside the repository and
+# replace every example value in that operator-owned configuration:
 export STORE_WRANGLER_CONFIG=/path/to/takosumi-store.production.toml
-bunx wrangler d1 create takosumi-store-db
-bunx wrangler kv namespace create takosumi-store-kv
-bunx wrangler r2 bucket create takosumi-store-icons
-bunx wrangler d1 migrations apply takosumi-store-db \
-  --config "$STORE_WRANGLER_CONFIG"                  # apply 0001 + 0002
-# build the SPA and deploy the worker (serves SPA + API on one origin):
-bun run build
-bunx wrangler deploy --config "$STORE_WRANGLER_CONFIG"
+bunx wrangler d1 create my-store-db
+bunx wrangler kv namespace create my-store-kv
+bunx wrangler r2 bucket create my-store-icons
+bunx wrangler d1 migrations apply my-store-db \
+  --config "$STORE_WRANGLER_CONFIG"                  # apply every migration in migrations/
+# Build and deploy through the guarded self-host wrapper. The realized config
+# must use a Worker name other than `takosumi-store` and a non-official origin.
+bun run deploy:self-host -- \
+  --i-understand-this-is-self-host \
+  --config "$STORE_WRANGLER_CONFIG"
 # optional: enable publishing
 bunx wrangler secret put SESSION_HASH_SALT \
   --config "$STORE_WRANGLER_CONFIG"                 # openssl rand -hex 32
@@ -37,19 +40,22 @@ bunx wrangler secret put SESSION_HASH_SALT \
 #   (register redirect_uri <origin>/account/callback with the issuer)
 ```
 
-`APP_URL` should be your routed origin (used for ServerInfo.baseUrl, OIDC
-redirect, and install-link host de-dup).
-
-An official deployment can use:
-
-```text
-APP_URL=https://store.takosumi.com
-route=store.takosumi.com/*
-```
+`APP_URL` should be your non-official routed origin (used for
+ServerInfo.baseUrl, OIDC redirect, and install-link host de-dup). The self-host
+path must never use `store.takosumi.com`, the Worker name `takosumi-store`, or
+the official backing-resource identities.
 
 Publishing remains disabled unless `SESSION_HASH_SALT`,
 `TAKOSUMI_ACCOUNTS_ISSUER_URL`, and `TAKOSUMI_ACCOUNTS_CLIENT_ID` are configured
 for the deployment.
+
+The wrapper refuses the official `store.takosumi.com` target and any invocation
+under the ecosystem release controller. It also rejects the canonical official
+custom-domain route and the public official D1, KV, and R2 names. Cloudflare's
+opaque resource IDs are not copied into this public repository; isolation for
+those IDs is fail-closed through separate official account/token custody. The
+official Store is released only through
+[the fixed release-safety flow](./release-safety.md).
 
 ## Consuming the store
 
@@ -66,8 +72,9 @@ publishing this Store itself as an installable app:
 
 1. Push this repo to its remote (`https://github.com/tako0614/takosumi-store.git`).
 2. Run the public CI and release verification against the exact candidate SHA.
-3. Tag the exact verified release commit as `v0.1.1`; never rebuild or overwrite
-   a release tag.
+3. Create a signed annotated `v0.1.1` tag at that exact commit and push both the
+   commit and tag. The candidate builder rejects lightweight, unsigned,
+   unpushed, or differently peeled tags.
 4. Register it as a submodule from the ecosystem root once the remote exists:
    `git submodule add https://github.com/tako0614/takosumi-store.git takosumi-store`.
 5. Register the Store listing or distribution entry with the repository URL and
