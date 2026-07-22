@@ -18,7 +18,7 @@ export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
 export const CANONICAL_CANARY_SOURCE_GIT =
   "https://github.com/tako0614/takos.git";
-export const VERSION = "0.1.7";
+export const VERSION = "0.1.8";
 export const TAG = `v${VERSION}`;
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
 export const ARTIFACT_MANIFEST_FILE = "takosumi-store-artifact-manifest.json";
@@ -1023,7 +1023,9 @@ export async function walkFiles(
   const output: StoreArtifactFile[] = [];
   async function walk(directory: string, childPrefix: string): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name, "en"));
+    entries.sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    );
     for (const entry of entries) {
       if (entry.isSymbolicLink()) throw new Error("artifact_symlink_forbidden");
       const absolute = join(directory, entry.name);

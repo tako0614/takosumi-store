@@ -26,6 +26,7 @@ import {
   sha256Bytes,
   verifyActualToolchain,
   verifyArtifact,
+  walkFiles,
   writePrivateJson,
   type ReleaseEnvelope,
   type StoreArtifactManifest,
@@ -165,6 +166,17 @@ async function fixture(): Promise<{
 }
 
 describe("sealed Store artifacts", () => {
+  test("orders mixed-case artifact paths by the validator's codepoint order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-artifact-order-"));
+    temporaryRoots.push(root);
+    await writeFile(join(root, "tako.png"), "lowercase\n");
+    await writeFile(join(root, "THIRD_PARTY_NOTICES.txt"), "uppercase\n");
+    expect((await walkFiles(root)).map((entry) => entry.path)).toEqual([
+      "THIRD_PARTY_NOTICES.txt",
+      "tako.png",
+    ]);
+  });
+
   test("recomputes every file, set, and aggregate digest", async () => {
     const value = await fixture();
     await expect(

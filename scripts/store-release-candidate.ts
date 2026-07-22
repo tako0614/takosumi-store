@@ -36,6 +36,7 @@ import {
   secureResolveInside,
   sha256Bytes,
   targetFingerprint,
+  validateArtifactManifest,
   validateRealizedConfig,
   walkFiles,
   writePrivateJson,
@@ -488,6 +489,7 @@ export async function buildStoreReleaseCandidate(options: {
       wranglerPackageJsonDigest,
       nodeModulesRuntimeDigest,
     });
+    validateArtifactManifest(manifest);
     await hardenArtifactTree(artifactRoot);
     const artifactManifestPath = join(artifactRoot, ARTIFACT_MANIFEST_FILE);
     await writePrivateJson(artifactManifestPath, manifest);
