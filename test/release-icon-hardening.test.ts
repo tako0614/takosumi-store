@@ -184,12 +184,12 @@ const indexBytes = Buffer.from("<!doctype html><title>Store</title>\n");
 const manifest = {
   assets: [
     {
-      path: "assets/index-release.js",
+      path: "assets/assets/index-release.js",
       size: staticBytes.byteLength,
       sha256: sha256Bytes(staticBytes),
     },
     {
-      path: "index.html",
+      path: "assets/index.html",
       size: indexBytes.byteLength,
       sha256: sha256Bytes(indexBytes),
     },
@@ -217,7 +217,7 @@ function stubLiveStore(options: {
       return json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.9",
+        version: "0.1.10",
       });
     }
     if (url.pathname === "/readyz") {
@@ -226,7 +226,7 @@ function stubLiveStore(options: {
     if (url.pathname === "/.well-known/tcs") {
       return json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.9" },
+          software: { name: "takosumi-store", version: "0.1.10" },
           baseUrl: production.origin,
         },
       });
@@ -268,7 +268,7 @@ function stubLiveStore(options: {
         headers: { "content-type": "text/javascript" },
       });
     }
-    if (url.pathname === "/release-safety/0.1.9/fallback") {
+    if (url.pathname === "/release-safety/0.1.10/fallback") {
       return new Response(indexBytes, {
         headers: { "content-type": "text/html" },
       });

@@ -110,7 +110,7 @@ function installLiveFetchMock(): void {
       return Response.json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.9",
+        version: "0.1.10",
       });
     }
     if (url.pathname === "/readyz") {
@@ -122,7 +122,7 @@ function installLiveFetchMock(): void {
     if (url.pathname === "/.well-known/tcs") {
       return Response.json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.9" },
+          software: { name: "takosumi-store", version: "0.1.10" },
           baseUrl: "https://store.takosumi.com",
         },
       });
@@ -201,7 +201,7 @@ describe("release operation journal retry", () => {
       };
       const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
       const envelope = {
-        releaseId: "takosumi-store-0.1.9-retry",
+        releaseId: "takosumi-store-0.1.10-retry",
         source: { commit: "d".repeat(40) },
         candidate: { artifactDigests },
       } as unknown as ReleaseEnvelope;
@@ -237,8 +237,11 @@ describe("release operation journal retry", () => {
           path: `migrations/${name}`,
         })),
         assets: [
-          { path: "assets/index-review.js", sha256: sha256Bytes(staticBytes) },
-          { path: "index.html", sha256: sha256Bytes(indexBytes) },
+          {
+            path: "assets/assets/index-review.js",
+            sha256: sha256Bytes(staticBytes),
+          },
+          { path: "assets/index.html", sha256: sha256Bytes(indexBytes) },
         ],
       } as unknown as StoreArtifactManifest;
       await expect(
