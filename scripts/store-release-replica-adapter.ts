@@ -9,6 +9,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +40,9 @@ import {
   parseJsonOutput,
   runLiveChecks,
   sha256Bytes,
+  targetFingerprint,
   validateEnvelope,
+  validateRealizedConfig,
   verifyActualToolchain,
   verifyArtifact,
   verifySourceAuthority,
@@ -101,6 +104,8 @@ const FORWARD_REPAIR_PROGRESS_FILE =
   "worker-release-replica-forward-repair-progress.json";
 const FORWARD_REPAIR_OPERATION_FILE =
   "worker-release-replica-forward-repair-operation.json";
+const PROVISION_OPERATION_FILE =
+  "worker-release-replica-provision-operation.json";
 const REPLICA_CONFIG_FILE = "worker-release-replica-runtime-config.json";
 const REPLICA_SNAPSHOT_FILE = "worker-release-replica-sanitized-snapshot.json";
 const PRODUCTION_EXPORT_PROVENANCE_FILE =
@@ -584,10 +589,11 @@ function replicaHealthChecks(
   return checks;
 }
 
-function validateForwardRepairOperation(
+function validateReplicaReleaseOperation(
   value: unknown,
   envelope: ReleaseEnvelope,
   target: TargetPolicy,
+  environment: "replica-provision" | "replica-forward-repair",
 ): JsonObject {
   assertExactObjectKeys(
     value,
@@ -603,9 +609,10 @@ function validateForwardRepairOperation(
       "preDeploymentDigest",
       "phase",
       "versionId",
+      "preUploadVersionIds",
       "updatedAt",
     ],
-    "replica_forward_repair_operation",
+    "replica_release_operation",
   );
   assertExactObjectKeys(
     value.target,
@@ -617,21 +624,24 @@ function validateForwardRepairOperation(
       "iconsBucketName",
       "origin",
     ],
-    "replica_forward_repair_operation_target",
+    "replica_release_operation_target",
   );
   const phases = [
     "intent-recorded",
     "schema-applied",
+    "upload-intent-recorded",
     "version-uploaded",
     "deployed",
     "verified",
   ];
   const phase = String(value.phase);
   const phaseIndex = phases.indexOf(phase);
+  const uploadIntentRequired =
+    phaseIndex >= phases.indexOf("upload-intent-recorded");
   const versionRequired = phaseIndex >= phases.indexOf("version-uploaded");
   if (
     value.kind !== "takosumi.store-release-operation@v1" ||
-    value.environment !== "replica-forward-repair" ||
+    value.environment !== environment ||
     value.surfaceId !== SURFACE_ID ||
     value.releaseId !== envelope.releaseId ||
     value.sourceCommit !== envelope.source.commit ||
@@ -649,13 +659,36 @@ function validateForwardRepairOperation(
       }) ||
     value.preDeploymentDigest !== digestJson({ versions: [] }) ||
     phaseIndex < 0 ||
+    uploadIntentRequired !== Array.isArray(value.preUploadVersionIds) ||
+    (uploadIntentRequired &&
+      (value.preUploadVersionIds as unknown[]).some(
+        (id) => typeof id !== "string" || !UUID.test(id),
+      )) ||
+    (uploadIntentRequired &&
+      canonicalJson(value.preUploadVersionIds) !==
+        canonicalJson(
+          [...new Set(value.preUploadVersionIds as string[])].sort(),
+        )) ||
     versionRequired !== (typeof value.versionId === "string") ||
     (versionRequired && !UUID.test(String(value.versionId))) ||
     !Number.isFinite(Date.parse(String(value.updatedAt)))
   ) {
-    throw new Error("replica_forward_repair_operation_authority_mismatch");
+    throw new Error("replica_release_operation_authority_mismatch");
   }
   return value;
+}
+
+function validateForwardRepairOperation(
+  value: unknown,
+  envelope: ReleaseEnvelope,
+  target: TargetPolicy,
+): JsonObject {
+  return validateReplicaReleaseOperation(
+    value,
+    envelope,
+    target,
+    "replica-forward-repair",
+  );
 }
 
 export async function recoverForwardRepairCleanupProgress(options: {
@@ -664,6 +697,8 @@ export async function recoverForwardRepairCleanupProgress(options: {
   config: ReplicaConfig;
   evidenceDirectory: string;
   readbackListingPath: string;
+  runner: WranglerRunner;
+  cwd: string;
 }): Promise<Progress> {
   try {
     const initialInventory = validateInventory(
@@ -708,24 +743,99 @@ export async function recoverForwardRepairCleanupProgress(options: {
       options.envelope,
       repairTarget,
     );
-    if (
-      !["version-uploaded", "deployed", "verified"].includes(
-        String(operation.phase),
-      ) ||
-      !UUID.test(String(operation.versionId)) ||
-      operation.versionId === initialInventory.target.versionId
-    ) {
+    const recoveredVersionId = readOwnedOperationVersionId({
+      operation,
+      envelope: options.envelope,
+      target: repairTarget,
+      runner: options.runner,
+      cwd: options.cwd,
+    });
+    if (!recoveredVersionId) {
       return options.progress;
+    }
+    if (recoveredVersionId === initialInventory.target.versionId) {
+      throw new Error("replica_forward_repair_reused_removed_version");
     }
     return {
       ...updateResource(options.progress, "worker", {
-        id: String(operation.versionId),
+        id: recoveredVersionId,
         state: "present",
       }),
       completedSteps: [
         ...new Set([
           ...options.progress.completedSteps,
           `forward-repair-cleanup-recovery:${digestJson(forwardProgress)}`,
+        ]),
+      ],
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("ENOENT")) {
+      return options.progress;
+    }
+    throw error;
+  }
+}
+
+export async function recoverProvisionCleanupProgress(options: {
+  progress: Progress;
+  envelope: ReleaseEnvelope;
+  config: ReplicaConfig;
+  evidenceDirectory: string;
+  readbackListingPath: string;
+  runner: WranglerRunner;
+  cwd: string;
+}): Promise<Progress> {
+  try {
+    const databaseId = options.progress.resources.find(
+      (resource) => resource.type === "d1",
+    )?.id;
+    const kvNamespaceId = options.progress.resources.find(
+      (resource) => resource.type === "kv",
+    )?.id;
+    if (!databaseId || !kvNamespaceId) return options.progress;
+    const target: TargetPolicy = {
+      configPath: "replica-generated.toml",
+      accountId: options.config.target.accountId,
+      workerName: options.config.target.workerName,
+      origin: options.config.target.origin,
+      databaseName: options.config.target.databaseName,
+      databaseId,
+      kvNamespaceId,
+      iconsBucketName: options.config.target.iconsBucketName,
+      publishCapability: false,
+      compatibilityDate: "2026-06-25",
+      compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+      requiredVarNames: ["APP_URL"],
+      requiredSecretNames: [],
+      customDomainHostname: new URL(options.config.target.origin).hostname,
+      readbackListingPath: options.readbackListingPath,
+    };
+    const operation = validateReplicaReleaseOperation(
+      await readPrivateJson(
+        join(options.evidenceDirectory, PROVISION_OPERATION_FILE),
+        options.evidenceDirectory,
+      ),
+      options.envelope,
+      target,
+      "replica-provision",
+    );
+    const recoveredVersionId = readOwnedOperationVersionId({
+      operation,
+      envelope: options.envelope,
+      target,
+      runner: options.runner,
+      cwd: options.cwd,
+    });
+    if (!recoveredVersionId) return options.progress;
+    return {
+      ...updateResource(options.progress, "worker", {
+        id: recoveredVersionId,
+        state: "present",
+      }),
+      completedSteps: [
+        ...new Set([
+          ...options.progress.completedSteps,
+          `provision-cleanup-recovery:${digestJson(operation)}`,
         ]),
       ],
     };
@@ -1215,11 +1325,13 @@ function detectIconMediaType(bytes: Uint8Array): string {
   throw new Error("replica_production_export_icon_media_type_invalid");
 }
 
-async function readProductionIcon(options: {
+export async function readProductionIcon(options: {
   listing: JsonObject;
   policy: TargetPolicy;
   runner: WranglerRunner;
   cwd: string;
+  productionConfigPath: string;
+  cloudflareReadClient: CloudflareReadClient;
 }): Promise<{
   readonly bytes: Uint8Array;
   readonly mediaType: string;
@@ -1240,6 +1352,34 @@ async function readProductionIcon(options: {
   if (iconUrl.origin === options.policy.origin.replace(/\/$/u, "")) {
     const match = /^\/icons\/([0-9a-f]{64})$/u.exec(iconUrl.pathname);
     if (!match) throw new Error("replica_production_export_r2_icon_invalid");
+    if (options.cloudflareReadClient.accountId !== options.policy.accountId) {
+      throw new Error("replica_production_export_r2_account_mismatch");
+    }
+    const objectKey = `icons/${match[1]}`;
+    const objectMetadata = await options.cloudflareReadClient.get(
+      `/accounts/${encodeURIComponent(options.policy.accountId)}/r2/buckets/${encodeURIComponent(options.policy.iconsBucketName)}/objects`,
+      { prefix: objectKey, per_page: "1000" },
+    );
+    if (objectMetadata.status !== "ok" || !isRecord(objectMetadata.result)) {
+      throw new Error("replica_production_export_r2_icon_metadata_missing");
+    }
+    const objects = objectMetadata.result.objects;
+    if (!Array.isArray(objects)) {
+      throw new Error("replica_production_export_r2_icon_metadata_invalid");
+    }
+    const matches = objects.filter(
+      (entry) => isRecord(entry) && entry.key === objectKey,
+    );
+    if (
+      matches.length !== 1 ||
+      typeof matches[0]!.size !== "number" ||
+      !Number.isSafeInteger(matches[0]!.size) ||
+      matches[0]!.size <= 0 ||
+      matches[0]!.size > 1024 * 1024
+    ) {
+      throw new Error("replica_production_export_icon_size_invalid");
+    }
+    const expectedSize = matches[0]!.size;
     const root = await mkdtemp(join(tmpdir(), "store-production-icon-"));
     await chmod(root, 0o700);
     try {
@@ -1249,13 +1389,23 @@ async function readProductionIcon(options: {
           "r2",
           "object",
           "get",
-          `${options.policy.iconsBucketName}/icons/${match[1]}`,
+          `${options.policy.iconsBucketName}/${objectKey}`,
           "--remote",
+          "--config",
+          options.productionConfigPath,
           "--file",
           output,
         ],
         { cwd: options.cwd },
       );
+      const metadata = await stat(output);
+      if (
+        !metadata.isFile() ||
+        metadata.size !== expectedSize ||
+        metadata.size > 1024 * 1024
+      ) {
+        throw new Error("replica_production_export_icon_size_invalid");
+      }
       const bytes = await readFile(output);
       if (sha256Bytes(bytes) !== `sha256:${match[1]}`) {
         throw new Error("replica_production_export_r2_icon_digest_mismatch");
@@ -1290,10 +1440,7 @@ async function readProductionIcon(options: {
     if (contentLength > 1024 * 1024) {
       throw new Error("replica_production_export_icon_too_large");
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength === 0 || bytes.byteLength > 1024 * 1024) {
-      throw new Error("replica_production_export_icon_size_invalid");
-    }
+    const bytes = await readBoundedResponseBody(response, 1024 * 1024);
     const mediaType = (response.headers.get("content-type") ?? "")
       .split(";", 1)[0]!
       .trim()
@@ -1309,6 +1456,39 @@ async function readProductionIcon(options: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    throw new Error("replica_production_export_icon_body_missing");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("replica_production_export_icon_size_invalid");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) {
+    throw new Error("replica_production_export_icon_size_invalid");
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    total,
+  );
 }
 
 function isInsidePath(path: string, root: string): boolean {
@@ -1398,6 +1578,7 @@ async function readSnapshotEncryptionKey(
 export interface SnapshotCryptoAuthority {
   readonly configFingerprint: string;
   readonly migrationPlanDigest: string;
+  readonly productionConfigDigest: string;
   readonly productionTargetFingerprint: string;
 }
 
@@ -1417,6 +1598,7 @@ function snapshotAad(
       policyDigest: envelope.candidate.policyDigest,
       configFingerprint: authority.configFingerprint,
       migrationPlanDigest: authority.migrationPlanDigest,
+      productionConfigDigest: authority.productionConfigDigest,
       productionTargetFingerprint: authority.productionTargetFingerprint,
     }),
   );
@@ -1514,12 +1696,41 @@ export function decryptSnapshot(
   }
 }
 
+interface ProductionConfigAuthority {
+  readonly configDigest: string;
+  readonly targetFingerprint: string;
+  readonly bytes: Uint8Array;
+}
+
+async function validateProductionConfigAuthority(options: {
+  readonly path: string;
+  readonly policy: TargetPolicy;
+  readonly envelope: ReleaseEnvelope;
+}): Promise<ProductionConfigAuthority> {
+  const bytes = await readFile(options.path);
+  validateRealizedConfig(bytes, options.policy);
+  const configDigest = sha256Bytes(bytes);
+  const fingerprint = targetFingerprint(
+    options.policy,
+    configDigest,
+    options.envelope.candidate.policyDigest,
+  );
+  if (
+    configDigest !== options.envelope.candidate.configDigest ||
+    fingerprint !== options.envelope.candidate.targetFingerprint
+  ) {
+    throw new Error("replica_production_config_authority_mismatch");
+  }
+  return { configDigest, targetFingerprint: fingerprint, bytes };
+}
+
 export async function prepareReplicaInput(options: {
   envelope: ReleaseEnvelope;
   policy: TargetPolicy;
   manifest: StoreArtifactManifest;
   evidenceDirectory: string;
   runner: WranglerRunner;
+  cloudflareReadClient: CloudflareReadClient;
   productionConfigPath: string;
 }): Promise<{ readonly evidence: JsonObject; readonly bytes: Uint8Array }> {
   const subdomainPath =
@@ -1588,36 +1799,139 @@ export async function prepareReplicaInput(options: {
     config,
     options.evidenceDirectory,
   );
+  const productionConfigAuthority = await validateProductionConfigAuthority({
+    path: options.productionConfigPath,
+    policy: options.policy,
+    envelope: options.envelope,
+  });
   const snapshotCryptoAuthority: SnapshotCryptoAuthority = {
     configFingerprint: sha256Bytes(configBytes),
     migrationPlanDigest: options.manifest.digests.migrations,
-    productionTargetFingerprint: digestJson(config.productionTarget),
+    productionConfigDigest: productionConfigAuthority.configDigest,
+    productionTargetFingerprint: productionConfigAuthority.targetFingerprint,
   };
-  const exportQuery = `SELECT ${PRODUCTION_EXPORT_COLUMNS.join(", ")} FROM listings WHERE id = 'tako/takos'`;
-  const productionReadback = parseJsonOutput(
-    options.runner(
-      [
-        "d1",
-        "execute",
-        options.policy.databaseName,
-        "--remote",
-        "--config",
-        options.productionConfigPath,
-        "--command",
-        exportQuery,
-        "--json",
-      ],
-      { cwd: options.evidenceDirectory },
-    ),
-    "replica_production_export",
+  const snapshotKey = await readSnapshotEncryptionKey(
+    options.evidenceDirectory,
   );
-  const productionListing = findExactProductionListing(productionReadback);
-  const productionIcon = await readProductionIcon({
-    listing: productionListing,
+  const retained = await readCompleteRetainedReplicaInput({
+    envelope: options.envelope,
     policy: options.policy,
-    runner: options.runner,
-    cwd: options.evidenceDirectory,
+    manifest: options.manifest,
+    evidenceDirectory: options.evidenceDirectory,
+    config,
+    configBytes,
+    snapshotKey,
+    snapshotCryptoAuthority,
+    productionConfigAuthority,
   });
+  if (retained) return retained;
+
+  // A retry consumes already retained, authenticated material before it is
+  // allowed to query production again. This closes the interruption window
+  // after snapshot/provenance retention but before final input evidence.
+  const retainedMaterial = await readRetainedReplicaMaterial({
+    envelope: options.envelope,
+    policy: options.policy,
+    evidenceDirectory: options.evidenceDirectory,
+    config,
+    snapshotKey,
+    snapshotCryptoAuthority,
+    productionConfigAuthority,
+  });
+  if (retainedMaterial) {
+    const evidence = makeReplicaInputEvidence({
+      envelope: options.envelope,
+      config,
+      manifest: options.manifest,
+      snapshotScan: retainedMaterial.snapshotScan,
+      snapshotCiphertextDigest: sha256Bytes(
+        retainedMaterial.snapshotCiphertextBytes,
+      ),
+      provenanceDigest: retainedMaterial.provenanceDigest,
+      configFingerprint: sha256Bytes(configBytes),
+      productionConfigAuthority,
+    });
+    const bytes = await retainExactJson(
+      join(options.evidenceDirectory, EVIDENCE_FILES["prepare-input"]),
+      evidence,
+      options.evidenceDirectory,
+    );
+    validateReplicaInputEvidence({
+      value: evidence,
+      envelope: options.envelope,
+      config,
+      manifest: options.manifest,
+      snapshotScan: retainedMaterial.snapshotScan,
+      snapshotCiphertextDigest: sha256Bytes(
+        retainedMaterial.snapshotCiphertextBytes,
+      ),
+      provenanceDigest: retainedMaterial.provenanceDigest,
+      configFingerprint: sha256Bytes(configBytes),
+      productionConfigAuthority,
+    });
+    return { evidence, bytes };
+  }
+
+  const exportQuery = `SELECT ${PRODUCTION_EXPORT_COLUMNS.join(", ")} FROM listings WHERE id = 'tako/takos'`;
+  const immediateProductionConfigAuthority =
+    await validateProductionConfigAuthority({
+      path: options.productionConfigPath,
+      policy: options.policy,
+      envelope: options.envelope,
+    });
+  if (
+    immediateProductionConfigAuthority.configDigest !==
+      productionConfigAuthority.configDigest ||
+    immediateProductionConfigAuthority.targetFingerprint !==
+      productionConfigAuthority.targetFingerprint ||
+    !Buffer.from(immediateProductionConfigAuthority.bytes).equals(
+      Buffer.from(productionConfigAuthority.bytes),
+    )
+  ) {
+    throw new Error("replica_production_config_changed_before_read");
+  }
+  const productionReadRoot = await mkdtemp(
+    join(tmpdir(), "takosumi-store-production-read-"),
+  );
+  await chmod(productionReadRoot, 0o700);
+  const sealedProductionConfigPath = join(productionReadRoot, "wrangler.toml");
+  let productionListing: JsonObject;
+  let productionIcon: Awaited<ReturnType<typeof readProductionIcon>>;
+  try {
+    await writeFile(
+      sealedProductionConfigPath,
+      productionConfigAuthority.bytes,
+      { mode: 0o400, flag: "wx" },
+    );
+    const productionReadback = parseJsonOutput(
+      options.runner(
+        [
+          "d1",
+          "execute",
+          options.policy.databaseName,
+          "--remote",
+          "--config",
+          sealedProductionConfigPath,
+          "--command",
+          exportQuery,
+          "--json",
+        ],
+        { cwd: productionReadRoot },
+      ),
+      "replica_production_export",
+    );
+    productionListing = findExactProductionListing(productionReadback);
+    productionIcon = await readProductionIcon({
+      listing: productionListing,
+      policy: options.policy,
+      runner: options.runner,
+      cwd: productionReadRoot,
+      productionConfigPath: sealedProductionConfigPath,
+      cloudflareReadClient: options.cloudflareReadClient,
+    });
+  } finally {
+    await rm(productionReadRoot, { recursive: true, force: true });
+  }
   const iconBytes = productionIcon.bytes;
   const iconDigest = sha256Bytes(iconBytes);
   const iconKey = `icons/${iconDigest.slice("sha256:".length)}`;
@@ -1634,6 +1948,13 @@ export async function prepareReplicaInput(options: {
   const sqlBytes = Buffer.from(snapshotSql);
   const snapshot = {
     kind: "takosumi.store-sanitized-replica-bundle@v1",
+    source: {
+      rowDigest: digestJson(productionListing),
+      iconSourceKind: productionIcon.sourceKind,
+      iconSourceReferenceDigest: productionIcon.sourceReferenceDigest,
+      iconDigest,
+    },
+    listing: sanitizedListing,
     sqlBase64: sqlBytes.toString("base64"),
     sqlSha256: sha256Bytes(sqlBytes),
     icons: [
@@ -1647,9 +1968,9 @@ export async function prepareReplicaInput(options: {
   };
   const snapshotPath = join(options.evidenceDirectory, REPLICA_SNAPSHOT_FILE);
   const snapshotPlaintext = Buffer.from(`${canonicalJson(snapshot)}\n`);
-  const snapshotKey = await readSnapshotEncryptionKey(
-    options.evidenceDirectory,
-  );
+  // The retained encrypted snapshot is never created until the complete
+  // sanitized row, SQL, and icon payload have passed the bounded scanners.
+  const snapshotScan = scanSanitizedSnapshot(snapshotPlaintext, options.policy);
   let snapshotCiphertextBytes: Uint8Array;
   try {
     snapshotCiphertextBytes = await readPrivateFile(snapshotPath, {
@@ -1679,96 +2000,31 @@ export async function prepareReplicaInput(options: {
       ),
     );
   }
-  const snapshotScan = scanSanitizedSnapshot(snapshotPlaintext, options.policy);
   const snapshotCiphertextDigest = sha256Bytes(snapshotCiphertextBytes);
-  const encryptedSnapshot = JSON.parse(
-    Buffer.from(snapshotCiphertextBytes).toString("utf8"),
-  ) as JsonObject;
-  const provenance = {
-    kind: "takosumi.store-production-export-provenance@v1",
-    status: "verified",
-    surfaceId: SURFACE_ID,
-    releaseId: options.envelope.releaseId,
-    sourceCommit: options.envelope.source.commit,
-    controllerCommit: options.envelope.controllerSource.commit,
-    policyDigest: options.envelope.candidate.policyDigest,
-    productionTargetFingerprint: digestJson(config.productionTarget),
-    exportedAt: createdAt,
-    source: {
-      accountId: options.policy.accountId,
-      databaseName: options.policy.databaseName,
-      databaseId: options.policy.databaseId,
-      queryDigest: sha256Bytes(Buffer.from(exportQuery)),
-      rowDigest: digestJson(productionListing),
-      rowCount: 1,
-      iconSourceKind: productionIcon.sourceKind,
-      iconSourceReferenceDigest: productionIcon.sourceReferenceDigest,
-      iconDigest,
-    },
-    sanitization: {
-      projection: "single-canonical-public-listing",
-      includedColumns: PRODUCTION_EXPORT_COLUMNS,
-      excludedTables: [
-        "publishers",
-        "sessions",
-        "reports",
-        "moderators",
-        "durable_state",
-      ],
-      productionIdentityRewrite: "icon-url-to-replica-origin-placeholder",
-      piiScan: "passed",
-      secretScan: "passed",
-      referentialIntegrity: "passed",
-    },
-    snapshotDigest: snapshotScan.snapshotDigest,
-    snapshotCiphertextDigest,
-    snapshotSqlDigest: snapshotScan.sqlDigest,
-    snapshotScannerDigest: snapshotScan.scannerDigest,
-    encryption: {
-      algorithm: "AES-256-GCM",
-      keyRef: "operator-local-store-replica-snapshot-v1",
-      aadDigest: encryptedSnapshot.aadDigest,
-      ciphertextDigest: snapshotCiphertextDigest,
-      plaintextDigest: snapshotScan.snapshotDigest,
-    },
-  };
+  const provenance = makeProductionExportProvenance({
+    envelope: options.envelope,
+    config,
+    policy: options.policy,
+    snapshotScan,
+    snapshotCiphertextBytes,
+    productionConfigAuthority,
+  });
   const provenanceBytes = await retainExactJson(
     join(options.evidenceDirectory, PRODUCTION_EXPORT_PROVENANCE_FILE),
     provenance,
     options.evidenceDirectory,
   );
   const provenanceDigest = sha256Bytes(provenanceBytes);
-  const evidence = {
-    kind: "takosumi.store-release-replica-input@v1",
-    status: "verified",
-    surfaceId: SURFACE_ID,
-    releaseId: options.envelope.releaseId,
-    sourceCommit: options.envelope.source.commit,
-    controllerCommit: options.envelope.controllerSource.commit,
-    replicaAdapterDigest: options.envelope.authority.replicaAdapterDigest,
-    replicaId,
-    createdAt,
-    expiresAt,
-    configFile: REPLICA_CONFIG_FILE,
-    snapshotFile: REPLICA_SNAPSHOT_FILE,
+  const evidence = makeReplicaInputEvidence({
+    envelope: options.envelope,
+    config,
+    manifest: options.manifest,
+    snapshotScan,
     snapshotCiphertextDigest,
-    snapshotEncryption: "AES-256-GCM",
-    provenanceFile: PRODUCTION_EXPORT_PROVENANCE_FILE,
     provenanceDigest,
     configFingerprint: sha256Bytes(configBytes),
-    migrationPlanDigest: options.manifest.digests.migrations,
-    snapshotDigest: snapshotScan.snapshotDigest,
-    artifactDigests: options.envelope.candidate.artifactDigests,
-    target: config.target,
-    data: {
-      source: "encrypted-anonymized-production-snapshot",
-      piiScan: "passed",
-      secretScan: "passed",
-      referentialIntegrity: "passed",
-      provenanceDigest,
-    },
-    productionFallback: false,
-  };
+    productionConfigAuthority,
+  });
   const bytes = await retainExactJson(
     join(options.evidenceDirectory, EVIDENCE_FILES["prepare-input"]),
     evidence,
@@ -1782,6 +2038,16 @@ export interface SanitizedSnapshotScan {
   readonly sqlDigest: string;
   readonly scannerDigest: string;
   readonly sql: string;
+  readonly listing: JsonObject;
+  readonly rowDigest: string;
+  readonly iconSourceReferenceDigest: string;
+  readonly iconDigest: string;
+  readonly source: {
+    readonly rowDigest: string;
+    readonly iconSourceKind: "production-r2" | "public-https-reference";
+    readonly iconSourceReferenceDigest: string;
+    readonly iconDigest: string;
+  };
   readonly icons: readonly {
     readonly key: string;
     readonly mediaType: string;
@@ -1901,7 +2167,9 @@ export function scanSanitizedSnapshot(
   const exactBundleKeys = Object.keys(parsed).sort();
   if (
     canonicalJson(exactBundleKeys) !==
-      canonicalJson(["icons", "kind", "sqlBase64", "sqlSha256"].sort()) ||
+      canonicalJson(
+        ["icons", "kind", "listing", "source", "sqlBase64", "sqlSha256"].sort(),
+      ) ||
     parsed.kind !== "takosumi.store-sanitized-replica-bundle@v1" ||
     !Array.isArray(parsed.icons) ||
     parsed.icons.length === 0 ||
@@ -1918,6 +2186,40 @@ export function scanSanitizedSnapshot(
     throw new Error("replica_snapshot_sql_invalid");
   }
   assertPublicCatalogSqlOnly(sql);
+  assertExactObjectKeys(
+    parsed.listing,
+    PRODUCTION_EXPORT_COLUMNS,
+    "replica_snapshot_listing",
+  );
+  const listing = parsed.listing;
+  assertExactObjectKeys(
+    parsed.source,
+    ["rowDigest", "iconSourceKind", "iconSourceReferenceDigest", "iconDigest"],
+    "replica_snapshot_source",
+  );
+  const source = parsed.source;
+  if (
+    typeof source.rowDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(source.rowDigest) ||
+    !new Set(["production-r2", "public-https-reference"]).has(
+      String(source.iconSourceKind),
+    ) ||
+    typeof source.iconSourceReferenceDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(source.iconSourceReferenceDigest) ||
+    typeof source.iconDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(source.iconDigest)
+  ) {
+    throw new Error("replica_snapshot_source_invalid");
+  }
+  const expectedSql = [
+    "BEGIN;",
+    `INSERT INTO listings (${PRODUCTION_EXPORT_COLUMNS.join(", ")})`,
+    `VALUES (${PRODUCTION_EXPORT_COLUMNS.map((column) => sqlValue(listing[column])).join(", ")});`,
+    "COMMIT;",
+  ].join("\n");
+  if (sql !== expectedSql) {
+    throw new Error("replica_snapshot_listing_sql_mismatch");
+  }
   for (const identity of [
     production.accountId,
     production.workerName,
@@ -1930,8 +2232,15 @@ export function scanSanitizedSnapshot(
     if (identity && sql.includes(identity)) {
       throw new Error("replica_snapshot_contains_production_identity");
     }
+    if (identity && canonicalJson(listing).includes(identity)) {
+      throw new Error("replica_snapshot_listing_contains_production_identity");
+    }
   }
   assertNoReleaseCredentialOrPii(sql, "replica_snapshot");
+  assertNoReleaseCredentialOrPii(
+    canonicalJson(listing),
+    "replica_snapshot_listing",
+  );
   const icons = parsed.icons.map((entry, index) => {
     if (
       !isRecord(entry) ||
@@ -1984,12 +2293,29 @@ export function scanSanitizedSnapshot(
     };
   });
   if (
+    listing.id !== "tako/takos" ||
+    typeof listing.icon_url !== "string" ||
+    !/^\{\{TAKOSUMI_STORE_REPLICA_ORIGIN\}\}\/icons\/[0-9a-f]{64}$/u.test(
+      listing.icon_url,
+    ) ||
     !sql.includes("tako/takos") ||
     !sql.includes("{{TAKOSUMI_STORE_REPLICA_ORIGIN}}") ||
     new Set(icons.map((icon) => icon.key)).size !== icons.length
   ) {
     throw new Error("replica_snapshot_canonical_listing_or_icon_missing");
   }
+  const listingIconKey = listing.icon_url.slice(
+    "{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/".length,
+  );
+  const listingIcon = icons.find((icon) => icon.key === listingIconKey);
+  if (!listingIcon || icons.length !== 1) {
+    throw new Error("replica_snapshot_listing_icon_binding_mismatch");
+  }
+  if (source.iconDigest !== listingIcon.sha256) {
+    throw new Error("replica_snapshot_source_icon_digest_mismatch");
+  }
+  const rowDigest = digestJson(listing);
+  const iconSourceReferenceDigest = digestJson({ href: listing.icon_url });
   return {
     snapshotDigest: sha256Bytes(bytes),
     sqlDigest,
@@ -1997,6 +2323,8 @@ export function scanSanitizedSnapshot(
       kind: "takosumi.store-snapshot-scan@v1",
       bytes: bytes.byteLength,
       sqlDigest,
+      rowDigest,
+      iconSourceReferenceDigest,
       iconDigests: icons.map((icon) => icon.sha256),
       productionIdentityCount: 7,
       credentialPatternCount: RELEASE_CREDENTIAL_PATTERNS.length,
@@ -2005,7 +2333,81 @@ export function scanSanitizedSnapshot(
       status: "passed",
     }),
     sql,
+    listing,
+    rowDigest,
+    iconSourceReferenceDigest,
+    iconDigest: listingIcon.sha256,
+    source: source as SanitizedSnapshotScan["source"],
     icons,
+  };
+}
+
+function makeProductionExportProvenance(options: {
+  readonly envelope: ReleaseEnvelope;
+  readonly config: ReplicaConfig;
+  readonly policy: TargetPolicy;
+  readonly snapshotScan: SanitizedSnapshotScan;
+  readonly snapshotCiphertextBytes: Uint8Array;
+  readonly productionConfigAuthority: ProductionConfigAuthority;
+}): JsonObject {
+  const exportQuery = `SELECT ${PRODUCTION_EXPORT_COLUMNS.join(", ")} FROM listings WHERE id = 'tako/takos'`;
+  const snapshotCiphertextDigest = sha256Bytes(options.snapshotCiphertextBytes);
+  const encryptedSnapshot = JSON.parse(
+    Buffer.from(options.snapshotCiphertextBytes).toString("utf8"),
+  ) as JsonObject;
+  return {
+    kind: "takosumi.store-production-export-provenance@v1",
+    status: "verified",
+    surfaceId: SURFACE_ID,
+    releaseId: options.envelope.releaseId,
+    sourceCommit: options.envelope.source.commit,
+    controllerCommit: options.envelope.controllerSource.commit,
+    policyDigest: options.envelope.candidate.policyDigest,
+    productionConfigDigest: options.productionConfigAuthority.configDigest,
+    productionTargetFingerprint:
+      options.productionConfigAuthority.targetFingerprint,
+    exportedAt: options.config.createdAt,
+    source: {
+      accountId: options.policy.accountId,
+      databaseName: options.policy.databaseName,
+      databaseId: options.policy.databaseId,
+      queryDigest: sha256Bytes(Buffer.from(exportQuery)),
+      rowDigest: options.snapshotScan.source.rowDigest,
+      rowCount: 1,
+      iconSourceKind: options.snapshotScan.source.iconSourceKind,
+      iconSourceReferenceDigest:
+        options.snapshotScan.source.iconSourceReferenceDigest,
+      iconDigest: options.snapshotScan.source.iconDigest,
+    },
+    sanitization: {
+      projection: "single-canonical-public-listing",
+      includedColumns: PRODUCTION_EXPORT_COLUMNS,
+      excludedTables: [
+        "publishers",
+        "sessions",
+        "reports",
+        "moderators",
+        "durable_state",
+      ],
+      productionIdentityRewrite: "icon-url-to-replica-origin-placeholder",
+      outputRowDigest: options.snapshotScan.rowDigest,
+      outputIconReferenceDigest: options.snapshotScan.iconSourceReferenceDigest,
+      outputIconDigest: options.snapshotScan.iconDigest,
+      piiScan: "passed",
+      secretScan: "passed",
+      referentialIntegrity: "passed",
+    },
+    snapshotDigest: options.snapshotScan.snapshotDigest,
+    snapshotCiphertextDigest,
+    snapshotSqlDigest: options.snapshotScan.sqlDigest,
+    snapshotScannerDigest: options.snapshotScan.scannerDigest,
+    encryption: {
+      algorithm: "AES-256-GCM",
+      keyRef: "operator-local-store-replica-snapshot-v1",
+      aadDigest: encryptedSnapshot.aadDigest,
+      ciphertextDigest: snapshotCiphertextDigest,
+      plaintextDigest: options.snapshotScan.snapshotDigest,
+    },
   };
 }
 
@@ -2017,6 +2419,7 @@ function validateProductionExportProvenance(options: {
   policy: TargetPolicy;
   snapshotScan: SanitizedSnapshotScan;
   snapshotCiphertextBytes: Uint8Array;
+  productionConfigAuthority: ProductionConfigAuthority;
 }): string {
   assertExactObjectKeys(
     options.value,
@@ -2028,6 +2431,7 @@ function validateProductionExportProvenance(options: {
       "sourceCommit",
       "controllerCommit",
       "policyDigest",
+      "productionConfigDigest",
       "productionTargetFingerprint",
       "exportedAt",
       "source",
@@ -2063,6 +2467,9 @@ function validateProductionExportProvenance(options: {
       "includedColumns",
       "excludedTables",
       "productionIdentityRewrite",
+      "outputRowDigest",
+      "outputIconReferenceDigest",
+      "outputIconDigest",
       "piiScan",
       "secretScan",
       "referentialIntegrity",
@@ -2087,18 +2494,26 @@ function validateProductionExportProvenance(options: {
     provenance.sourceCommit !== options.envelope.source.commit ||
     provenance.controllerCommit !== options.envelope.controllerSource.commit ||
     provenance.policyDigest !== options.envelope.candidate.policyDigest ||
+    provenance.productionConfigDigest !==
+      options.productionConfigAuthority.configDigest ||
     provenance.productionTargetFingerprint !==
-      digestJson(options.config.productionTarget) ||
+      options.productionConfigAuthority.targetFingerprint ||
     provenance.exportedAt !== options.config.createdAt ||
     !isRecord(provenance.source) ||
     provenance.source.accountId !== options.policy.accountId ||
     provenance.source.databaseName !== options.policy.databaseName ||
     provenance.source.databaseId !== options.policy.databaseId ||
     provenance.source.queryDigest !== sha256Bytes(Buffer.from(exportQuery)) ||
+    provenance.source.rowDigest !== options.snapshotScan.source.rowDigest ||
     provenance.source.rowCount !== 1 ||
     !new Set(["production-r2", "public-https-reference"]).has(
       String(provenance.source.iconSourceKind),
     ) ||
+    provenance.source.iconSourceKind !==
+      options.snapshotScan.source.iconSourceKind ||
+    provenance.source.iconSourceReferenceDigest !==
+      options.snapshotScan.source.iconSourceReferenceDigest ||
+    provenance.source.iconDigest !== options.snapshotScan.iconDigest ||
     !isRecord(provenance.sanitization) ||
     provenance.sanitization.projection !== "single-canonical-public-listing" ||
     canonicalJson(provenance.sanitization.includedColumns) !==
@@ -2113,6 +2528,12 @@ function validateProductionExportProvenance(options: {
       ]) ||
     provenance.sanitization.productionIdentityRewrite !==
       "icon-url-to-replica-origin-placeholder" ||
+    provenance.sanitization.outputRowDigest !==
+      options.snapshotScan.rowDigest ||
+    provenance.sanitization.outputIconReferenceDigest !==
+      options.snapshotScan.iconSourceReferenceDigest ||
+    provenance.sanitization.outputIconDigest !==
+      options.snapshotScan.iconDigest ||
     provenance.sanitization.piiScan !== "passed" ||
     provenance.sanitization.secretScan !== "passed" ||
     provenance.sanitization.referentialIntegrity !== "passed" ||
@@ -2135,6 +2556,9 @@ function validateProductionExportProvenance(options: {
     provenance.source.rowDigest,
     provenance.source.iconSourceReferenceDigest,
     provenance.source.iconDigest,
+    provenance.sanitization.outputRowDigest,
+    provenance.sanitization.outputIconReferenceDigest,
+    provenance.sanitization.outputIconDigest,
     provenance.encryption.aadDigest,
   ]) {
     if (typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(digest)) {
@@ -2152,6 +2576,8 @@ function validateReplicaInputEvidence(options: {
   snapshotScan: SanitizedSnapshotScan;
   snapshotCiphertextDigest: string;
   provenanceDigest: string;
+  configFingerprint: string;
+  productionConfigAuthority: ProductionConfigAuthority;
 }): void {
   assertExactObjectKeys(
     options.value,
@@ -2174,6 +2600,8 @@ function validateReplicaInputEvidence(options: {
       "provenanceDigest",
       "configFingerprint",
       "migrationPlanDigest",
+      "productionConfigDigest",
+      "productionTargetFingerprint",
       "snapshotDigest",
       "artifactDigests",
       "target",
@@ -2213,9 +2641,12 @@ function validateReplicaInputEvidence(options: {
     options.value.snapshotEncryption !== "AES-256-GCM" ||
     options.value.provenanceFile !== PRODUCTION_EXPORT_PROVENANCE_FILE ||
     options.value.provenanceDigest !== options.provenanceDigest ||
-    options.value.configFingerprint !==
-      options.envelope.replica.configFingerprint ||
+    options.value.configFingerprint !== options.configFingerprint ||
     options.value.migrationPlanDigest !== options.manifest.digests.migrations ||
+    options.value.productionConfigDigest !==
+      options.productionConfigAuthority.configDigest ||
+    options.value.productionTargetFingerprint !==
+      options.productionConfigAuthority.targetFingerprint ||
     options.value.snapshotDigest !== options.snapshotScan.snapshotDigest ||
     canonicalJson(options.value.artifactDigests) !==
       canonicalJson(options.envelope.candidate.artifactDigests) ||
@@ -2231,6 +2662,176 @@ function validateReplicaInputEvidence(options: {
   ) {
     throw new Error("replica_input_evidence_authority_mismatch");
   }
+}
+
+function makeReplicaInputEvidence(options: {
+  readonly envelope: ReleaseEnvelope;
+  readonly config: ReplicaConfig;
+  readonly manifest: StoreArtifactManifest;
+  readonly snapshotScan: SanitizedSnapshotScan;
+  readonly snapshotCiphertextDigest: string;
+  readonly provenanceDigest: string;
+  readonly configFingerprint: string;
+  readonly productionConfigAuthority: ProductionConfigAuthority;
+}): JsonObject {
+  return {
+    kind: "takosumi.store-release-replica-input@v1",
+    status: "verified",
+    surfaceId: SURFACE_ID,
+    releaseId: options.envelope.releaseId,
+    sourceCommit: options.envelope.source.commit,
+    controllerCommit: options.envelope.controllerSource.commit,
+    replicaAdapterDigest: options.envelope.authority.replicaAdapterDigest,
+    replicaId: options.config.replicaId,
+    createdAt: options.config.createdAt,
+    expiresAt: options.config.expiresAt,
+    configFile: REPLICA_CONFIG_FILE,
+    snapshotFile: REPLICA_SNAPSHOT_FILE,
+    snapshotCiphertextDigest: options.snapshotCiphertextDigest,
+    snapshotEncryption: "AES-256-GCM",
+    provenanceFile: PRODUCTION_EXPORT_PROVENANCE_FILE,
+    provenanceDigest: options.provenanceDigest,
+    configFingerprint: options.configFingerprint,
+    migrationPlanDigest: options.manifest.digests.migrations,
+    productionConfigDigest: options.productionConfigAuthority.configDigest,
+    productionTargetFingerprint:
+      options.productionConfigAuthority.targetFingerprint,
+    snapshotDigest: options.snapshotScan.snapshotDigest,
+    artifactDigests: options.envelope.candidate.artifactDigests,
+    target: options.config.target,
+    data: {
+      source: "encrypted-anonymized-production-snapshot",
+      piiScan: "passed",
+      secretScan: "passed",
+      referentialIntegrity: "passed",
+      provenanceDigest: options.provenanceDigest,
+    },
+    productionFallback: false,
+  };
+}
+
+async function readRetainedReplicaMaterial(options: {
+  readonly envelope: ReleaseEnvelope;
+  readonly policy: TargetPolicy;
+  readonly evidenceDirectory: string;
+  readonly config: ReplicaConfig;
+  readonly snapshotKey: Uint8Array;
+  readonly snapshotCryptoAuthority: SnapshotCryptoAuthority;
+  readonly productionConfigAuthority: ProductionConfigAuthority;
+}): Promise<{
+  readonly snapshotCiphertextBytes: Uint8Array;
+  readonly snapshotScan: SanitizedSnapshotScan;
+  readonly provenanceDigest: string;
+} | null> {
+  const snapshotPath = join(options.evidenceDirectory, REPLICA_SNAPSHOT_FILE);
+  const provenancePath = join(
+    options.evidenceDirectory,
+    PRODUCTION_EXPORT_PROVENANCE_FILE,
+  );
+  let snapshotCiphertextBytes: Uint8Array | null = null;
+  let provenanceBytes: Uint8Array | null = null;
+  try {
+    snapshotCiphertextBytes = await readPrivateFile(snapshotPath, {
+      expectedDirectory: options.evidenceDirectory,
+      maxBytes: 64 * 1024 * 1024,
+    });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT")) {
+      throw error;
+    }
+  }
+  try {
+    provenanceBytes = await readPrivateFile(provenancePath, {
+      expectedDirectory: options.evidenceDirectory,
+    });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT")) {
+      throw error;
+    }
+  }
+  if (snapshotCiphertextBytes === null && provenanceBytes === null) return null;
+  if (snapshotCiphertextBytes === null) {
+    throw new Error("replica_input_retained_material_incomplete");
+  }
+  const snapshotBytes = decryptSnapshot(
+    JSON.parse(Buffer.from(snapshotCiphertextBytes).toString("utf8")),
+    options.snapshotKey,
+    options.envelope,
+    options.snapshotCryptoAuthority,
+  );
+  const snapshotScan = scanSanitizedSnapshot(snapshotBytes, options.policy);
+  if (provenanceBytes === null) {
+    provenanceBytes = await retainExactJson(
+      provenancePath,
+      makeProductionExportProvenance({
+        envelope: options.envelope,
+        config: options.config,
+        policy: options.policy,
+        snapshotScan,
+        snapshotCiphertextBytes,
+        productionConfigAuthority: options.productionConfigAuthority,
+      }),
+      options.evidenceDirectory,
+    );
+  }
+  const provenanceDigest = validateProductionExportProvenance({
+    value: JSON.parse(Buffer.from(provenanceBytes).toString("utf8")),
+    bytes: provenanceBytes,
+    envelope: options.envelope,
+    config: options.config,
+    policy: options.policy,
+    snapshotScan,
+    snapshotCiphertextBytes,
+    productionConfigAuthority: options.productionConfigAuthority,
+  });
+  return { snapshotCiphertextBytes, snapshotScan, provenanceDigest };
+}
+
+async function readCompleteRetainedReplicaInput(options: {
+  readonly envelope: ReleaseEnvelope;
+  readonly policy: TargetPolicy;
+  readonly manifest: StoreArtifactManifest;
+  readonly evidenceDirectory: string;
+  readonly config: ReplicaConfig;
+  readonly configBytes: Uint8Array;
+  readonly snapshotKey: Uint8Array;
+  readonly snapshotCryptoAuthority: SnapshotCryptoAuthority;
+  readonly productionConfigAuthority: ProductionConfigAuthority;
+}): Promise<{
+  readonly evidence: JsonObject;
+  readonly bytes: Uint8Array;
+} | null> {
+  let inputEvidenceBytes: Uint8Array;
+  try {
+    inputEvidenceBytes = await readPrivateFile(
+      join(options.evidenceDirectory, EVIDENCE_FILES["prepare-input"]),
+      { expectedDirectory: options.evidenceDirectory },
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("ENOENT")) {
+      return null;
+    }
+    throw error;
+  }
+  const material = await readRetainedReplicaMaterial(options);
+  if (material === null) {
+    throw new Error("replica_input_evidence_without_retained_material");
+  }
+  const evidence = JSON.parse(
+    Buffer.from(inputEvidenceBytes).toString("utf8"),
+  ) as JsonObject;
+  validateReplicaInputEvidence({
+    value: evidence,
+    envelope: options.envelope,
+    config: options.config,
+    manifest: options.manifest,
+    snapshotScan: material.snapshotScan,
+    snapshotCiphertextDigest: sha256Bytes(material.snapshotCiphertextBytes),
+    provenanceDigest: material.provenanceDigest,
+    configFingerprint: sha256Bytes(options.configBytes),
+    productionConfigAuthority: options.productionConfigAuthority,
+  });
+  return { evidence, bytes: inputEvidenceBytes };
 }
 
 async function authorizeParent(
@@ -2385,6 +2986,67 @@ async function materializeReplicaArtifact(
   });
 }
 
+export function provisionedProgressResourceIds(progress: Progress): {
+  readonly databaseId: string;
+  readonly kvNamespaceId: string;
+  readonly versionId: string;
+} {
+  if (progress.status !== "provisioned") {
+    throw new Error(
+      new Set(["destroyed", "quarantined"]).has(progress.status)
+        ? "replica_terminal_identity_reuse_forbidden"
+        : "replica_partial_progress_requires_quarantine",
+    );
+  }
+  const byType = new Map(
+    progress.resources.map((resource) => [resource.type, resource]),
+  );
+  const databaseId = byType.get("d1")?.id;
+  const kvNamespaceId = byType.get("kv")?.id;
+  const versionId = byType.get("worker")?.id;
+  if (
+    !databaseId ||
+    !kvNamespaceId ||
+    !versionId ||
+    [...byType.values()].some((resource) => resource.state !== "present")
+  ) {
+    throw new Error("replica_provisioned_progress_incomplete");
+  }
+  return { databaseId, kvNamespaceId, versionId };
+}
+
+export function assertProvisionedOperationIdentity(
+  operation: JsonObject,
+  expectedVersionId: string,
+  ownedVersionId: string | null,
+): void {
+  if (
+    operation.phase !== "verified" ||
+    operation.versionId !== expectedVersionId ||
+    ownedVersionId !== expectedVersionId
+  ) {
+    throw new Error("replica_provisioned_operation_authority_mismatch");
+  }
+}
+
+export function resolveProvisionRetryInventory(options: {
+  draft: Inventory;
+  liveRemoteEvidence: JsonObject;
+  retainedInventory: Inventory | null;
+}): Inventory {
+  const recovered = {
+    ...options.draft,
+    remoteEvidence: options.liveRemoteEvidence,
+  };
+  if (
+    options.retainedInventory &&
+    canonicalJson(options.retainedInventory) !== canonicalJson(recovered)
+  ) {
+    throw new Error("replica_retained_inventory_live_readback_mismatch");
+  }
+  return options.retainedInventory ?? recovered;
+}
+
 async function provision(options: {
   envelope: ReleaseEnvelope;
   config: ReplicaConfig;
@@ -2398,23 +3060,113 @@ async function provision(options: {
   cloudflareReadClient: CloudflareReadClient;
 }): Promise<Inventory> {
   const progressPath = join(options.evidenceDirectory, PROGRESS_FILE);
+  let retainedProgress: Progress | null = null;
   try {
-    const retained = validateProgress(
+    retainedProgress = validateProgress(
       await readPrivateJson(progressPath, options.evidenceDirectory),
       options.envelope,
       options.config,
     );
-    if (!new Set(["destroyed", "quarantined"]).has(retained.status)) {
-      throw new Error("replica_partial_progress_requires_quarantine");
-    }
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message === "replica_partial_progress_requires_quarantine" ||
-        !error.message.includes("ENOENT"))
-    ) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT"))
       throw error;
+  }
+  if (retainedProgress) {
+    const { databaseId, kvNamespaceId, versionId } =
+      provisionedProgressResourceIds(retainedProgress);
+    const target: TargetPolicy = {
+      configPath: "replica-generated.toml",
+      accountId: options.config.target.accountId,
+      workerName: options.config.target.workerName,
+      origin: options.config.target.origin,
+      databaseName: options.config.target.databaseName,
+      databaseId,
+      kvNamespaceId,
+      iconsBucketName: options.config.target.iconsBucketName,
+      publishCapability: false,
+      compatibilityDate: "2026-06-25",
+      compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+      requiredVarNames: ["APP_URL"],
+      requiredSecretNames: [],
+      customDomainHostname: new URL(options.config.target.origin).hostname,
+      readbackListingPath: options.readbackListingPath,
+    };
+    const operation = validateReplicaReleaseOperation(
+      await readPrivateJson(
+        join(options.evidenceDirectory, PROVISION_OPERATION_FILE),
+        options.evidenceDirectory,
+      ),
+      options.envelope,
+      target,
+      "replica-provision",
+    );
+    const ownedVersionId = readOwnedOperationVersionId({
+      operation,
+      envelope: options.envelope,
+      target,
+      runner: options.runner,
+      cwd: options.sourceCheckout,
+    });
+    assertProvisionedOperationIdentity(operation, versionId, ownedVersionId);
+    requireExactWorkerDeployment(
+      options.runner,
+      options.sourceCheckout,
+      target.workerName,
+      versionId,
+    );
+    const checks = replicaHealthChecks(target, options.envelope);
+    const draft: Inventory = {
+      kind: "takosumi.store-release-replica-inventory@v1",
+      status: "verified",
+      surfaceId: SURFACE_ID,
+      releaseId: options.envelope.releaseId,
+      replicaId: options.config.replicaId,
+      accountId: options.config.target.accountId,
+      target: {
+        ...options.config.target,
+        databaseId,
+        kvNamespaceId,
+        versionId,
+      },
+      artifactDigests: options.envelope.candidate.artifactDigests,
+      createdAt: options.config.createdAt,
+      expiresAt: options.config.expiresAt,
+      checks,
+      remoteEvidence: {
+        preflightAbsenceDigest: retainedProgress.preflightAbsenceDigest,
+      },
+      productionFallback: false,
+    };
+    const liveRemoteEvidence = await attestReplicaRemote({
+      envelope: options.envelope,
+      inventory: draft,
+      artifactRoot: options.artifactRoot,
+      manifest: options.manifest,
+      runner: options.runner,
+      snapshotScan: options.snapshotScan,
+      readbackListingPath: options.readbackListingPath,
+      cloudflareReadClient: options.cloudflareReadClient,
+    });
+    let retainedInventory: Inventory | null = null;
+    try {
+      retainedInventory = validateInventory(
+        await readPrivateJson(
+          join(options.evidenceDirectory, EVIDENCE_FILES.provision),
+          options.evidenceDirectory,
+        ),
+        options.envelope,
+        options.config,
+      );
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("ENOENT")) {
+        throw error;
+      }
     }
+    return resolveProvisionRetryInventory({
+      draft,
+      liveRemoteEvidence,
+      retainedInventory,
+    });
   }
   const preflightAbsence = {
     worker:
@@ -2423,10 +3175,10 @@ async function provision(options: {
         options.sourceCheckout,
         options.config.target.workerName,
       ) &&
-      !(await scriptSubdomainPresent(
+      (await scriptSubdomainState(
         options.cloudflareReadClient,
         options.config.target.workerName,
-      )),
+      )) === "missing",
     d1:
       exactD1DatabaseId(
         options.runner(["d1", "list", "--json"], {
@@ -2657,6 +3409,10 @@ async function provision(options: {
       readbackListingPath: options.readbackListingPath,
     };
     const checks = replicaHealthChecks(target, options.envelope);
+    const operationPath = join(
+      options.evidenceDirectory,
+      PROVISION_OPERATION_FILE,
+    );
     let readback: Awaited<ReturnType<typeof deploySealedStore>>;
     try {
       readback = await deploySealedStore({
@@ -2673,6 +3429,12 @@ async function provision(options: {
             target,
             "workers-dev",
           ),
+        journal: {
+          path: operationPath,
+          environment: "replica-provision",
+          targetFingerprint: digestJson(target),
+          expectedPreDeploymentDigest: digestJson({ versions: [] }),
+        },
       });
     } catch (error) {
       progress = updateResource(progress, "worker", {
@@ -2913,39 +3675,80 @@ async function verifyForwardRepairResumeState(options: {
       throw error;
     }
   }
-  const versionsResult = inspectRemote(
+  const versions = listWorkerVersionsExact(
     options.runner,
-    ["versions", "list", "--name", options.target.workerName, "--json"],
     options.cwd,
+    options.target.workerName,
   );
-  const versions =
-    versionsResult.status === "not-found"
-      ? []
-      : parseJsonOutput(
-          versionsResult.stdout,
-          "replica_forward_repair_resume_versions",
-        );
-  if (!Array.isArray(versions)) {
-    throw new Error("replica_forward_repair_resume_versions_invalid");
-  }
-  const subdomainPresent = await scriptSubdomainPresent(
+  const subdomainState = await scriptSubdomainState(
     options.cloudflareReadClient,
     options.target.workerName,
   );
+  if (operation?.phase === "upload-intent-recorded") {
+    const prior = new Set(operation.preUploadVersionIds as string[]);
+    const candidates = versions.filter(
+      (entry) => isRecord(entry) && !prior.has(String(entry.id)),
+    );
+    if (candidates.length > 1) {
+      throw new Error("replica_forward_repair_upload_recovery_ambiguous");
+    }
+    if (candidates.length === 1) {
+      const candidateId = String(candidates[0]!.id);
+      const candidate = parseJsonOutput(
+        options.runner(
+          [
+            "versions",
+            "view",
+            candidateId,
+            "--name",
+            options.target.workerName,
+            "--config",
+            "wrangler.toml",
+            "--json",
+          ],
+          { cwd: options.cwd },
+        ),
+        "replica_forward_repair_upload_recovery_version",
+      );
+      const annotations =
+        isRecord(candidate) && isRecord(candidate.annotations)
+          ? candidate.annotations
+          : {};
+      if (
+        annotations["workers/message"] !== options.envelope.releaseId ||
+        annotations["workers/tag"] !== VERSION
+      ) {
+        throw new Error("replica_forward_repair_upload_recovery_mismatch");
+      }
+      assertVersionBindings(candidate, candidateId, options.target);
+    } else if (subdomainState !== "missing") {
+      throw new Error("replica_forward_repair_intervening_worker_present");
+    }
+    return digestJson({
+      kind: "takosumi.store-replica-forward-repair-resume-readback@v1",
+      state:
+        candidates.length === 1
+          ? "candidate-upload-recovered"
+          : "upload-pending",
+      versions,
+      subdomainState,
+      operationDigest: digestJson(operation),
+    });
+  }
   if (
     !operation ||
     !["version-uploaded", "deployed", "verified"].includes(
       String(operation.phase),
     )
   ) {
-    if (versions.length !== 0 || subdomainPresent) {
+    if (versions.length !== 0 || subdomainState !== "missing") {
       throw new Error("replica_forward_repair_intervening_worker_present");
     }
     return digestJson({
       kind: "takosumi.store-replica-forward-repair-resume-readback@v1",
       state: "worker-absent",
       versions: [],
-      subdomainPresent: false,
+      subdomainState,
       operationDigest: operation ? digestJson(operation) : null,
     });
   }
@@ -2988,8 +3791,7 @@ async function verifyForwardRepairResumeState(options: {
       !exactDeployment &&
       (!isRecord(deployment) ||
         !Array.isArray(deployment.versions) ||
-        deployment.versions.length !== 0)) ||
-    (subdomainPresent && !exactDeployment)
+        deployment.versions.length !== 0))
   ) {
     throw new Error("replica_forward_repair_resume_deployment_mismatch");
   }
@@ -2998,7 +3800,7 @@ async function verifyForwardRepairResumeState(options: {
     state: exactDeployment ? "candidate-deployed" : "candidate-uploaded",
     versionId: expectedVersionId,
     deploymentDigest: digestJson(deployment),
-    subdomainPresent,
+    subdomainState,
     operationDigest: digestJson(operation),
   });
 }
@@ -3118,14 +3920,23 @@ export async function rehearseForwardRepair(options: {
         options.initialInventory.target.workerName,
         removedVersionId,
       );
-      const subdomainPresent = await scriptSubdomainPresent(
+      const subdomainState = await scriptSubdomainState(
         options.cloudflareReadClient,
         options.initialInventory.target.workerName,
       );
-      if (versionPresent !== subdomainPresent) {
+      if (
+        (!versionPresent && subdomainState !== "missing") ||
+        (versionPresent && subdomainState !== "enabled")
+      ) {
         throw new Error("replica_failure_injection_worker_state_ambiguous");
       }
       if (versionPresent) {
+        requireExactWorkerDeployment(
+          options.runner,
+          releaseRoot,
+          options.initialInventory.target.workerName,
+          removedVersionId,
+        );
         options.runner(
           ["delete", options.initialInventory.target.workerName, "--force"],
           { cwd: releaseRoot },
@@ -3136,10 +3947,11 @@ export async function rehearseForwardRepair(options: {
         releaseRoot,
         options.initialInventory.target.workerName,
       );
-      const subdomainAbsent = !(await scriptSubdomainPresent(
-        options.cloudflareReadClient,
-        options.initialInventory.target.workerName,
-      ));
+      const subdomainAbsent =
+        (await scriptSubdomainState(
+          options.cloudflareReadClient,
+          options.initialInventory.target.workerName,
+        )) === "missing";
       if (!versionAbsent || !subdomainAbsent) {
         throw new Error("replica_failure_injection_worker_still_present");
       }
@@ -3248,6 +4060,7 @@ export async function rehearseForwardRepair(options: {
         path: operationPath,
         environment: "replica-forward-repair",
         targetFingerprint: digestJson(target),
+        expectedPreDeploymentDigest: digestJson({ versions: [] }),
       },
     });
     if (readback.versionId === removedVersionId) {
@@ -3632,43 +4445,202 @@ function inspectRemote(
   return { status: result.status, stdout: result.stdout };
 }
 
+function listWorkerVersionsExact(
+  runner: WranglerRunner,
+  cwd: string,
+  name: string,
+): JsonObject[] {
+  const result = inspectRemote(
+    runner,
+    ["versions", "list", "--name", name, "--json"],
+    cwd,
+  );
+  if (result.status === "not-found") return [];
+  const parsed = parseJsonOutput(result.stdout, "replica_worker_inventory");
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some(
+      (entry) =>
+        !isRecord(entry) ||
+        typeof entry.id !== "string" ||
+        !UUID.test(entry.id),
+    )
+  ) {
+    throw new Error("replica_worker_inventory_invalid");
+  }
+  const versions = parsed as JsonObject[];
+  if (
+    new Set(versions.map((entry) => String(entry.id))).size !== versions.length
+  ) {
+    throw new Error("replica_worker_inventory_duplicate");
+  }
+  return versions;
+}
+
+function verifyOwnedReplicaVersion(options: {
+  runner: WranglerRunner;
+  cwd: string;
+  target: TargetPolicy;
+  envelope: ReleaseEnvelope;
+  versionId: string;
+}): void {
+  const value = parseJsonOutput(
+    options.runner(
+      [
+        "versions",
+        "view",
+        options.versionId,
+        "--name",
+        options.target.workerName,
+        "--config",
+        "wrangler.toml",
+        "--json",
+      ],
+      { cwd: options.cwd },
+    ),
+    "replica_worker_owned_version",
+  );
+  const annotations =
+    isRecord(value) && isRecord(value.annotations) ? value.annotations : {};
+  if (
+    annotations["workers/message"] !== options.envelope.releaseId ||
+    annotations["workers/tag"] !== VERSION
+  ) {
+    throw new Error("replica_worker_owned_version_annotation_mismatch");
+  }
+  assertVersionBindings(value, options.versionId, options.target);
+}
+
+function readOwnedOperationVersionId(options: {
+  operation: JsonObject;
+  envelope: ReleaseEnvelope;
+  target: TargetPolicy;
+  runner: WranglerRunner;
+  cwd: string;
+}): string | null {
+  const phase = String(options.operation.phase);
+  if (
+    ![
+      "upload-intent-recorded",
+      "version-uploaded",
+      "deployed",
+      "verified",
+    ].includes(phase)
+  ) {
+    return null;
+  }
+  const versions = listWorkerVersionsExact(
+    options.runner,
+    options.cwd,
+    options.target.workerName,
+  );
+  let versionId: string | null = null;
+  if (phase === "upload-intent-recorded") {
+    const prior = new Set(options.operation.preUploadVersionIds as string[]);
+    const candidates = versions.filter((entry) => !prior.has(String(entry.id)));
+    if (candidates.length > 1) {
+      throw new Error("replica_worker_upload_recovery_ambiguous");
+    }
+    versionId = candidates.length === 1 ? String(candidates[0]!.id) : null;
+  } else {
+    versionId = String(options.operation.versionId);
+  }
+  if (!versionId) return null;
+  if (versions.length === 0) return versionId;
+  if (versions.length !== 1 || versions[0]!.id !== versionId) {
+    throw new Error("replica_worker_inventory_not_exclusive");
+  }
+  verifyOwnedReplicaVersion({ ...options, versionId });
+  return versionId;
+}
+
 function workerVersionPresent(
   runner: WranglerRunner,
   cwd: string,
   name: string,
   expectedVersionId?: string,
 ): boolean {
-  const result = inspectRemote(
-    runner,
-    ["versions", "list", "--name", name, "--json"],
-    cwd,
-  );
-  if (result.status === "not-found") return false;
-  const parsed = parseJsonOutput(result.stdout, "replica_worker_inventory");
-  if (!Array.isArray(parsed))
-    throw new Error("replica_worker_inventory_invalid");
+  const parsed = listWorkerVersionsExact(runner, cwd, name);
   if (parsed.length === 0) return false;
-  if (
-    expectedVersionId &&
-    !parsed.some((entry) => isRecord(entry) && entry.id === expectedVersionId)
-  ) {
-    throw new Error("replica_worker_inventory_version_mismatch");
+  if (expectedVersionId) {
+    if (parsed.length !== 1) {
+      throw new Error("replica_worker_inventory_not_exclusive");
+    }
+    if (!isRecord(parsed[0]) || parsed[0].id !== expectedVersionId) {
+      throw new Error("replica_worker_inventory_version_mismatch");
+    }
   }
   return true;
 }
 
-async function scriptSubdomainPresent(
+function exactWorkerDeploymentDigest(
+  runner: WranglerRunner,
+  cwd: string,
+  workerName: string,
+  versionId: string,
+): string | null {
+  const result = inspectRemote(
+    runner,
+    [
+      "deployments",
+      "status",
+      "--name",
+      workerName,
+      "--config",
+      "wrangler.toml",
+      "--json",
+    ],
+    cwd,
+  );
+  if (result.status === "not-found") return null;
+  const deployment = parseJsonOutput(
+    result.stdout,
+    "replica_worker_cleanup_deployment",
+  );
+  if (
+    isRecord(deployment) &&
+    Array.isArray(deployment.versions) &&
+    deployment.versions.length === 0
+  ) {
+    return null;
+  }
+  if (!deploymentHasExactVersionAtFullTraffic(deployment, versionId)) {
+    throw new Error("replica_worker_deployment_not_exclusive");
+  }
+  return digestJson(deployment);
+}
+
+function requireExactWorkerDeployment(
+  runner: WranglerRunner,
+  cwd: string,
+  workerName: string,
+  versionId: string,
+): string {
+  const digest = exactWorkerDeploymentDigest(
+    runner,
+    cwd,
+    workerName,
+    versionId,
+  );
+  if (!digest) throw new Error("replica_worker_deployment_missing");
+  return digest;
+}
+
+async function scriptSubdomainState(
   client: CloudflareReadClient,
   workerName: string,
-): Promise<boolean> {
+): Promise<"missing" | "disabled" | "enabled"> {
   const response = await client.get(
     `/accounts/${encodeURIComponent(client.accountId)}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
   );
-  if (response.status === "not-found") return false;
-  if (!isRecord(response.result) || response.result.enabled !== true) {
+  if (response.status === "not-found") return "missing";
+  if (
+    !isRecord(response.result) ||
+    typeof response.result.enabled !== "boolean"
+  ) {
     throw new Error("replica_worker_subdomain_ownership_mismatch");
   }
-  return true;
+  return response.result.enabled ? "enabled" : "disabled";
 }
 
 async function listR2Buckets(
@@ -3727,12 +4699,14 @@ async function listAllR2Objects(
 
 export async function destroyExact(options: {
   inventory: Inventory | Progress;
+  envelope: ReleaseEnvelope;
   runner: WranglerRunner;
   cwd: string;
   progressPath: string;
   action: "destroy" | "quarantine";
   snapshotScan: SanitizedSnapshotScan;
   cloudflareReadClient: CloudflareReadClient;
+  readbackListingPath: string;
 }): Promise<void> {
   const target = options.inventory.target;
   const retainedProgress =
@@ -3820,13 +4794,22 @@ export async function destroyExact(options: {
     preflightWorker.name,
     preflightWorker.id,
   );
-  if (
-    preflightWorkerPresent !==
-    (await scriptSubdomainPresent(
-      options.cloudflareReadClient,
-      preflightWorker.name,
-    ))
-  ) {
+  if (preflightWorkerPresent && !preflightWorker.id) {
+    throw new Error("replica_worker_cleanup_version_authority_missing");
+  }
+  const preflightWorkerDeploymentDigest = preflightWorkerPresent
+    ? exactWorkerDeploymentDigest(
+        options.runner,
+        options.cwd,
+        preflightWorker.name,
+        String(preflightWorker.id),
+      )
+    : null;
+  const preflightSubdomainState = await scriptSubdomainState(
+    options.cloudflareReadClient,
+    preflightWorker.name,
+  );
+  if (!preflightWorkerPresent && preflightSubdomainState !== "missing") {
     throw new Error("replica_worker_inventory_topology_mismatch");
   }
   const preflightD1 = progress.resources.find(
@@ -3916,7 +4899,12 @@ export async function destroyExact(options: {
   }
   const cleanupPreflightDigest = digestJson({
     kind: "takosumi.store-replica-cleanup-preflight@v1",
-    worker: { name: preflightWorker.name, present: preflightWorkerPresent },
+    worker: {
+      name: preflightWorker.name,
+      present: preflightWorkerPresent,
+      subdomainState: preflightSubdomainState,
+    },
+    workerDeploymentDigest: preflightWorkerDeploymentDigest,
     d1: { name: preflightD1.name, id: preflightD1Id },
     kv: {
       name: preflightKv.name,
@@ -3953,23 +4941,80 @@ export async function destroyExact(options: {
       worker.name,
       worker.id,
     );
-    const subdomainPresent = await scriptSubdomainPresent(
+    const subdomainState = await scriptSubdomainState(
       options.cloudflareReadClient,
       worker.name,
     );
-    if (present !== subdomainPresent) {
+    if (present && !worker.id) {
+      throw new Error("replica_worker_cleanup_version_authority_missing");
+    }
+    if (present) {
+      exactWorkerDeploymentDigest(
+        options.runner,
+        options.cwd,
+        worker.name,
+        String(worker.id),
+      );
+    }
+    if (!present && subdomainState !== "missing") {
       throw new Error("replica_worker_inventory_topology_mismatch");
     }
     if (present) {
+      const databaseId = progress.resources.find(
+        (resource) => resource.type === "d1",
+      )?.id;
+      const kvNamespaceId = progress.resources.find(
+        (resource) => resource.type === "kv",
+      )?.id;
+      if (!databaseId || !kvNamespaceId) {
+        throw new Error("replica_worker_binding_authority_missing");
+      }
+      verifyOwnedReplicaVersion({
+        runner: options.runner,
+        cwd: options.cwd,
+        envelope: options.envelope,
+        versionId: String(worker.id),
+        target: {
+          configPath: "replica-generated.toml",
+          accountId: progress.accountId,
+          workerName: progress.target.workerName,
+          origin: progress.target.origin,
+          databaseName: progress.target.databaseName,
+          databaseId,
+          kvNamespaceId,
+          iconsBucketName: progress.target.iconsBucketName,
+          publishCapability: false,
+          compatibilityDate: "2026-06-25",
+          compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+          requiredVarNames: ["APP_URL"],
+          requiredSecretNames: [],
+          customDomainHostname: new URL(progress.target.origin).hostname,
+          readbackListingPath: options.readbackListingPath,
+        },
+      });
       options.runner(["delete", worker.name, "--force"], { cwd: options.cwd });
     }
     if (workerVersionPresent(options.runner, options.cwd, worker.name)) {
       throw new Error("replica_worker_post_delete_present");
     }
     if (
-      await scriptSubdomainPresent(options.cloudflareReadClient, worker.name)
+      (await scriptSubdomainState(
+        options.cloudflareReadClient,
+        worker.name,
+      )) !== "missing"
     ) {
       throw new Error("replica_worker_subdomain_post_delete_present");
+    }
+    if (
+      worker.id &&
+      exactWorkerDeploymentDigest(
+        options.runner,
+        options.cwd,
+        worker.name,
+        worker.id,
+      ) !== null
+    ) {
+      throw new Error("replica_worker_deployment_post_delete_present");
     }
     progress = updateResource(progress, "worker", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
@@ -3990,7 +5035,7 @@ export async function destroyExact(options: {
         state: "present",
       });
       await writeProgress(options.progressPath, progress);
-      options.runner(["d1", "delete", d1.name, "--skip-confirmation"], {
+      options.runner(["d1", "delete", found, "--skip-confirmation"], {
         cwd: options.cwd,
       });
     }
@@ -4135,6 +5180,35 @@ export async function destroyExact(options: {
   await writeProgress(options.progressPath, progress);
 }
 
+function cleanupSourceInventoryDigest(value: Inventory | Progress): string {
+  const resourceIds =
+    value.kind === "takosumi.store-release-replica-inventory@v1"
+      ? {
+          worker: value.target.versionId,
+          d1: value.target.databaseId,
+          kv: value.target.kvNamespaceId,
+          r2: null,
+        }
+      : Object.fromEntries(
+          value.resources
+            .map((resource) => [resource.type, resource.id ?? null] as const)
+            .sort(([left], [right]) => left.localeCompare(right)),
+        );
+  return digestJson({
+    kind: "takosumi.store-replica-cleanup-source-authority@v1",
+    surfaceId: value.surfaceId,
+    releaseId: value.releaseId,
+    replicaId: value.replicaId,
+    accountId: value.accountId,
+    target: value.target,
+    artifactDigests: value.artifactDigests,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    resourceIds,
+    productionFallback: false,
+  });
+}
+
 export async function runStoreReplicaAdapter(options: {
   readonly action: string;
   readonly envelopePath: string;
@@ -4175,6 +5249,12 @@ export async function runStoreReplicaAdapter(options: {
     parent.sourceCheckout,
     artifact.manifest,
   );
+  const productionConfigPath = await realpath(
+    join(parent.operatorRoot, policy.policy.production.configPath),
+  );
+  if (!productionConfigPath.startsWith(`${parent.operatorRoot}/`)) {
+    throw new Error("replica_production_config_path_invalid");
+  }
   if (action === "prepare-input") {
     await assertCredentialFileLocations(
       "TAKOSUMI_RELEASE_REPLICA_SOURCE_ACCOUNT_ID_FILE",
@@ -4186,12 +5266,6 @@ export async function runStoreReplicaAdapter(options: {
       "TAKOSUMI_RELEASE_REPLICA_SOURCE_API_TOKEN_FILE",
       policy.policy.production.accountId,
     );
-    const productionConfigPath = await realpath(
-      join(parent.operatorRoot, policy.policy.production.configPath),
-    );
-    if (!productionConfigPath.startsWith(`${parent.operatorRoot}/`)) {
-      throw new Error("replica_production_config_path_invalid");
-    }
     const productionRunner =
       options.runner ??
       createWranglerRunner({
@@ -4199,12 +5273,16 @@ export async function runStoreReplicaAdapter(options: {
         accountId: productionCredentials.accountId,
         apiToken: productionCredentials.apiToken,
       });
+    const productionReadClient = createCloudflareReadClient(
+      productionCredentials,
+    );
     const prepared = await prepareReplicaInput({
       envelope,
       policy: policy.policy.production,
       manifest: artifact.manifest,
       evidenceDirectory,
       runner: productionRunner,
+      cloudflareReadClient: productionReadClient,
       productionConfigPath,
     });
     return actionResult(
@@ -4239,6 +5317,11 @@ export async function runStoreReplicaAdapter(options: {
   if (sha256Bytes(configBytes) !== envelope.replica.configFingerprint) {
     throw new Error("replica_config_fingerprint_mismatch");
   }
+  const productionConfigAuthority = await validateProductionConfigAuthority({
+    path: productionConfigPath,
+    policy: policy.policy.production,
+    envelope,
+  });
   const snapshotCiphertextBytes = await readPrivateFile(snapshotPath, {
     maxBytes: 64 * 1024 * 1024,
   });
@@ -4256,7 +5339,8 @@ export async function runStoreReplicaAdapter(options: {
     {
       configFingerprint: envelope.replica.configFingerprint as string,
       migrationPlanDigest: envelope.replica.migrationPlanDigest as string,
-      productionTargetFingerprint: digestJson(config.productionTarget),
+      productionConfigDigest: productionConfigAuthority.configDigest,
+      productionTargetFingerprint: productionConfigAuthority.targetFingerprint,
     },
   );
   const snapshotScan = scanSanitizedSnapshot(
@@ -4290,6 +5374,7 @@ export async function runStoreReplicaAdapter(options: {
     policy: policy.policy.production,
     snapshotScan,
     snapshotCiphertextBytes,
+    productionConfigAuthority,
   });
   if (
     provenanceDigest !== (envelope.replica.data as JsonObject).provenanceDigest
@@ -4313,6 +5398,8 @@ export async function runStoreReplicaAdapter(options: {
     snapshotScan,
     snapshotCiphertextDigest: sha256Bytes(snapshotCiphertextBytes),
     provenanceDigest,
+    configFingerprint: envelope.replica.configFingerprint as string,
+    productionConfigAuthority,
   });
   const plan = {
     kind: "takosumi.store-release-replica-plan@v1",
@@ -4332,9 +5419,10 @@ export async function runStoreReplicaAdapter(options: {
     productionFallback: false,
   };
   if (action === "plan") {
-    const bytes = await writePrivateJson(
+    const bytes = await retainExactJson(
       join(evidenceDirectory, EVIDENCE_FILES.plan),
       plan,
+      evidenceDirectory,
     );
     return actionResult(action, envelope, bytes, digestJson(plan));
   }
@@ -4370,9 +5458,10 @@ export async function runStoreReplicaAdapter(options: {
       readbackListingPath: policy.policy.production.readbackListingPath,
       cloudflareReadClient,
     });
-    const bytes = await writePrivateJson(
+    const bytes = await retainExactJson(
       join(evidenceDirectory, EVIDENCE_FILES.provision),
       inventory,
+      evidenceDirectory,
     );
     return actionResult(action, envelope, bytes, digestJson(inventory));
   }
@@ -4449,9 +5538,10 @@ export async function runStoreReplicaAdapter(options: {
       ],
       productionFallback: false,
     };
-    const bytes = await writePrivateJson(
+    const bytes = await retainExactJson(
       join(evidenceDirectory, EVIDENCE_FILES["cleanup-plan"]),
       cleanup,
+      evidenceDirectory,
     );
     return actionResult(action, envelope, bytes, digestJson(inventory));
   }
@@ -4617,24 +5707,37 @@ export async function runStoreReplicaAdapter(options: {
     throw new Error("replica_cleanup_authority_missing");
   }
   if (!inventory && progress) {
+    progress = await recoverProvisionCleanupProgress({
+      progress,
+      envelope,
+      config,
+      evidenceDirectory,
+      readbackListingPath: policy.policy.production.readbackListingPath,
+      runner,
+      cwd: parent.sourceCheckout,
+    });
     progress = await recoverForwardRepairCleanupProgress({
       progress,
       envelope,
       config,
       evidenceDirectory,
       readbackListingPath: policy.policy.production.readbackListingPath,
+      runner,
+      cwd: parent.sourceCheckout,
     });
     await writeProgress(progressPath, progress);
   }
   const recoverable = progress ?? inventory!;
   await destroyExact({
     inventory: recoverable,
+    envelope,
     runner,
     cwd: parent.sourceCheckout,
     progressPath,
     action,
     snapshotScan,
     cloudflareReadClient,
+    readbackListingPath: policy.policy.production.readbackListingPath,
   });
   const terminal = {
     kind: `takosumi.store-release-replica-${action}@v1`,
@@ -4642,7 +5745,7 @@ export async function runStoreReplicaAdapter(options: {
     releaseId: envelope.releaseId,
     replicaId: config.replicaId,
     status: action === "destroy" ? "destroyed" : "quarantined",
-    sourceInventoryDigest: digestJson(recoverable),
+    sourceInventoryDigest: cleanupSourceInventoryDigest(recoverable),
     exactTarget: recoverable.target,
     productionFallback: false,
   };
@@ -4657,18 +5760,7 @@ export async function runStoreReplicaAdapter(options: {
     const retained = await readPrivateFile(terminalPath, {
       expectedDirectory: evidenceDirectory,
     });
-    const retainedValue = JSON.parse(retained.toString("utf8"));
-    if (
-      !isRecord(retainedValue) ||
-      retainedValue.kind !== terminal.kind ||
-      retainedValue.surfaceId !== SURFACE_ID ||
-      retainedValue.releaseId !== envelope.releaseId ||
-      retainedValue.replicaId !== config.replicaId ||
-      retainedValue.status !== terminal.status ||
-      canonicalJson(retainedValue.exactTarget) !==
-        canonicalJson(recoverable.target) ||
-      retainedValue.productionFallback !== false
-    ) {
+    if (!retained.equals(Buffer.from(`${canonicalJson(terminal)}\n`))) {
       throw new Error("replica_cleanup_terminal_immutable_conflict");
     }
     bytes = retained;

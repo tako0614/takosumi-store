@@ -25,6 +25,7 @@ import {
   createWranglerRunner,
   deploymentHasExactVersionAtFullTraffic,
   digestJson,
+  isRecord,
   parseJsonOutput,
   parseVersionId,
   readCredentialFiles,
@@ -72,6 +73,7 @@ interface DeploymentReadback {
 const OPERATION_PHASES = [
   "intent-recorded",
   "schema-applied",
+  "upload-intent-recorded",
   "version-uploaded",
   "deployed",
   "verified",
@@ -456,6 +458,7 @@ export async function deploySealedStore(options: {
     readonly path: string;
     readonly environment: string;
     readonly targetFingerprint: string;
+    readonly expectedPreDeploymentDigest?: string;
   };
 }): Promise<DeploymentReadback> {
   const config = "wrangler.toml";
@@ -493,7 +496,14 @@ export async function deploySealedStore(options: {
   const preDeploymentDigest =
     typeof retainedJournal?.preDeploymentDigest === "string"
       ? retainedJournal.preDeploymentDigest
-      : liveBeforeDigest;
+      : (options.journal?.expectedPreDeploymentDigest ?? liveBeforeDigest);
+  if (
+    options.journal?.expectedPreDeploymentDigest &&
+    (preDeploymentDigest !== options.journal.expectedPreDeploymentDigest ||
+      (!retainedJournal && liveBeforeDigest !== preDeploymentDigest))
+  ) {
+    throw new Error("release_expected_predeployment_head_mismatch");
+  }
   const journalAuthority = options.journal
     ? {
         kind: "takosumi.store-release-operation@v1",
@@ -524,7 +534,12 @@ export async function deploySealedStore(options: {
           dirname(options.journal.path),
         ));
       const retainedAuthority = { ...journal };
-      for (const key of ["phase", "versionId", "updatedAt"])
+      for (const key of [
+        "phase",
+        "versionId",
+        "preUploadVersionIds",
+        "updatedAt",
+      ])
         delete retainedAuthority[key];
       if (
         canonicalJson(retainedAuthority) !== canonicalJson(journalAuthority)
@@ -535,8 +550,21 @@ export async function deploySealedStore(options: {
         throw new Error("release_operation_journal_phase_invalid");
       }
       const phase = String(journal.phase);
-      const versionRequired = operationPhaseRank(phase) >= 2;
+      const uploadIntentRequired = operationPhaseRank(phase) >= 2;
+      const versionRequired = operationPhaseRank(phase) >= 3;
       if (
+        uploadIntentRequired !== Array.isArray(journal.preUploadVersionIds) ||
+        (uploadIntentRequired &&
+          (journal.preUploadVersionIds as unknown[]).some(
+            (id) =>
+              typeof id !== "string" ||
+              !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(id),
+          )) ||
+        (uploadIntentRequired &&
+          canonicalJson(journal.preUploadVersionIds) !==
+            canonicalJson(
+              [...new Set(journal.preUploadVersionIds as string[])].sort(),
+            )) ||
         versionRequired !== (typeof journal.versionId === "string") ||
         (versionRequired &&
           !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(String(journal.versionId)))
@@ -548,9 +576,12 @@ export async function deploySealedStore(options: {
         typeof journal.versionId === "string" &&
         deploymentHasExactVersionAtFullTraffic(liveBefore, journal.versionId);
       if (
-        ["intent-recorded", "schema-applied", "version-uploaded"].includes(
-          phase,
-        ) &&
+        [
+          "intent-recorded",
+          "schema-applied",
+          "upload-intent-recorded",
+          "version-uploaded",
+        ].includes(phase) &&
         liveBeforeDigest !== preDeploymentDigest &&
         !uploadedVersionAlreadyDeployed
       ) {
@@ -572,6 +603,7 @@ export async function deploySealedStore(options: {
           ...journalAuthority,
           phase: "intent-recorded",
           versionId: null,
+          preUploadVersionIds: null,
           updatedAt: new Date().toISOString(),
         };
         await writePrivateJson(options.journal.path, journal);
@@ -583,6 +615,7 @@ export async function deploySealedStore(options: {
   const retainPhase = async (
     phase: OperationPhase,
     versionId: string | null,
+    preUploadVersionIds?: readonly string[],
   ): Promise<void> => {
     if (!options.journal || !journalAuthority) return;
     const currentPhase = String(journal?.phase ?? "");
@@ -593,12 +626,19 @@ export async function deploySealedStore(options: {
     }
     const currentVersion =
       typeof journal?.versionId === "string" ? journal.versionId : null;
+    const currentPreUploadVersionIds = Array.isArray(
+      journal?.preUploadVersionIds,
+    )
+      ? (journal.preUploadVersionIds as string[])
+      : null;
+    const nextPreUploadVersionIds =
+      preUploadVersionIds ?? currentPreUploadVersionIds;
     if (currentVersion && versionId && currentVersion !== versionId) {
       throw new Error("release_operation_journal_version_changed");
     }
     if (requestedRank < currentRank) return;
     if (requestedRank === currentRank) {
-      if (requestedRank >= 2 && currentVersion !== versionId) {
+      if (requestedRank >= 3 && currentVersion !== versionId) {
         throw new Error("release_operation_journal_version_mismatch");
       }
       return;
@@ -606,13 +646,17 @@ export async function deploySealedStore(options: {
     if (requestedRank !== currentRank + 1) {
       throw new Error("release_operation_journal_phase_skip");
     }
-    if (requestedRank >= 2 !== (typeof versionId === "string")) {
+    if (
+      requestedRank >= 2 !== Array.isArray(nextPreUploadVersionIds) ||
+      requestedRank >= 3 !== (typeof versionId === "string")
+    ) {
       throw new Error("release_operation_journal_version_invalid");
     }
     journal = {
       ...journalAuthority,
       phase,
       versionId,
+      preUploadVersionIds: nextPreUploadVersionIds,
       updatedAt: new Date().toISOString(),
     };
     await writePrivateJson(options.journal.path, journal, { replace: true });
@@ -678,25 +722,126 @@ export async function deploySealedStore(options: {
   let versionId =
     typeof journal?.versionId === "string" ? journal.versionId : null;
   if (!versionId) {
-    const upload = options.runner(
-      [
-        "versions",
-        "upload",
-        "artifact/worker.mjs",
-        "--no-bundle",
-        "--assets",
-        "artifact/assets",
-        "--config",
-        config,
-        "--tag",
-        VERSION,
-        "--message",
-        options.envelope.releaseId,
-      ],
-      { cwd: options.cwd },
-    );
-    versionId = parseVersionId(upload);
-    await retainPhase("version-uploaded", versionId);
+    const listVersions = (): JsonObject[] => {
+      const value = parseJsonOutput(
+        options.runner(
+          [
+            "versions",
+            "list",
+            "--name",
+            options.target.workerName,
+            "--config",
+            config,
+            "--json",
+          ],
+          { cwd: options.cwd },
+        ),
+        "worker_version_inventory",
+      );
+      if (
+        !Array.isArray(value) ||
+        value.some(
+          (entry) =>
+            !isRecord(entry) ||
+            typeof entry.id !== "string" ||
+            !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(entry.id),
+        )
+      ) {
+        throw new Error("worker_version_inventory_invalid");
+      }
+      const ids = (value as JsonObject[]).map((entry) => String(entry.id));
+      if (new Set(ids).size !== ids.length) {
+        throw new Error("worker_version_inventory_duplicate");
+      }
+      return value as JsonObject[];
+    };
+    const verifyOwnedVersion = (candidateId: string): void => {
+      const value = parseJsonOutput(
+        options.runner(
+          [
+            "versions",
+            "view",
+            candidateId,
+            "--name",
+            options.target.workerName,
+            "--config",
+            config,
+            "--json",
+          ],
+          { cwd: options.cwd },
+        ),
+        "worker_uploaded_version_readback",
+      );
+      const annotations =
+        isRecord(value) && isRecord(value.annotations) ? value.annotations : {};
+      if (
+        annotations["workers/message"] !== options.envelope.releaseId ||
+        annotations["workers/tag"] !== VERSION
+      ) {
+        throw new Error("worker_uploaded_version_annotation_mismatch");
+      }
+      assertVersionBindings(value, candidateId, options.target);
+    };
+    let preUploadVersionIds = Array.isArray(journal?.preUploadVersionIds)
+      ? (journal.preUploadVersionIds as string[])
+      : null;
+    const createdUploadIntent = preUploadVersionIds === null;
+    if (createdUploadIntent) {
+      preUploadVersionIds = listVersions()
+        .map((entry) => String(entry.id))
+        .sort();
+      await retainPhase("upload-intent-recorded", null, preUploadVersionIds);
+    }
+    if (!preUploadVersionIds) {
+      throw new Error("release_operation_journal_upload_intent_missing");
+    }
+    const sealedPreUploadVersionIds = preUploadVersionIds;
+    const recoverUploadedVersion = (): string | null => {
+      const prior = new Set(sealedPreUploadVersionIds);
+      const candidates = listVersions().filter(
+        (entry) => !prior.has(String(entry.id)),
+      );
+      if (candidates.length > 1) {
+        throw new Error("worker_uploaded_version_recovery_ambiguous");
+      }
+      if (candidates.length === 0) return null;
+      const candidateId = String(candidates[0]!.id);
+      verifyOwnedVersion(candidateId);
+      return candidateId;
+    };
+    if (!createdUploadIntent) {
+      versionId = recoverUploadedVersion();
+      if (!versionId) throw new Error("worker_upload_outcome_unknown");
+    } else {
+      try {
+        const upload = options.runner(
+          [
+            "versions",
+            "upload",
+            "artifact/worker.mjs",
+            "--no-bundle",
+            "--assets",
+            "artifact/assets",
+            "--config",
+            config,
+            "--tag",
+            VERSION,
+            "--message",
+            options.envelope.releaseId,
+          ],
+          { cwd: options.cwd },
+        );
+        versionId = parseVersionId(upload);
+        if (sealedPreUploadVersionIds.includes(versionId)) {
+          throw new Error("worker_uploaded_version_preexisting");
+        }
+        verifyOwnedVersion(versionId);
+      } catch (error) {
+        versionId = recoverUploadedVersion();
+        if (!versionId) throw error;
+      }
+    }
+    await retainPhase("version-uploaded", versionId, sealedPreUploadVersionIds);
   }
   const version = parseJsonOutput(
     options.runner(

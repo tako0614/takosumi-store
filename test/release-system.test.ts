@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -16,6 +17,7 @@ import {
   canonicalJson,
   deploymentHasExactVersionAtFullTraffic,
   sha256Bytes,
+  targetFingerprint,
   validatePolicy,
   validateRealizedConfig,
   writePrivateJson,
@@ -33,6 +35,7 @@ import {
   decryptSnapshot,
   encryptSnapshot,
   prepareReplicaInput,
+  readProductionIcon,
   scanSanitizedSnapshot,
 } from "../scripts/store-release-replica-adapter.ts";
 
@@ -326,7 +329,7 @@ describe("release mutation safety", () => {
     ).rejects.toThrow("staging_canary_readback_mismatch");
   });
 
-  test("retains schema-applied authority when upload fails after D1 mutation", async () => {
+  test("retains upload intent authority when upload fails after D1 mutation", async () => {
     const root = await mkdtemp(join(tmpdir(), "store-release-journal-test-"));
     temporaryRoots.push(root);
     await chmod(root, 0o700);
@@ -354,10 +357,11 @@ describe("release mutation safety", () => {
       if (args[0] === "versions" && args[1] === "upload") {
         throw new Error("injected_upload_failure");
       }
+      if (args[0] === "versions" && args[1] === "list") return "[]";
       return "";
     };
     const envelope = {
-      releaseId: "takosumi-store-0.1.11-attempt-1",
+      releaseId: "takosumi-store-0.1.12-attempt-1",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests: ["sha256:a", "sha256:b", "sha256:c"] },
     } as unknown as ReleaseEnvelope;
@@ -383,8 +387,9 @@ describe("release mutation safety", () => {
       }),
     ).rejects.toThrow("injected_upload_failure");
     const journal = JSON.parse(await readFile(journalPath, "utf8"));
-    expect(journal.phase).toBe("schema-applied");
+    expect(journal.phase).toBe("upload-intent-recorded");
     expect(journal.versionId).toBeNull();
+    expect(journal.preUploadVersionIds).toEqual([]);
     expect(journal.artifactDigests).toEqual(envelope.candidate.artifactDigests);
     expect(
       calls.some(
@@ -442,8 +447,39 @@ describe("fresh replica evidence", () => {
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
     ]);
     const iconDigest = sha256Bytes(icon);
+    const iconUrl = `{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/icons/${iconDigest.slice(7)}`;
+    const listing = {
+      id: "tako/takos",
+      scope: "tako",
+      slug: "takos",
+      git: "https://github.com/tako0614/takos.git",
+      ref: "HEAD",
+      path: "deploy/opentofu",
+      kind: "capsule",
+      surface: "workspace",
+      provider: null,
+      category: "productivity",
+      tags: "[]",
+      suggested_name: "takos",
+      name_ja: "Takos",
+      name_en: "Takos",
+      description_ja: "AI workspace",
+      description_en: "AI workspace",
+      badge_ja: null,
+      badge_en: null,
+      icon_url: iconUrl,
+      inputs: "{}",
+      output_allowlist: "[]",
+      publisher_handle: "tako0614",
+      publisher_display_name: "Takos",
+      status: "visible",
+      created_at: "2026-07-01T00:00:00.000Z",
+      updated_at: "2026-07-01T00:00:00.000Z",
+    };
+    const sqlValue = (value: unknown) =>
+      value === null ? "NULL" : `'${String(value).replaceAll("'", "''")}'`;
     const bundle = (
-      sql: string,
+      row: typeof listing = listing,
       icons: unknown[] = [
         {
           key: `icons/${iconDigest.slice(7)}`,
@@ -452,58 +488,63 @@ describe("fresh replica evidence", () => {
           sha256: iconDigest,
         },
       ],
+      sqlOverride?: string,
     ) => {
+      const columns = Object.keys(row);
+      const sql =
+        sqlOverride ??
+        [
+          "BEGIN;",
+          `INSERT INTO listings (${columns.join(", ")})`,
+          `VALUES (${columns.map((column) => sqlValue(row[column as keyof typeof row])).join(", ")});`,
+          "COMMIT;",
+        ].join("\n");
       const sqlBytes = Buffer.from(sql);
       return Buffer.from(
         JSON.stringify({
           kind: "takosumi.store-sanitized-replica-bundle@v1",
+          source: {
+            rowDigest: `sha256:${"1".repeat(64)}`,
+            iconSourceKind: "public-https-reference",
+            iconSourceReferenceDigest: `sha256:${"2".repeat(64)}`,
+            iconDigest,
+          },
+          listing: row,
           sqlBase64: sqlBytes.toString("base64"),
           sqlSha256: sha256Bytes(sqlBytes),
           icons,
         }),
       );
     };
-    const safe = bundle(
-      `BEGIN; INSERT INTO listings(id, icon_url) VALUES ('tako/takos', '{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/icons/${iconDigest.slice(7)}'); COMMIT;`,
-    );
+    const safe = bundle();
     const proof = scanSanitizedSnapshot(safe, production);
     expect(proof.snapshotDigest).toBe(sha256Bytes(safe));
     expect(proof.scannerDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(() =>
       scanSanitizedSnapshot(
-        bundle(
-          `INSERT INTO listings(id, icon_url) VALUES ('tako/takos', '${production.databaseId}/icons/${iconDigest.slice(7)}'); -- {{TAKOSUMI_STORE_REPLICA_ORIGIN}}`,
-        ),
+        bundle({ ...listing, description_en: production.databaseId }),
         production,
       ),
     ).toThrow("replica_snapshot_contains_production_identity");
     expect(() =>
       scanSanitizedSnapshot(
-        bundle(
-          `INSERT INTO listings(id, icon_url, secret) VALUES ('tako/takos', '{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/icons/${iconDigest.slice(7)}', 'sk_live_not_allowed');`,
-        ),
+        bundle({ ...listing, description_en: "sk_live_not_allowed" }),
         production,
       ),
     ).toThrow("replica_snapshot_credential_literal_detected");
     expect(() =>
+      scanSanitizedSnapshot(bundle(listing, []), production),
+    ).toThrow("replica_snapshot_bundle_shape_invalid");
+    expect(() =>
       scanSanitizedSnapshot(
         bundle(
-          `INSERT INTO listings(id, icon_url) VALUES ('tako/takos', '{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/icons/${iconDigest.slice(7)}');`,
-          [],
+          listing,
+          undefined,
+          "BEGIN; INSERT INTO publishers(id) VALUES ('private-row'); COMMIT;",
         ),
         production,
       ),
-    ).toThrow("replica_snapshot_bundle_shape_invalid");
-    for (const table of ["publishers", "sessions", "reports"]) {
-      expect(() =>
-        scanSanitizedSnapshot(
-          bundle(
-            `INSERT INTO ${table}(id) VALUES ('private-row'); -- tako/takos {{TAKOSUMI_STORE_REPLICA_ORIGIN}} icons/${iconDigest.slice(7)}`,
-          ),
-          production,
-        ),
-      ).toThrow("replica_snapshot_non_public_catalog_mutation");
-    }
+    ).toThrow("replica_snapshot_non_public_catalog_mutation");
     for (const pii of [
       "person@example.com",
       "192.0.2.44",
@@ -513,12 +554,10 @@ describe("fresh replica evidence", () => {
     ]) {
       expect(() =>
         scanSanitizedSnapshot(
-          bundle(
-            `INSERT INTO listings(id, icon_url, description_en) VALUES ('tako/takos', '{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/icons/${iconDigest.slice(7)}', '${pii}');`,
-          ),
+          bundle({ ...listing, description_en: pii }),
           production,
         ),
-      ).toThrow("replica_snapshot_pii_literal_detected");
+      ).toThrow(/replica_snapshot(?:_listing)?_pii_literal_detected/u);
     }
   });
 });
@@ -532,6 +571,7 @@ describe("encrypted production replica snapshot", () => {
     const authority = {
       configFingerprint: `sha256:${"1".repeat(64)}`,
       migrationPlanDigest: `sha256:${"2".repeat(64)}`,
+      productionConfigDigest: `sha256:${"7".repeat(64)}`,
       productionTargetFingerprint: `sha256:${"3".repeat(64)}`,
     };
     const envelope = {
@@ -598,8 +638,13 @@ describe("encrypted production replica snapshot", () => {
     await mkdir(secretRoot, { mode: 0o700 });
     const keyPath = join(secretRoot, "snapshot.key");
     const subdomainPath = join(secretRoot, "workers-subdomain");
+    const productionConfigPath = join(secretRoot, "wrangler.production.toml");
     await writeFile(keyPath, Buffer.alloc(32, 0x31), { mode: 0o600 });
     await writeFile(subdomainPath, "example\n", { mode: 0o600 });
+    const productionConfigBytes = Buffer.from(configToml(target()));
+    await writeFile(productionConfigPath, productionConfigBytes, {
+      mode: 0o600,
+    });
     const previousKey = process.env.TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE;
     const previousSubdomain =
       process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE;
@@ -650,14 +695,26 @@ describe("encrypted production replica snapshot", () => {
       calls.push([...args]);
       return JSON.stringify([{ results: [listing] }]);
     };
+    const productionReadClient = {
+      accountId: target().accountId,
+      async get() {
+        throw new Error("unexpected_production_r2_read");
+      },
+    } as import("../scripts/store-release-common.ts").CloudflareReadClient;
     const envelope = {
-      releaseId: "takosumi-store-0.1.11-input-test",
+      releaseId: "takosumi-store-0.1.12-input-test",
       source: { commit: "a".repeat(40) },
       controllerSource: { commit: "b".repeat(40) },
       authority: { replicaAdapterDigest: `sha256:${"c".repeat(64)}` },
       candidate: {
         artifactDigests: [`sha256:${"d".repeat(64)}`],
         policyDigest: `sha256:${"e".repeat(64)}`,
+        configDigest: sha256Bytes(productionConfigBytes),
+        targetFingerprint: targetFingerprint(
+          target(),
+          sha256Bytes(productionConfigBytes),
+          `sha256:${"e".repeat(64)}`,
+        ),
       },
     } as unknown as ReleaseEnvelope;
     const manifest = {
@@ -670,10 +727,17 @@ describe("encrypted production replica snapshot", () => {
         manifest,
         evidenceDirectory: root,
         runner,
-        productionConfigPath: "/operator/store/wrangler.production.toml",
+        cloudflareReadClient: productionReadClient,
+        productionConfigPath,
       });
       const retained = await readFile(
         join(root, "worker-release-replica-sanitized-snapshot.json"),
+      );
+      // Simulate a process dying after ciphertext retention but before the
+      // provenance/input sidecars were durably retained.
+      await rm(join(root, "worker-release-replica-input.json"));
+      await rm(
+        join(root, "worker-release-replica-production-export-provenance.json"),
       );
       const second = await prepareReplicaInput({
         envelope,
@@ -681,7 +745,8 @@ describe("encrypted production replica snapshot", () => {
         manifest,
         evidenceDirectory: root,
         runner,
-        productionConfigPath: "/operator/store/wrangler.production.toml",
+        cloudflareReadClient: productionReadClient,
+        productionConfigPath,
       });
       expect(canonicalJson(second.evidence)).toBe(
         canonicalJson(first.evidence),
@@ -694,13 +759,19 @@ describe("encrypted production replica snapshot", () => {
         ).equals(retained),
       ).toBe(true);
       expect(retained.includes(Buffer.from("tako/takos"))).toBe(false);
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(1);
       for (const args of calls) {
         expect(args.slice(0, 3)).toEqual([
           "d1",
           "execute",
           "takosumi-store-db",
         ]);
+        const sealedConfigPath = args[args.indexOf("--config") + 1]!;
+        expect(sealedConfigPath).toStartWith(
+          join(tmpdir(), "takosumi-store-production-read-"),
+        );
+        expect(sealedConfigPath).toEndWith("/wrangler.toml");
+        expect(await Bun.file(sealedConfigPath).exists()).toBe(false);
         const query = args[args.indexOf("--command") + 1]!;
         expect(query).toStartWith("SELECT ");
         expect(query).toContain("WHERE id = 'tako/takos'");
@@ -721,6 +792,114 @@ describe("encrypted production replica snapshot", () => {
         process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE =
           previousSubdomain;
       }
+    }
+  });
+
+  test("binds production R2 icon reads to the sealed config and size cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-production-icon-test-"));
+    temporaryRoots.push(root);
+    await chmod(root, 0o700);
+    const configPath = join(root, "wrangler.toml");
+    await writeFile(configPath, "sealed", { mode: 0o400 });
+    const iconBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    const digest = sha256Bytes(iconBytes).slice("sha256:".length);
+    let oversized = false;
+    const calls: string[][] = [];
+    const runner = (args: readonly string[]): string => {
+      calls.push([...args]);
+      const output = args[args.indexOf("--file") + 1]!;
+      writeFileSync(
+        output,
+        oversized ? Buffer.alloc(1024 * 1024 + 1, 0x41) : iconBytes,
+      );
+      return "";
+    };
+    const listing = {
+      icon_url: `https://store.takosumi.com/icons/${digest}`,
+    };
+    const cloudflareReadClient = {
+      accountId: target().accountId,
+      async get() {
+        return {
+          status: "ok",
+          result: {
+            objects: [
+              {
+                key: `icons/${digest}`,
+                size: oversized ? 1024 * 1024 + 1 : iconBytes.byteLength,
+              },
+            ],
+          },
+          resultInfo: null,
+        } as const;
+      },
+    } as import("../scripts/store-release-common.ts").CloudflareReadClient;
+    const result = await readProductionIcon({
+      listing,
+      policy: target(),
+      runner,
+      cwd: root,
+      productionConfigPath: configPath,
+      cloudflareReadClient,
+    });
+    expect(Buffer.from(result.bytes).equals(iconBytes)).toBe(true);
+    expect(result.sourceKind).toBe("production-r2");
+    expect(calls[0]![calls[0]!.indexOf("--config") + 1]).toBe(configPath);
+    oversized = true;
+    await expect(
+      readProductionIcon({
+        listing,
+        policy: target(),
+        runner,
+        cwd: root,
+        productionConfigPath: configPath,
+        cloudflareReadClient,
+      }),
+    ).rejects.toThrow("replica_production_export_icon_size_invalid");
+  });
+
+  test("cancels an oversized public icon stream before buffering it", async () => {
+    const previousFetch = globalThis.fetch;
+    let cancelled = false;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(700 * 1024));
+            controller.enqueue(new Uint8Array(700 * 1024));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "content-type": "image/png" } },
+      )) as unknown as typeof fetch;
+    try {
+      await expect(
+        readProductionIcon({
+          listing: {
+            icon_url:
+              "https://raw.githubusercontent.com/tako0614/takos/HEAD/web/public/logo.png",
+          },
+          policy: target(),
+          runner: () => {
+            throw new Error("unexpected_runner");
+          },
+          cwd: tmpdir(),
+          productionConfigPath: join(tmpdir(), "unused.toml"),
+          cloudflareReadClient: {
+            accountId: target().accountId,
+            async get() {
+              throw new Error("unexpected_r2_read");
+            },
+          },
+        }),
+      ).rejects.toThrow("replica_production_export_icon_size_invalid");
+      expect(cancelled).toBe(true);
+    } finally {
+      globalThis.fetch = previousFetch;
     }
   });
 

@@ -66,12 +66,55 @@ const validIcons = [
 function snapshotBundle(bytes: Buffer, mediaType: string): Buffer {
   const digest = sha256Bytes(bytes);
   const key = `icons/${digest.slice("sha256:".length)}`;
+  const listing = {
+    id: "tako/takos",
+    scope: "tako",
+    slug: "takos",
+    git: "https://github.com/tako0614/takos.git",
+    ref: "HEAD",
+    path: "deploy/opentofu",
+    kind: "capsule",
+    surface: "workspace",
+    provider: null,
+    category: "productivity",
+    tags: "[]",
+    suggested_name: "takos",
+    name_ja: "Takos",
+    name_en: "Takos",
+    description_ja: "AI workspace",
+    description_en: "AI workspace",
+    badge_ja: null,
+    badge_en: null,
+    icon_url: `{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/${key}`,
+    inputs: "{}",
+    output_allowlist: "[]",
+    publisher_handle: "tako0614",
+    publisher_display_name: "Takos",
+    status: "visible",
+    created_at: "2026-07-01T00:00:00.000Z",
+    updated_at: "2026-07-01T00:00:00.000Z",
+  };
+  const columns = Object.keys(listing);
+  const sqlValue = (value: unknown) =>
+    value === null ? "NULL" : `'${String(value).replaceAll("'", "''")}'`;
   const sql = Buffer.from(
-    `INSERT INTO listings(id, icon_url) VALUES ('tako/takos', '{{TAKOSUMI_STORE_REPLICA_ORIGIN}}/${key}');`,
+    [
+      "BEGIN;",
+      `INSERT INTO listings (${columns.join(", ")})`,
+      `VALUES (${columns.map((column) => sqlValue(listing[column as keyof typeof listing])).join(", ")});`,
+      "COMMIT;",
+    ].join("\n"),
   );
   return Buffer.from(
     JSON.stringify({
       kind: "takosumi.store-sanitized-replica-bundle@v1",
+      source: {
+        rowDigest: `sha256:${"1".repeat(64)}`,
+        iconSourceKind: "public-https-reference",
+        iconSourceReferenceDigest: `sha256:${"2".repeat(64)}`,
+        iconDigest: digest,
+      },
+      listing,
       sqlBase64: sql.toString("base64"),
       sqlSha256: sha256Bytes(sql),
       icons: [
@@ -217,7 +260,7 @@ function stubLiveStore(options: {
       return json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.11",
+        version: "0.1.12",
       });
     }
     if (url.pathname === "/readyz") {
@@ -226,7 +269,7 @@ function stubLiveStore(options: {
     if (url.pathname === "/.well-known/tcs") {
       return json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.11" },
+          software: { name: "takosumi-store", version: "0.1.12" },
           baseUrl: production.origin,
         },
       });
@@ -268,7 +311,7 @@ function stubLiveStore(options: {
         headers: { "content-type": "text/javascript" },
       });
     }
-    if (url.pathname === "/release-safety/0.1.11/fallback") {
+    if (url.pathname === "/release-safety/0.1.12/fallback") {
       return new Response(indexBytes, {
         headers: { "content-type": "text/html" },
       });
