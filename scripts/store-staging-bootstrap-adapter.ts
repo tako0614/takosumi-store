@@ -1556,6 +1556,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
     createMutationClient(credentials.accountId, credentials.apiToken);
 
   let evidenceValue: JsonObject;
+  let evidenceFile = EVIDENCE_FILE[action];
   if (action === "plan") {
     const recovery = envelope.authority.recoveryProgressDigest
       ? await planStoreStagingRecovery({
@@ -1570,6 +1571,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
     const absence = recovery
       ? null
       : await assertAbsent(policyRecord.policy, runner, source, client);
+    if (recovery) evidenceFile = "store-staging-bootstrap-recovery-plan.json";
     evidenceValue = {
       kind: "takosumi.store-staging-bootstrap-plan@v1",
       operationId: envelope.operationId,
@@ -1793,7 +1795,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
     } else throw new Error("bootstrap_action_unreachable");
   }
   const bytes = await writePrivateJson(
-    join(evidence, EVIDENCE_FILE[action]),
+    join(evidence, evidenceFile),
     evidenceValue,
   );
   return {
@@ -1801,7 +1803,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
     status: action,
     action,
     operationId: envelope.operationId,
-    evidenceFile: EVIDENCE_FILE[action],
+    evidenceFile,
     evidenceDigest: sha256Bytes(bytes),
     targetInventoryDigest: digestJson(evidenceValue),
     productionFallback: false,
