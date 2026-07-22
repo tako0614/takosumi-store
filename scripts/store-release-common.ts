@@ -1063,9 +1063,14 @@ export async function verifyTrackedReleaseTagSignature(
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
   if (
-    lines.length !== 1 ||
-    !/^shoutatomiyama0614@gmail[.]com ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u.test(
-      lines[0]!,
+    lines.length < 1 ||
+    lines.length > 16 ||
+    new Set(lines).size !== lines.length ||
+    lines.some(
+      (line) =>
+        !/^shoutatomiyama0614@gmail[.]com ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u.test(
+          line,
+        ),
     )
   ) {
     throw new Error("release_tag_trust_root_invalid");

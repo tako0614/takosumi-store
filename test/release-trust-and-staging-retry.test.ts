@@ -105,6 +105,51 @@ describe("tracked release tag trust", () => {
       verifyTrackedReleaseTagSignature(root, "vtest"),
     ).rejects.toThrow("release_tag_trust_root_invalid");
   });
+
+  test("keeps historical tags valid while accepting a rotated signer", async () => {
+    const root = await signedRepository();
+    execFileSync("/usr/bin/ssh-keygen", [
+      "-q",
+      "-t",
+      "ed25519",
+      "-N",
+      "",
+      "-f",
+      join(root, "rotated-signer"),
+    ]);
+    const rotatedPublicKey = (
+      await readFile(join(root, "rotated-signer.pub"), "utf8")
+    )
+      .trim()
+      .split(/\s+/u)
+      .slice(0, 2)
+      .join(" ");
+    const trust = join(root, "release/trust/allowed-signers");
+    await writeFile(
+      trust,
+      `${await readFile(trust, "utf8")}shoutatomiyama0614@gmail.com ${rotatedPublicKey}\n`,
+    );
+    git(root, "add", "release/trust/allowed-signers");
+    git(root, "commit", "-m", "test: rotate release signer");
+    git(
+      root,
+      "-c",
+      "gpg.format=ssh",
+      "-c",
+      `user.signingkey=${join(root, "rotated-signer")}`,
+      "tag",
+      "-s",
+      "vnext",
+      "-m",
+      "rotated signed test tag",
+    );
+    await expect(
+      verifyTrackedReleaseTagSignature(root, "vtest"),
+    ).resolves.toBeUndefined();
+    await expect(
+      verifyTrackedReleaseTagSignature(root, "vnext"),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("staging edge propagation retry", () => {
