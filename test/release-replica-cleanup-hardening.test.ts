@@ -529,9 +529,10 @@ describe("replica cleanup authority", () => {
       }
       throw new Error(`unexpected:${args.join(" ")}`);
     }) as Parameters<typeof verifyReplicaStoragePreserved>[0]["runner"];
+    let objectRequests = 0;
     const client: CloudflareReadClient = {
       accountId: inventory.accountId,
-      get: async (path) => {
+      get: async (path, query) => {
         if (path.endsWith("/r2/buckets")) {
           return {
             status: "ok",
@@ -540,10 +541,18 @@ describe("replica cleanup authority", () => {
           };
         }
         if (path.endsWith("/objects")) {
+          objectRequests += 1;
+          if (query?.cursor === "next-page") {
+            return {
+              status: "ok",
+              result: [],
+              resultInfo: null,
+            };
+          }
           return {
             status: "ok",
-            result: { objects: [{ key: iconKey }] },
-            resultInfo: null,
+            result: [{ key: iconKey }],
+            resultInfo: { cursor: "next-page" },
           };
         }
         return { status: "not-found" };
@@ -570,6 +579,7 @@ describe("replica cleanup authority", () => {
         cloudflareReadClient: client,
       });
     await expect(verify()).resolves.toMatch(/^sha256:[0-9a-f]{64}$/u);
+    expect(objectRequests).toBe(2);
 
     state.databaseId = "20000000-0000-4000-8000-000000000099";
     await expect(verify()).rejects.toThrow(
@@ -974,7 +984,7 @@ describe("replica cleanup authority", () => {
         if (path.endsWith("/objects")) {
           return {
             status: "ok",
-            result: { objects: [{ key: iconKey }] },
+            result: [{ key: iconKey }],
             resultInfo: null,
           };
         }
@@ -1584,7 +1594,7 @@ describe("replica cleanup authority", () => {
         if (path.includes("/objects")) {
           return {
             status: "ok",
-            result: { objects: state.object ? [{ key: icon.key }] : [] },
+            result: state.object ? [{ key: icon.key }] : [],
             resultInfo: null,
           };
         }

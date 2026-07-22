@@ -824,14 +824,12 @@ describe("encrypted production replica snapshot", () => {
       async get() {
         return {
           status: "ok",
-          result: {
-            objects: [
-              {
-                key: `icons/${digest}`,
-                size: oversized ? 1024 * 1024 + 1 : iconBytes.byteLength,
-              },
-            ],
-          },
+          result: [
+            {
+              key: `icons/${digest}`,
+              size: oversized ? 1024 * 1024 + 1 : iconBytes.byteLength,
+            },
+          ],
           resultInfo: null,
         } as const;
       },

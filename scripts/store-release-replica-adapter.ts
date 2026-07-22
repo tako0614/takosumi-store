@@ -1360,14 +1360,13 @@ export async function readProductionIcon(options: {
       `/accounts/${encodeURIComponent(options.policy.accountId)}/r2/buckets/${encodeURIComponent(options.policy.iconsBucketName)}/objects`,
       { prefix: objectKey, per_page: "1000" },
     );
-    if (objectMetadata.status !== "ok" || !isRecord(objectMetadata.result)) {
+    if (
+      objectMetadata.status !== "ok" ||
+      !Array.isArray(objectMetadata.result)
+    ) {
       throw new Error("replica_production_export_r2_icon_metadata_missing");
     }
-    const objects = objectMetadata.result.objects;
-    if (!Array.isArray(objects)) {
-      throw new Error("replica_production_export_r2_icon_metadata_invalid");
-    }
-    const matches = objects.filter(
+    const matches = objectMetadata.result.filter(
       (entry) => isRecord(entry) && entry.key === objectKey,
     );
     if (
@@ -4677,20 +4676,18 @@ async function listAllR2Objects(
       { per_page: "1000", ...(cursor ? { cursor } : {}) },
     );
     if (response.status === "not-found") return [];
-    if (response.status !== "ok" || !isRecord(response.result)) {
+    if (response.status !== "ok" || !Array.isArray(response.result)) {
       throw new Error("replica_r2_object_inventory_missing");
     }
-    const pageObjects = response.result.objects;
-    if (!Array.isArray(pageObjects)) {
-      throw new Error("replica_r2_object_inventory_invalid");
-    }
-    for (const entry of pageObjects) {
+    for (const entry of response.result) {
       if (!isRecord(entry) || typeof entry.key !== "string") {
         throw new Error("replica_r2_object_inventory_invalid");
       }
       objects.push(entry);
     }
-    const next = response.result.cursor;
+    const next = isRecord(response.resultInfo)
+      ? response.resultInfo.cursor
+      : undefined;
     if (typeof next !== "string" || next === "") return objects;
     cursor = next;
   }
