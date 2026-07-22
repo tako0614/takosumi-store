@@ -40,14 +40,49 @@ TAKOSUMI_RELEASE_REPLICA_API_TOKEN_FILE
 
 Raw Cloudflare credential variables are rejected by the fixed adapters.
 
+## One-time staging bootstrap
+
+The canonical staging target is created once, before the normal release
+envelope exists, through a separate controller authority. The public owner
+entrypoint is fixed to
+`scripts/store-staging-bootstrap-fixed-adapter.ts`; direct Wrangler deployment
+and arbitrary command/argument injection are not supported. The operator policy
+fixes exactly these non-production identities:
+
+```text
+Worker: takosumi-store-staging
+origin/custom domain: https://store-staging.takosumi.com
+D1: takosumi-store-staging-db
+KV: takosumi-store-staging-kv
+R2: takosumi-store-staging-icons
+```
+
+The lifecycle is `plan -> provision -> attest -> adopt`. Before the first
+Cloudflare mutation, provision writes create-only intents for all five
+resources. A lost create response is recovered only when one exact-name owner
+is found; zero or multiple matches become fail-closed `presence-unknown`
+evidence. Version bindings, 100% traffic, the exact custom-domain owner, and
+all storage IDs are read back before inventory is accepted. Generated staging
+Wrangler and release-policy bytes remain in the external `0700/0600` evidence
+directory until the operator copies their exact bytes to the private config
+repository.
+
+`adopt` binds those config/policy digests and permanently revokes bootstrap
+cleanup authority. Before adoption or a first normal candidate only,
+`cleanup-plan -> destroy` may delete the exact retained bootstrap inventory.
+`quarantine` instead removes the custom domain and disables workers.dev while
+retaining Worker/D1/KV/R2 for investigation. Production credential variables,
+production target fallback, placeholder resource IDs, and reusing production
+names are rejected for every bootstrap action.
+
 ## Build once
 
 The release commit must be clean canonical `main`, pushed to `origin/main`,
-and be the peeled commit of a pushed, signed, annotated `v0.1.1` tag.
+and be the peeled commit of a pushed, signed, annotated `v0.1.2` tag.
 
 ```bash
 bun run release:candidate -- \
-  --evidence-directory /absolute/operator/evidence/store-0.1.1 \
+  --evidence-directory /absolute/operator/evidence/store-0.1.2 \
   --operator-root /absolute/operator/root
 ```
 
