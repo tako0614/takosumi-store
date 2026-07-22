@@ -1379,7 +1379,7 @@ export function createWranglerRunner(options: {
   readonly apiToken: string;
 }): WranglerRunner {
   const execute = (args: readonly string[], invocation: { cwd: string }) =>
-    spawnSync(options.wranglerEntrypoint, args, {
+    spawnSync("node", [options.wranglerEntrypoint, ...args], {
       cwd: invocation.cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
