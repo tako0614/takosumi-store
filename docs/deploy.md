@@ -72,7 +72,7 @@ publishing this Store itself as an installable app:
 
 1. Push this repo to its remote (`https://github.com/tako0614/takosumi-store.git`).
 2. Run the public CI and release verification against the exact candidate SHA.
-3. Create a signed annotated `v0.1.6` tag at that exact commit and push both the
+3. Create a signed annotated `v0.1.7` tag at that exact commit and push both the
    commit and tag. The candidate builder rejects lightweight, unsigned,
    unpushed, or differently peeled tags.
 4. Register it as a submodule from the ecosystem root once the remote exists:

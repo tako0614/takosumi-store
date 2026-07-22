@@ -18,7 +18,7 @@ export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
 export const CANONICAL_CANARY_SOURCE_GIT =
   "https://github.com/tako0614/takos.git";
-export const VERSION = "0.1.6";
+export const VERSION = "0.1.7";
 export const TAG = `v${VERSION}`;
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
 export const ARTIFACT_MANIFEST_FILE = "takosumi-store-artifact-manifest.json";
@@ -1379,7 +1379,7 @@ export function createWranglerRunner(options: {
   readonly apiToken: string;
 }): WranglerRunner {
   const execute = (args: readonly string[], invocation: { cwd: string }) =>
-    spawnSync(process.execPath, [options.wranglerEntrypoint, ...args], {
+    spawnSync(options.wranglerEntrypoint, args, {
       cwd: invocation.cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

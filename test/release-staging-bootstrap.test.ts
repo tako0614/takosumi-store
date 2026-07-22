@@ -20,6 +20,7 @@ import {
   exactWorkerPresent,
   makeStagingConfig,
   planStoreStagingRecovery,
+  preflightProvisionNoWrite,
   provisionStoreStaging,
   quarantinedProgress,
   recoverExactlyOne,
@@ -30,6 +31,7 @@ import {
   type BootstrapProgress,
 } from "../scripts/store-staging-bootstrap-adapter.ts";
 import {
+  createWranglerRunner,
   sha256Bytes,
   validateRealizedConfig,
   type CloudflareReadClient,
@@ -414,6 +416,24 @@ describe("fixed one-time Store staging bootstrap", () => {
     }
   });
 
+  test("runs the sealed Wrangler entrypoint with its Node shebang", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-wrangler-runtime-test-"));
+    temporary.push(root);
+    const entrypoint = join(root, "wrangler-fixture.mjs");
+    await writeFile(
+      entrypoint,
+      '#!/usr/bin/env node\nif (process.release.name !== "node") process.exit(42);\nprocess.stdout.write("node-runtime\\n");\n',
+      { mode: 0o700 },
+    );
+    await chmod(entrypoint, 0o700);
+    const runner = createWranglerRunner({
+      wranglerEntrypoint: entrypoint,
+      accountId,
+      apiToken: "x".repeat(32),
+    });
+    expect(runner([], { cwd: root })).toBe("node-runtime\n");
+  });
+
   test("records every create intent before the first mutation and marks an unknown response fail-closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "store-bootstrap-test-"));
     temporary.push(root);
@@ -769,5 +789,273 @@ describe("fixed one-time Store staging bootstrap", () => {
         state: "presence-unknown",
       },
     ]);
+  });
+
+  test("preflights and completes the exact live partial-state path without recreating storage", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-bootstrap-full-resume-"));
+    temporary.push(root);
+    const evidence = join(root, "evidence");
+    await chmod(root, 0o700);
+    await mkdir(evidence, { mode: 0o700 });
+    const secretPath = join(root, "secret");
+    await writeFile(secretPath, "x".repeat(64), { mode: 0o600 });
+    const operationId = "store-staging-bootstrap-test-0001";
+    const versionId = "99999999-9999-4999-8999-999999999999";
+    const progress: BootstrapProgress = {
+      kind: "takosumi.store-staging-bootstrap-progress@v1",
+      operationId,
+      status: "provisioning",
+      resources: [
+        {
+          type: "d1",
+          name: rawPolicy.staging.databaseName,
+          state: "present",
+          id: databaseId,
+        },
+        {
+          type: "kv",
+          name: rawPolicy.staging.kvNamespaceName,
+          state: "present",
+          id: kvNamespaceId,
+        },
+        {
+          type: "r2",
+          name: rawPolicy.staging.iconsBucketName,
+          state: "present",
+        },
+        {
+          type: "worker",
+          name: rawPolicy.staging.workerName,
+          state: "presence-unknown",
+        },
+        {
+          type: "custom-domain",
+          name: rawPolicy.staging.customDomainHostname,
+          state: "intent-recorded",
+        },
+      ],
+      steps: ["all-create-intents-recorded-before-first-mutation"],
+      productionFallback: false,
+    };
+    const progressBytes = `${JSON.stringify(progress)}\n`;
+    await writeFile(
+      join(evidence, "store-staging-bootstrap-progress.json"),
+      progressBytes,
+      { mode: 0o600 },
+    );
+    const envelope: BootstrapEnvelope = {
+      kind: "takosumi.store-staging-bootstrap-envelope@v1",
+      operationId,
+      surfaceId: "takosumi-store",
+      requestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      source: {
+        repository: "https://github.com/tako0614/takosumi-store.git",
+        commit: sourceCommit,
+        clean: true,
+        pushed: true,
+      },
+      controllerSource: {
+        repository: "https://github.com/tako0614/takos-ecosystem.git",
+        commit: controllerCommit,
+        clean: true,
+        pushed: true,
+      },
+      authority: {
+        adapterDigest: `sha256:${"7".repeat(64)}`,
+        operatorPolicyDigest: `sha256:${"8".repeat(64)}`,
+        recoveryProgressDigest: sha256Bytes(progressBytes),
+      },
+      evidence: {
+        directory: evidence,
+        permissions: "0700-directory/0600-files",
+      },
+      productionFallback: false,
+    };
+    const policy = validateBootstrapPolicy(rawPolicy);
+    let uploaded = false;
+    let deployed = false;
+    let domainPresent = false;
+    const version = {
+      id: versionId,
+      annotations: {
+        "workers/message": operationId,
+        "workers/tag": "staging-bootstrap-v1",
+      },
+      resources: {
+        bindings: [
+          { name: "DB", type: "d1", database_id: databaseId },
+          { name: "KV", type: "kv_namespace", namespace_id: kvNamespaceId },
+          {
+            name: "ICONS",
+            type: "r2_bucket",
+            bucket_name: rawPolicy.staging.iconsBucketName,
+          },
+          { name: "ASSETS", type: "assets" },
+          { name: "APP_URL", type: "plain_text" },
+          {
+            name: "TAKOSUMI_ACCOUNTS_CLIENT_ID",
+            type: "plain_text",
+          },
+          {
+            name: "TAKOSUMI_ACCOUNTS_ISSUER_URL",
+            type: "plain_text",
+          },
+          { name: "SESSION_HASH_SALT", type: "secret_text" },
+        ],
+      },
+    };
+    const deployment = {
+      id: "deployment-1",
+      created_on: "2026-07-22T00:00:00.000Z",
+      versions: [{ version_id: versionId, percentage: 100 }],
+    };
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path, query) {
+        if (path.endsWith("/d1/database")) {
+          return {
+            status: "ok",
+            result: [
+              { uuid: databaseId, name: rawPolicy.staging.databaseName },
+            ],
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/storage/kv/namespaces")) {
+          return {
+            status: "ok",
+            result: [
+              { id: kvNamespaceId, title: rawPolicy.staging.kvNamespaceName },
+            ],
+            resultInfo: { total_pages: 1 },
+          };
+        }
+        if (path.endsWith("/r2/buckets")) {
+          return {
+            status: "ok",
+            result: { buckets: [{ name: rawPolicy.staging.iconsBucketName }] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/settings")) return { status: "not-found" };
+        if (path.endsWith("/versions")) {
+          return {
+            status: "ok",
+            result: { items: uploaded ? [{ id: versionId }] : [] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith(`/versions/${versionId}`)) {
+          return { status: "ok", result: version, resultInfo: null };
+        }
+        if (path.endsWith("/deployments")) {
+          return {
+            status: "ok",
+            result: { deployments: deployed ? [deployment] : [] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/workers/domains")) {
+          expect(query).toEqual({
+            hostname: rawPolicy.staging.customDomainHostname,
+          });
+          return {
+            status: "ok",
+            result: domainPresent
+              ? [
+                  {
+                    id: "domain-1",
+                    zone_id: "zone-1",
+                    hostname: rawPolicy.staging.customDomainHostname,
+                    service: rawPolicy.staging.workerName,
+                    environment: "production",
+                  },
+                ]
+              : [],
+            resultInfo: null,
+          };
+        }
+        throw new Error(`unexpected_full_resume_read:${path}`);
+      },
+    };
+    const preflightCalls: string[][] = [];
+    const preflightRunner = ((args: readonly string[]) => {
+      preflightCalls.push([...args]);
+      expect(args).toContain("--dry-run");
+      return "dry run complete\n";
+    }) as WranglerRunner;
+    preflightRunner.inspect = (args) => {
+      preflightCalls.push([...args]);
+      return { status: "ok", stdout: "[]\n" };
+    };
+    const preflight = await preflightProvisionNoWrite({
+      envelope,
+      policy,
+      source: root,
+      evidence,
+      secretPath,
+      runner: preflightRunner,
+      client,
+    });
+    expect(preflight).toMatchObject({
+      nextAbsentResource: "worker",
+      wranglerDryRun: "passed",
+      wranglerVersionsRead: "passed",
+      productionFallback: false,
+    });
+    expect(preflightCalls).toHaveLength(2);
+    const runnerCalls: string[][] = [];
+    const runner = ((args: readonly string[]) => {
+      runnerCalls.push([...args]);
+      if (args[0] === "versions" && args[1] === "upload") {
+        expect(args).not.toContain("--dry-run");
+        uploaded = true;
+        return `Version ID: ${versionId}\n`;
+      }
+      if (args[0] === "versions" && args[1] === "deploy") {
+        deployed = true;
+        return "deployed\n";
+      }
+      if (args[0] === "triggers" && args[1] === "deploy") {
+        domainPresent = true;
+        return "triggers deployed\n";
+      }
+      throw new Error(`unexpected_full_resume_runner:${args.join(" ")}`);
+    }) as WranglerRunner;
+    const inventory = await provisionStoreStaging({
+      envelope,
+      policy,
+      source: root,
+      evidence,
+      secretPath,
+      runner,
+      client,
+      mutationClient: {
+        async request() {
+          throw new Error("recovered_storage_must_not_be_recreated");
+        },
+      },
+    });
+    expect(inventory.target).toMatchObject({
+      databaseId,
+      kvNamespaceId,
+      versionId,
+    });
+    expect(runnerCalls.map((call) => call.slice(0, 2))).toEqual([
+      ["versions", "upload"],
+      ["versions", "deploy"],
+      ["triggers", "deploy"],
+    ]);
+    const completed = JSON.parse(
+      await readFile(
+        join(evidence, "store-staging-bootstrap-progress.json"),
+        "utf8",
+      ),
+    );
+    expect(completed.status).toBe("provisioned");
+    expect(
+      completed.resources.map((resource: { state: string }) => resource.state),
+    ).toEqual(["present", "present", "present", "present", "present"]);
   });
 });

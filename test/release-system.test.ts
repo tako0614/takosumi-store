@@ -230,7 +230,7 @@ describe("release mutation safety", () => {
       return "";
     };
     const envelope = {
-      releaseId: "takosumi-store-0.1.6-attempt-1",
+      releaseId: "takosumi-store-0.1.7-attempt-1",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests: ["sha256:a", "sha256:b", "sha256:c"] },
     } as unknown as ReleaseEnvelope;
