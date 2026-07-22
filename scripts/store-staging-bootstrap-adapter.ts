@@ -124,6 +124,7 @@ export interface BootstrapEnvelope extends JsonObject {
   readonly authority: {
     readonly adapterDigest: string;
     readonly operatorPolicyDigest: string;
+    readonly recoveryProgressDigest?: string;
   };
   readonly evidence: {
     readonly directory: string;
@@ -177,7 +178,7 @@ export interface BootstrapProgress extends JsonObject {
 
 interface MutationClient {
   request(
-    method: "DELETE" | "PUT",
+    method: "DELETE" | "POST" | "PUT",
     path: string,
     body?: unknown,
   ): Promise<unknown>;
@@ -433,16 +434,6 @@ export async function exactKvId(
   return id;
 }
 
-function parseCreatedId(
-  output: string,
-  expression: RegExp,
-  label: string,
-): string {
-  const match = output.match(expression)?.[1];
-  if (!match) throw new Error(`${label}_missing`);
-  return match.toLowerCase();
-}
-
 export function recoverExactlyOne<T>(
   values: readonly T[],
   predicate: (value: T) => boolean,
@@ -597,6 +588,143 @@ function updateProgress(
   };
 }
 
+function progressResource(
+  progress: BootstrapProgress,
+  type: BootstrapProgress["resources"][number]["type"],
+): BootstrapProgress["resources"][number] {
+  const matches = progress.resources.filter(
+    (resource) => resource.type === type,
+  );
+  if (matches.length !== 1)
+    throw new Error("bootstrap_progress_resource_invalid");
+  return matches[0]!;
+}
+
+function validateResumableProgress(
+  value: unknown,
+  envelope: BootstrapEnvelope,
+  target: BootstrapStagingTarget,
+): BootstrapProgress {
+  exactKeys(
+    value,
+    [
+      "kind",
+      "operationId",
+      "status",
+      "resources",
+      "steps",
+      "productionFallback",
+    ],
+    "bootstrap_progress",
+  );
+  const progress = value as BootstrapProgress;
+  if (
+    progress.kind !== "takosumi.store-staging-bootstrap-progress@v1" ||
+    progress.operationId !== envelope.operationId ||
+    progress.status !== "provisioning" ||
+    progress.productionFallback !== false ||
+    canonicalJson(progress.steps) !==
+      canonicalJson(["all-create-intents-recorded-before-first-mutation"])
+  ) {
+    throw new Error("bootstrap_progress_authority_mismatch");
+  }
+  const expected = [
+    ["d1", target.databaseName],
+    ["kv", target.kvNamespaceName],
+    ["r2", target.iconsBucketName],
+    ["worker", target.workerName],
+    ["custom-domain", target.customDomainHostname],
+  ] as const;
+  if (progress.resources.length !== expected.length)
+    throw new Error("bootstrap_progress_resource_invalid");
+  for (const [index, [type, name]] of expected.entries()) {
+    const resource = progress.resources[index];
+    if (
+      resource?.type !== type ||
+      resource.name !== name ||
+      !["intent-recorded", "present", "presence-unknown"].includes(
+        resource.state,
+      )
+    ) {
+      throw new Error("bootstrap_progress_resource_invalid");
+    }
+    if (
+      resource.state === "present" &&
+      ((type === "d1" && !UUID.test(resource.id ?? "")) ||
+        (type === "kv" && !KV_ID.test(resource.id ?? "")) ||
+        (type === "worker" && !UUID.test(resource.id ?? "")))
+    ) {
+      throw new Error("bootstrap_progress_resource_id_invalid");
+    }
+    if (!["d1", "kv", "worker"].includes(type) && resource.id !== undefined) {
+      throw new Error("bootstrap_progress_resource_id_invalid");
+    }
+  }
+  return progress;
+}
+
+async function readOrCreateProgress(options: {
+  envelope: BootstrapEnvelope;
+  policy: BootstrapPolicy;
+  source: string;
+  evidence: string;
+  runner: WranglerRunner;
+  client: CloudflareReadClient;
+}): Promise<BootstrapProgress> {
+  const progressPath = join(options.evidence, PROGRESS_FILE);
+  const progressPresent = await stat(progressPath)
+    .then((metadata) => metadata.isFile())
+    .catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") return false;
+      throw error;
+    });
+  if (progressPresent) {
+    const bytes = await readPrivateFile(progressPath, {
+      expectedDirectory: options.evidence,
+    });
+    if (
+      !SHA256.test(options.envelope.authority.recoveryProgressDigest ?? "") ||
+      sha256Bytes(bytes) !== options.envelope.authority.recoveryProgressDigest
+    ) {
+      throw new Error("bootstrap_recovery_progress_digest_mismatch");
+    }
+    return validateResumableProgress(
+      JSON.parse(bytes.toString("utf8")),
+      options.envelope,
+      options.policy.staging,
+    );
+  }
+  if (options.envelope.authority.recoveryProgressDigest !== undefined)
+    throw new Error("bootstrap_recovery_progress_missing");
+  await assertAbsent(
+    options.policy,
+    options.runner,
+    options.source,
+    options.client,
+  );
+  const target = options.policy.staging;
+  const progress: BootstrapProgress = {
+    kind: "takosumi.store-staging-bootstrap-progress@v1",
+    operationId: options.envelope.operationId,
+    status: "provisioning",
+    resources: [
+      { type: "d1", name: target.databaseName, state: "intent-recorded" },
+      { type: "kv", name: target.kvNamespaceName, state: "intent-recorded" },
+      { type: "r2", name: target.iconsBucketName, state: "intent-recorded" },
+      { type: "worker", name: target.workerName, state: "intent-recorded" },
+      {
+        type: "custom-domain",
+        name: target.customDomainHostname,
+        state: "intent-recorded",
+      },
+    ],
+    steps: ["all-create-intents-recorded-before-first-mutation"],
+    productionFallback: false,
+  };
+  await writePrivateJson(progressPath, progress);
+  return progress;
+}
+
 async function writeProgress(
   directory: string,
   progress: BootstrapProgress,
@@ -618,102 +746,100 @@ export async function provisionStoreStaging(options: {
   secretPath: string;
   runner: WranglerRunner;
   client: CloudflareReadClient;
+  mutationClient: MutationClient;
 }): Promise<BootstrapInventory> {
-  await assertAbsent(
-    options.policy,
-    options.runner,
-    options.source,
-    options.client,
-  );
   const target = options.policy.staging;
-  const progressPath = join(options.evidence, PROGRESS_FILE);
-  const progressInitial: BootstrapProgress = {
-    kind: "takosumi.store-staging-bootstrap-progress@v1",
-    operationId: options.envelope.operationId,
-    status: "provisioning",
-    resources: [
-      { type: "d1", name: target.databaseName, state: "intent-recorded" },
-      { type: "kv", name: target.kvNamespaceName, state: "intent-recorded" },
-      { type: "r2", name: target.iconsBucketName, state: "intent-recorded" },
-      { type: "worker", name: target.workerName, state: "intent-recorded" },
-      {
-        type: "custom-domain",
-        name: target.customDomainHostname,
-        state: "intent-recorded",
-      },
-    ],
-    steps: ["all-create-intents-recorded-before-first-mutation"],
-    productionFallback: false,
-  };
-  await writePrivateJson(progressPath, progressInitial);
-  let progress = progressInitial;
+  let progress = await readOrCreateProgress(options);
 
-  let databaseId: string;
-  try {
-    databaseId = parseCreatedId(
-      options.runner(["d1", "create", target.databaseName], {
-        cwd: options.source,
-      }),
-      /database_id\s*=\s*["']([0-9a-f-]{36})["']/iu,
-      "bootstrap_d1_create_id",
-    );
-  } catch (error) {
-    const recovered = await exactD1Id(options.client, target.databaseName);
-    if (!recovered) {
-      await writeProgress(
-        options.evidence,
-        updateProgress(progress, "d1", "presence-unknown"),
+  const recordedD1 = progressResource(progress, "d1");
+  let databaseId = await exactD1Id(options.client, target.databaseName);
+  if (databaseId && recordedD1.id && databaseId !== recordedD1.id)
+    throw new Error("bootstrap_d1_recovery_identity_mismatch");
+  if (!databaseId) {
+    if (recordedD1.state === "present")
+      throw new Error("bootstrap_d1_recovery_presence_mismatch");
+    try {
+      const created = await options.mutationClient.request(
+        "POST",
+        `/accounts/${options.client.accountId}/d1/database`,
+        { name: target.databaseName },
       );
-      throw error;
+      databaseId = isRecord(created)
+        ? String(created.uuid ?? created.id ?? "").toLowerCase()
+        : null;
+      if (!databaseId || !UUID.test(databaseId))
+        databaseId = await exactD1Id(options.client, target.databaseName);
+    } catch (error) {
+      databaseId = await exactD1Id(options.client, target.databaseName);
+      if (!databaseId) {
+        await writeProgress(
+          options.evidence,
+          updateProgress(progress, "d1", "presence-unknown"),
+        );
+        throw error;
+      }
     }
-    databaseId = recovered;
   }
+  if (!databaseId || !UUID.test(databaseId))
+    throw new Error("bootstrap_d1_create_readback_missing");
   progress = updateProgress(progress, "d1", "present", databaseId);
   await writeProgress(options.evidence, progress);
 
-  let kvNamespaceId: string;
-  try {
-    kvNamespaceId = parseCreatedId(
-      options.runner(["kv", "namespace", "create", target.kvNamespaceName], {
-        cwd: options.source,
-      }),
-      /["']?id["']?\s*[:=]\s*["']([0-9a-f]{32})["']/iu,
-      "bootstrap_kv_create_id",
-    );
-  } catch (error) {
-    const recovered = await exactKvId(options.client, target.kvNamespaceName);
-    if (!recovered) {
-      await writeProgress(
-        options.evidence,
-        updateProgress(progress, "kv", "presence-unknown"),
+  const recordedKv = progressResource(progress, "kv");
+  let kvNamespaceId = await exactKvId(options.client, target.kvNamespaceName);
+  if (kvNamespaceId && recordedKv.id && kvNamespaceId !== recordedKv.id)
+    throw new Error("bootstrap_kv_recovery_identity_mismatch");
+  if (!kvNamespaceId) {
+    if (recordedKv.state === "present")
+      throw new Error("bootstrap_kv_recovery_presence_mismatch");
+    try {
+      const created = await options.mutationClient.request(
+        "POST",
+        `/accounts/${options.client.accountId}/storage/kv/namespaces`,
+        { title: target.kvNamespaceName },
       );
-      throw error;
+      kvNamespaceId = isRecord(created)
+        ? String(created.id ?? "").toLowerCase()
+        : null;
+      if (!kvNamespaceId || !KV_ID.test(kvNamespaceId))
+        kvNamespaceId = await exactKvId(options.client, target.kvNamespaceName);
+    } catch (error) {
+      kvNamespaceId = await exactKvId(options.client, target.kvNamespaceName);
+      if (!kvNamespaceId) {
+        await writeProgress(
+          options.evidence,
+          updateProgress(progress, "kv", "presence-unknown"),
+        );
+        throw error;
+      }
     }
-    kvNamespaceId = recovered;
   }
+  if (!kvNamespaceId || !KV_ID.test(kvNamespaceId))
+    throw new Error("bootstrap_kv_create_readback_missing");
   progress = updateProgress(progress, "kv", "present", kvNamespaceId);
   await writeProgress(options.evidence, progress);
 
-  try {
-    options.runner(["r2", "bucket", "create", target.iconsBucketName], {
-      cwd: options.source,
-    });
-  } catch (error) {
-    if (!(await exactR2(options.client, target.iconsBucketName))) {
-      await writeProgress(
-        options.evidence,
-        updateProgress(progress, "r2", "presence-unknown"),
+  let r2Present = await exactR2(options.client, target.iconsBucketName);
+  if (!r2Present) {
+    try {
+      await options.mutationClient.request(
+        "POST",
+        `/accounts/${options.client.accountId}/r2/buckets`,
+        { name: target.iconsBucketName },
       );
-      throw error;
+    } catch (error) {
+      r2Present = await exactR2(options.client, target.iconsBucketName);
+      if (!r2Present) {
+        await writeProgress(
+          options.evidence,
+          updateProgress(progress, "r2", "presence-unknown"),
+        );
+        throw error;
+      }
     }
+    r2Present = await exactR2(options.client, target.iconsBucketName);
   }
-  if (!(await exactR2(options.client, target.iconsBucketName))) {
-    await writeProgress(
-      options.evidence,
-      updateProgress(progress, "r2", "presence-unknown"),
-    );
-    throw new Error("bootstrap_r2_readback_missing");
-  }
+  if (!r2Present) throw new Error("bootstrap_r2_readback_missing");
   progress = updateProgress(progress, "r2", "present");
   await writeProgress(options.evidence, progress);
 
@@ -966,6 +1092,8 @@ function validateEnvelope(value: unknown): BootstrapEnvelope {
     envelope.controllerSource.pushed !== true ||
     !SHA256.test(envelope.authority.adapterDigest) ||
     !SHA256.test(envelope.authority.operatorPolicyDigest) ||
+    (envelope.authority.recoveryProgressDigest !== undefined &&
+      !SHA256.test(envelope.authority.recoveryProgressDigest)) ||
     !envelope.evidence.directory.startsWith("/") ||
     envelope.evidence.permissions !== "0700-directory/0600-files" ||
     envelope.productionFallback !== false ||
@@ -1381,6 +1509,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
       secretPath,
       runner,
       client,
+      mutationClient: mutation,
     });
   } else {
     const inventory = await readInventory(evidence, envelope);
