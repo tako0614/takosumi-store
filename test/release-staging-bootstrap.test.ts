@@ -16,6 +16,7 @@ import {
   exactD1Id,
   exactKvId,
   makeStagingConfig,
+  planStoreStagingRecovery,
   provisionStoreStaging,
   quarantinedProgress,
   recoverExactlyOne,
@@ -475,6 +476,58 @@ describe("fixed one-time Store staging bootstrap", () => {
       },
       productionFallback: false,
     };
+    const planClient: CloudflareReadClient = {
+      accountId,
+      async get(path, query) {
+        if (path.endsWith("/d1/database")) {
+          return {
+            status: "ok",
+            result: [
+              { uuid: databaseId, name: rawPolicy.staging.databaseName },
+            ],
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/storage/kv/namespaces")) {
+          return {
+            status: "ok",
+            result: [
+              { id: kvNamespaceId, title: rawPolicy.staging.kvNamespaceName },
+            ],
+            resultInfo: { total_pages: 1 },
+          };
+        }
+        if (path.endsWith("/r2/buckets")) {
+          expect(query).toEqual({
+            name_contains: rawPolicy.staging.iconsBucketName,
+            per_page: "1000",
+          });
+          return {
+            status: "ok",
+            result: { buckets: [{ name: rawPolicy.staging.iconsBucketName }] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/workers/domains")) {
+          return { status: "ok", result: [], resultInfo: null };
+        }
+        throw new Error(`unexpected_plan_read:${path}`);
+      },
+    };
+    const planRunner = (() => {
+      throw new Error("recovery_plan_must_not_mutate");
+    }) as WranglerRunner;
+    planRunner.inspect = () => ({ status: "not-found", stdout: "" });
+    const recoveryPlan = await planStoreStagingRecovery({
+      envelope,
+      policy: validateBootstrapPolicy(rawPolicy),
+      evidence,
+      source: root,
+      runner: planRunner,
+      client: planClient,
+    });
+    expect(recoveryPlan.nextAbsentResource).toBe("worker");
+    expect(recoveryPlan.productionFallback).toBeFalse();
     const client: CloudflareReadClient = {
       accountId,
       async get(path, query) {
