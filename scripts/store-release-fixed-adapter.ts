@@ -33,6 +33,7 @@ import {
   readPolicy,
   readRuntimeTopology,
   runLiveChecks,
+  runStagingLiveChecks,
   secureResolveInside,
   sha256Bytes,
   targetFingerprint,
@@ -76,6 +77,8 @@ const OPERATION_PHASES = [
   "upload-intent-recorded",
   "version-uploaded",
   "deployed",
+  "trigger-intent-recorded",
+  "trigger-deployed",
   "verified",
 ] as const;
 type OperationPhase = (typeof OPERATION_PHASES)[number];
@@ -454,6 +457,9 @@ export async function deploySealedStore(options: {
   readonly candidateChecks: ReleaseEnvelope["candidate"]["healthChecks"];
   readonly deployTriggers?: boolean;
   readonly readTopology: () => Promise<JsonObject>;
+  readonly preverifiedSchema?: {
+    readonly migrationLineageDigest: string;
+  };
   readonly journal?: {
     readonly path: string;
     readonly environment: string;
@@ -588,7 +594,12 @@ export async function deploySealedStore(options: {
         throw new Error("release_deployment_head_changed_before_promotion");
       }
       if (
-        ["deployed", "verified"].includes(phase) &&
+        [
+          "deployed",
+          "trigger-intent-recorded",
+          "trigger-deployed",
+          "verified",
+        ].includes(phase) &&
         (typeof journal.versionId !== "string" ||
           !deploymentHasExactVersionAtFullTraffic(
             liveBefore,
@@ -643,7 +654,11 @@ export async function deploySealedStore(options: {
       }
       return;
     }
-    if (requestedRank !== currentRank + 1) {
+    const skippedOptionalTriggerPhases =
+      options.deployTriggers !== true &&
+      currentPhase === "deployed" &&
+      phase === "verified";
+    if (requestedRank !== currentRank + 1 && !skippedOptionalTriggerPhases) {
       throw new Error("release_operation_journal_phase_skip");
     }
     if (
@@ -661,22 +676,20 @@ export async function deploySealedStore(options: {
     };
     await writePrivateJson(options.journal.path, journal, { replace: true });
   };
-  options.runner(
-    [
-      "d1",
-      "migrations",
-      "apply",
-      options.target.databaseName,
-      "--remote",
-      "--config",
-      config,
-    ],
-    { cwd: options.cwd },
-  );
-  await retainPhase(
-    "schema-applied",
-    typeof journal?.versionId === "string" ? journal.versionId : null,
-  );
+  if (!options.preverifiedSchema) {
+    options.runner(
+      [
+        "d1",
+        "migrations",
+        "apply",
+        options.target.databaseName,
+        "--remote",
+        "--config",
+        config,
+      ],
+      { cwd: options.cwd },
+    );
+  }
   const migrations = options.runner(
     [
       "d1",
@@ -711,6 +724,17 @@ export async function deploySealedStore(options: {
   if (!migrationLineageMatches(migrationLineage, options.manifest)) {
     throw new Error("d1_migration_lineage_mismatch");
   }
+  if (
+    options.preverifiedSchema &&
+    digestJson(migrationLineage) !==
+      options.preverifiedSchema.migrationLineageDigest
+  ) {
+    throw new Error("d1_preverified_migration_lineage_mismatch");
+  }
+  await retainPhase(
+    "schema-applied",
+    typeof journal?.versionId === "string" ? journal.versionId : null,
+  );
   if (options.journal?.environment === "staging") {
     await ensureStagingCanary({
       runner: options.runner,
@@ -867,7 +891,14 @@ export async function deploySealedStore(options: {
         "worker_prepromotion_readback",
       )
     : null;
-  if (["deployed", "verified"].includes(phaseBeforeDeploy)) {
+  if (
+    [
+      "deployed",
+      "trigger-intent-recorded",
+      "trigger-deployed",
+      "verified",
+    ].includes(phaseBeforeDeploy)
+  ) {
     if (!deploymentHasExactVersionAtFullTraffic(prePromotion, versionId)) {
       throw new Error("worker_resumed_deployment_readback_mismatch");
     }
@@ -914,32 +945,77 @@ export async function deploySealedStore(options: {
   if (!deploymentHasExactVersionAtFullTraffic(deployments, versionId)) {
     throw new Error("worker_deployment_readback_mismatch");
   }
+  let postTopology: JsonObject;
   if (options.deployTriggers) {
-    options.runner(
-      [
-        "triggers",
-        "deploy",
-        "--name",
-        options.target.workerName,
-        "--config",
-        config,
-      ],
-      { cwd: options.cwd },
-    );
+    const phaseBeforeTrigger = String(journal?.phase ?? "");
+    if (phaseBeforeTrigger === "deployed") {
+      await retainPhase("trigger-intent-recorded", versionId);
+      try {
+        options.runner(
+          [
+            "triggers",
+            "deploy",
+            "--name",
+            options.target.workerName,
+            "--config",
+            config,
+          ],
+          { cwd: options.cwd },
+        );
+      } catch (error) {
+        try {
+          await options.readTopology();
+        } catch {
+          throw error;
+        }
+      }
+      postTopology = await options.readTopology();
+      await retainPhase("trigger-deployed", versionId);
+    } else if (phaseBeforeTrigger === "trigger-intent-recorded") {
+      try {
+        postTopology = await options.readTopology();
+      } catch {
+        options.runner(
+          [
+            "triggers",
+            "deploy",
+            "--name",
+            options.target.workerName,
+            "--config",
+            config,
+          ],
+          { cwd: options.cwd },
+        );
+        postTopology = await options.readTopology();
+      }
+      await retainPhase("trigger-deployed", versionId);
+    } else if (
+      phaseBeforeTrigger === "trigger-deployed" ||
+      phaseBeforeTrigger === "verified"
+    ) {
+      postTopology = await options.readTopology();
+    } else {
+      throw new Error("release_trigger_operation_phase_invalid");
+    }
+  } else {
+    postTopology = await options.readTopology();
   }
-  const postTopology = await options.readTopology();
   if (
     preTopology &&
     canonicalJson(preTopology) !== canonicalJson(postTopology)
   ) {
     throw new Error("runtime_topology_changed_during_release");
   }
-  const healthChecks = await runLiveChecks({
+  const healthCheckOptions = {
     target: options.target,
     manifest: options.manifest,
     artifactRoot: options.cwd,
     candidateChecks: options.candidateChecks,
-  });
+  };
+  const healthChecks =
+    options.journal?.environment === "staging"
+      ? await runStagingLiveChecks(healthCheckOptions)
+      : await runLiveChecks(healthCheckOptions);
   await retainPhase("verified", versionId);
   return {
     versionId,

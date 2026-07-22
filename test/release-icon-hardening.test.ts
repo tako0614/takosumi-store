@@ -260,7 +260,7 @@ function stubLiveStore(options: {
       return json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.12",
+        version: "0.1.13",
       });
     }
     if (url.pathname === "/readyz") {
@@ -269,7 +269,7 @@ function stubLiveStore(options: {
     if (url.pathname === "/.well-known/tcs") {
       return json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.12" },
+          software: { name: "takosumi-store", version: "0.1.13" },
           baseUrl: production.origin,
         },
       });
@@ -311,7 +311,7 @@ function stubLiveStore(options: {
         headers: { "content-type": "text/javascript" },
       });
     }
-    if (url.pathname === "/release-safety/0.1.12/fallback") {
+    if (url.pathname === "/release-safety/0.1.13/fallback") {
       return new Response(indexBytes, {
         headers: { "content-type": "text/html" },
       });

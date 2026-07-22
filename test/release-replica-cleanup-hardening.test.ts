@@ -30,7 +30,10 @@ import {
   resolveReplicaAttestationVerifiedAt,
   rehearseForwardRepair,
   recoverForwardRepairCleanupProgress,
+  recoverCleanupProgress,
   recoverProvisionCleanupProgress,
+  replicaDeployRunner,
+  sealR2ObjectDeleteInventory,
   resolveProvisionRetryInventory,
   validateInventory,
   validateForwardRepairEvidence,
@@ -167,6 +170,117 @@ function snapshotScanFixture(
 }
 
 describe("replica cleanup authority", () => {
+  test("treats only exact absent fresh Worker heads as empty", () => {
+    let directAbsentWorkerCalls = 0;
+    const base = ((args: readonly string[]): string => {
+      if (
+        (args[0] === "deployments" && args[1] === "status") ||
+        (args[0] === "versions" && args[1] === "list")
+      ) {
+        directAbsentWorkerCalls += 1;
+        throw new Error("wrangler_nonzero_for_absent_worker");
+      }
+      return "forwarded";
+    }) as import("../scripts/store-release-common.ts").WranglerRunner;
+    base.inspect = (args) =>
+      (args[0] === "deployments" && args[1] === "status") ||
+      (args[0] === "versions" && args[1] === "list")
+        ? { status: "not-found", stdout: "" }
+        : { status: "failed", stdout: "" };
+    const runner = replicaDeployRunner(base);
+    expect(
+      runner(["deployments", "status", "--name", "fresh-worker", "--json"], {
+        cwd: "/tmp",
+      }),
+    ).toBe('{"versions":[]}');
+    expect(
+      runner(["versions", "list", "--name", "fresh-worker", "--json"], {
+        cwd: "/tmp",
+      }),
+    ).toBe("[]");
+    expect(directAbsentWorkerCalls).toBe(0);
+    expect(runner(["versions", "upload"], { cwd: "/tmp" })).toBe("forwarded");
+
+    base.inspect = () => ({ status: "failed", stdout: "permission denied" });
+    expect(() =>
+      replicaDeployRunner(base)(
+        ["deployments", "status", "--name", "fresh-worker", "--json"],
+        { cwd: "/tmp" },
+      ),
+    ).toThrow("replica_remote_inspection_failed");
+  });
+
+  test("atomically completes a multi-object R2 cleanup inventory", async () => {
+    const value = authority();
+    const root = await mkdtemp(join(tmpdir(), "store-r2-cleanup-seal-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const path = join(root, "worker-release-replica-mutation-journal.json");
+    const empty = {
+      kind: "takosumi.store-replica-mutation-journal@v1",
+      surfaceId: "takosumi-store",
+      releaseId: value.progress.releaseId,
+      replicaId: value.progress.replicaId,
+      accountId: value.progress.accountId,
+      targetDigest: digestJson(value.progress.target),
+      preflightAbsenceDigest: value.progress.preflightAbsenceDigest,
+      operations: [],
+      productionFallback: false,
+    } as unknown as Parameters<
+      typeof sealR2ObjectDeleteInventory
+    >[0]["journal"];
+    const options = {
+      path,
+      journal: empty,
+      accountId: value.progress.accountId,
+      bucketName: value.config.target.iconsBucketName,
+      liveObjectKeys: ["icons/b", "icons/a"],
+    };
+    const sealed = await sealR2ObjectDeleteInventory(options);
+    expect(sealed.descriptors.map((entry) => entry.objectKey)).toEqual([
+      "icons/b",
+      "icons/a",
+    ]);
+    expect(sealed.journal.operations).toHaveLength(2);
+
+    const partial = {
+      ...empty,
+      operations: [sealed.journal.operations[0]!],
+    };
+    await writePrivateJson(path, partial, { replace: true });
+    const resumed = await sealR2ObjectDeleteInventory({
+      ...options,
+      journal: partial,
+    });
+    expect(resumed.journal.operations).toHaveLength(2);
+    expect(resumed.journal.operations[1]!.descriptor.objectKey).toBe("icons/a");
+
+    const committedPartial = {
+      ...partial,
+      operations: [
+        {
+          ...partial.operations[0]!,
+          phase: "committed" as const,
+          receipt: {
+            accountId: value.progress.accountId,
+            resourceName: value.config.target.iconsBucketName,
+            objectKey: "icons/b",
+            liveReadbackDigest: `sha256:${"a".repeat(64)}`,
+            recovery: "direct" as const,
+            result: "exact-absent" as const,
+            createdOnly: false,
+          },
+        },
+      ],
+    };
+    await expect(
+      sealR2ObjectDeleteInventory({
+        ...options,
+        journal: committedPartial,
+      }),
+    ).rejects.toThrow("replica_r2_cleanup_inventory_unsealed");
+  });
+
   test("binds successful provision retries and forbids replica identity reuse", () => {
     const value = authority();
     const ids = provisionedProgressResourceIds(value.progress);
@@ -863,7 +977,7 @@ describe("replica cleanup authority", () => {
       id: repairedVersionId,
       annotations: {
         "workers/message": envelope.releaseId,
-        "workers/tag": "0.1.12",
+        "workers/tag": "0.1.13",
       },
       resources: {
         bindings: [
@@ -1071,7 +1185,7 @@ describe("replica cleanup authority", () => {
         return Response.json({
           status: "ok",
           software: "takosumi-store",
-          version: "0.1.12",
+          version: "0.1.13",
         });
       }
       if (url.pathname === "/readyz") {
@@ -1083,7 +1197,7 @@ describe("replica cleanup authority", () => {
       if (url.pathname === "/.well-known/tcs") {
         return Response.json({
           server: {
-            software: { name: "takosumi-store", version: "0.1.12" },
+            software: { name: "takosumi-store", version: "0.1.13" },
             baseUrl: inventory.target.origin,
           },
         });
@@ -1169,7 +1283,7 @@ describe("replica cleanup authority", () => {
           origin: repairTarget.origin,
         },
         preDeploymentDigest: digestJson({ versions: [] }),
-        phase: "version-uploaded",
+        phase: "trigger-deployed",
         versionId: repairedVersionId,
         preUploadVersionIds: [],
         updatedAt: "2026-07-22T01:02:03.000Z",
@@ -1178,6 +1292,20 @@ describe("replica cleanup authority", () => {
     workerPresent = true;
     deployed = true;
     scriptEnabled = true;
+    const triggerPhaseCleanup = await recoverForwardRepairCleanupProgress({
+      progress: value.progress,
+      envelope,
+      config: value.config,
+      evidenceDirectory: root,
+      readbackListingPath: "/tcs/v1/listings/tako/takos",
+      runner,
+      cwd: root,
+    });
+    expect(
+      triggerPhaseCleanup.resources.find(
+        (resource) => resource.type === "worker",
+      )?.id,
+    ).toBe(repairedVersionId);
     const repaired = await run();
     expect(repaired.target.versionId).toBe(repairedVersionId);
     expect(repaired.checks[3]!.bindingDigest).toBe(
@@ -1190,12 +1318,77 @@ describe("replica cleanup authority", () => {
     expect(
       calls.filter((args) => args[0] === "versions" && args[1] === "deploy"),
     ).toHaveLength(0);
+    expect(calls.filter((args) => args[0] === "triggers")).toHaveLength(0);
     const repeated = await run();
     expect(canonicalJson(repeated)).toBe(canonicalJson(repaired));
     expect(
       calls.filter((args) => args[0] === "versions" && args[1] === "upload"),
     ).toHaveLength(0);
-    const cleanupProgress = await recoverForwardRepairCleanupProgress({
+    const mutationJournal = JSON.parse(
+      await readFile(
+        join(root, "worker-release-replica-mutation-journal.json"),
+        "utf8",
+      ),
+    ) as {
+      operations: Array<{
+        descriptor: { id: string; kind: string };
+        phase: string;
+        receipt?: { resourceId?: string; createdOnly: boolean };
+      }>;
+    };
+    for (const [id, kind] of [
+      ["rehearsal:worker:repair-upload", "worker-repair-upload"],
+      ["rehearsal:worker:repair-deploy", "worker-repair-deploy"],
+      ["rehearsal:worker:repair-trigger", "worker-repair-trigger-deploy"],
+    ]) {
+      const operation = mutationJournal.operations.find(
+        (entry) => entry.descriptor.id === id,
+      );
+      expect(operation?.descriptor.kind).toBe(kind);
+      expect(operation?.phase).toBe("committed");
+    }
+    const repairedUpload = mutationJournal.operations.find(
+      (entry) => entry.descriptor.kind === "worker-repair-upload",
+    );
+    expect(repairedUpload?.receipt?.resourceId).toBe(repairedVersionId);
+    expect(repairedUpload?.receipt?.createdOnly).toBe(true);
+    await writePrivateJson(
+      join(root, "worker-release-replica-provision-operation.json"),
+      {
+        kind: "takosumi.store-release-operation@v1",
+        environment: "replica-provision",
+        surfaceId: "takosumi-store",
+        releaseId: envelope.releaseId,
+        sourceCommit: envelope.source.commit,
+        artifactDigests: envelope.candidate.artifactDigests,
+        targetFingerprint: digestJson(repairTarget),
+        target: {
+          accountId: repairTarget.accountId,
+          workerName: repairTarget.workerName,
+          databaseId: repairTarget.databaseId,
+          kvNamespaceId: repairTarget.kvNamespaceId,
+          iconsBucketName: repairTarget.iconsBucketName,
+          origin: repairTarget.origin,
+        },
+        preDeploymentDigest: digestJson({ versions: [] }),
+        phase: "verified",
+        versionId: initialVersionId,
+        preUploadVersionIds: [],
+        updatedAt: "2026-07-22T01:02:02.000Z",
+      },
+    );
+    await expect(
+      recoverProvisionCleanupProgress({
+        progress: value.progress,
+        envelope,
+        config: value.config,
+        evidenceDirectory: root,
+        readbackListingPath: "/tcs/v1/listings/tako/takos",
+        runner,
+        cwd: root,
+      }),
+    ).rejects.toThrow("replica_worker_inventory_not_exclusive");
+    const cleanupProgress = await recoverCleanupProgress({
       progress: value.progress,
       envelope,
       config: value.config,
@@ -1333,7 +1526,7 @@ describe("replica cleanup authority", () => {
             "workers/message": foreignAnnotation
               ? "foreign-release"
               : value.envelope.releaseId,
-            "workers/tag": "0.1.12",
+            "workers/tag": "0.1.13",
           },
           resources: {
             bindings: [
@@ -1435,6 +1628,86 @@ describe("replica cleanup authority", () => {
     await chmod(evidence, 0o700);
     const progressPath = join(evidence, "worker-release-replica-progress.json");
     await writePrivateJson(progressPath, value.progress);
+    const createReceipt = (
+      name: string,
+      resourceId?: string,
+      liveReadbackDigest = `sha256:${"a".repeat(64)}`,
+    ): Record<string, unknown> => ({
+      accountId: value.progress.accountId,
+      resourceName: name,
+      ...(resourceId ? { resourceId } : {}),
+      liveReadbackDigest,
+      commandReceiptDigest: `sha256:${"b".repeat(64)}`,
+      recovery: "direct",
+      result: "exact-present",
+      createdOnly: true,
+    });
+    const createOperation = (
+      id: string,
+      kind: "worker-upload" | "d1-create" | "kv-create" | "r2-create",
+      resourceType: "worker" | "d1" | "kv" | "r2",
+      name: string,
+      resourceId?: string,
+      liveReadbackDigest?: string,
+    ): Record<string, unknown> => ({
+      descriptor: {
+        id,
+        kind,
+        resourceType,
+        resourceName: name,
+        expectedDigest: `sha256:${"c".repeat(64)}`,
+      },
+      phase: "committed",
+      receipt: createReceipt(name, resourceId, liveReadbackDigest),
+    });
+    await writePrivateJson(
+      join(evidence, "worker-release-replica-mutation-journal.json"),
+      {
+        kind: "takosumi.store-replica-mutation-journal@v1",
+        surfaceId: "takosumi-store",
+        releaseId: value.progress.releaseId,
+        replicaId: value.progress.replicaId,
+        accountId: value.progress.accountId,
+        targetDigest: digestJson(value.progress.target),
+        preflightAbsenceDigest: value.progress.preflightAbsenceDigest,
+        operations: [
+          createOperation(
+            "provision:d1:create",
+            "d1-create",
+            "d1",
+            value.config.target.databaseName,
+            value.progress.resources[1]!.id,
+          ),
+          createOperation(
+            "provision:kv:create",
+            "kv-create",
+            "kv",
+            value.config.target.kvNamespaceName,
+            value.progress.resources[2]!.id,
+          ),
+          createOperation(
+            "provision:r2:create",
+            "r2-create",
+            "r2",
+            value.config.target.iconsBucketName,
+            undefined,
+            digestJson({
+              accountId: value.config.target.accountId,
+              name: value.config.target.iconsBucketName,
+              bucket: { name: value.config.target.iconsBucketName },
+            }),
+          ),
+          createOperation(
+            "provision:worker:upload",
+            "worker-upload",
+            "worker",
+            value.config.target.workerName,
+            value.progress.resources[0]!.id,
+          ),
+        ],
+        productionFallback: false,
+      },
+    );
     const iconBytes = Buffer.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
     ]);
@@ -1452,23 +1725,38 @@ describe("replica cleanup authority", () => {
       kv: true,
       r2: true,
       object: true,
+      failObjectOnce: true,
       failKvOnce: true,
+      failD1Once: true,
       foreignVersion: false,
+      r2Replacement: false,
     };
     const calls: string[][] = [];
     const runner = ((args: readonly string[]): string => {
       calls.push([...args]);
       if (args[0] === "delete") state.worker = false;
-      if (args[0] === "d1" && args[1] === "delete") state.d1 = false;
+      if (args[0] === "d1" && args[1] === "delete") {
+        if (state.failD1Once) {
+          state.failD1Once = false;
+          throw new Error("injected_d1_delete_failure");
+        }
+        state.d1 = false;
+      }
       if (args[0] === "kv" && args[1] === "namespace" && args[2] === "delete") {
         if (state.failKvOnce) {
           state.failKvOnce = false;
+          state.kv = false;
           throw new Error("injected_kv_delete_failure");
         }
         state.kv = false;
       }
-      if (args[0] === "r2" && args[1] === "object" && args[2] === "delete")
+      if (args[0] === "r2" && args[1] === "object" && args[2] === "delete") {
         state.object = false;
+        if (state.failObjectOnce) {
+          state.failObjectOnce = false;
+          throw new Error("injected_r2_object_delete_response_loss");
+        }
+      }
       if (args[0] === "r2" && args[1] === "bucket" && args[2] === "delete")
         state.r2 = false;
       if (args[0] === "d1" && args[1] === "list") {
@@ -1503,7 +1791,7 @@ describe("replica cleanup authority", () => {
           id: value.progress.resources[0]!.id,
           annotations: {
             "workers/message": value.envelope.releaseId,
-            "workers/tag": "0.1.12",
+            "workers/tag": "0.1.13",
           },
           resources: {
             bindings: [
@@ -1585,7 +1873,14 @@ describe("replica cleanup authority", () => {
             status: "ok",
             result: {
               buckets: state.r2
-                ? [{ name: value.config.target.iconsBucketName }]
+                ? [
+                    {
+                      name: value.config.target.iconsBucketName,
+                      ...(state.r2Replacement
+                        ? { creation_date: "2026-07-22T02:00:00.000Z" }
+                        : {}),
+                    },
+                  ]
                 : [],
             },
             resultInfo: null,
@@ -1617,16 +1912,21 @@ describe("replica cleanup authority", () => {
       cloudflareReadClient,
       readbackListingPath: "/tcs/v1/listings/tako/takos",
     };
+    state.r2Replacement = true;
+    await expect(destroyExact(options)).rejects.toThrow(
+      "replica_mutation_committed_readback_mismatch",
+    );
+    expect(calls.filter((args) => args[0] === "delete")).toHaveLength(0);
+    state.r2Replacement = false;
     state.foreignVersion = true;
     await expect(destroyExact(options)).rejects.toThrow(
       "replica_worker_inventory_not_exclusive",
     );
     expect(calls.filter((args) => args[0] === "delete")).toHaveLength(0);
     state.foreignVersion = false;
-    state.deployed = false;
     state.scriptEnabled = true;
     await expect(destroyExact(options)).rejects.toThrow(
-      "injected_kv_delete_failure",
+      "injected_d1_delete_failure",
     );
     const partial = JSON.parse(await readFile(progressPath, "utf8"));
     expect(partial.status).toBe("destroying");
@@ -1635,6 +1935,34 @@ describe("replica cleanup authority", () => {
         (entry: { type: string }) => entry.type === "worker",
       ).state,
     ).toBe("deleted");
+    expect(
+      partial.resources.find((entry: { type: string }) => entry.type === "r2")
+        .state,
+    ).toBe("deleted");
+    const partialJournal = JSON.parse(
+      await readFile(
+        join(evidence, "worker-release-replica-mutation-journal.json"),
+        "utf8",
+      ),
+    );
+    expect(
+      partialJournal.operations.find(
+        (entry: { descriptor: { id: string } }) =>
+          entry.descriptor.id === "cleanup:kv:delete",
+      ),
+    ).toMatchObject({
+      phase: "committed",
+      receipt: { recovery: "lost-response", result: "exact-absent" },
+    });
+    expect(
+      partialJournal.operations.find(
+        (entry: { descriptor: { kind: string } }) =>
+          entry.descriptor.kind === "r2-object-delete",
+      ),
+    ).toMatchObject({
+      phase: "committed",
+      receipt: { recovery: "lost-response", result: "exact-absent" },
+    });
     await expect(
       destroyExact({ ...options, inventory: partial }),
     ).resolves.toBeUndefined();

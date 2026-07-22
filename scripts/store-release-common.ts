@@ -18,8 +18,9 @@ export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
 export const CANONICAL_CANARY_SOURCE_GIT =
   "https://github.com/tako0614/takos.git";
-export const VERSION = "0.1.12";
+export const VERSION = "0.1.13";
 export const TAG = `v${VERSION}`;
+export const RELEASE_ALLOWED_SIGNERS_FILE = "release/trust/allowed-signers";
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
 export const ARTIFACT_MANIFEST_FILE = "takosumi-store-artifact-manifest.json";
 export const CANDIDATE_FILE = "takosumi-store-release-candidate.json";
@@ -973,16 +974,7 @@ export async function verifySourceAuthority(
   ) {
     throw new Error("signed_annotated_tag_authority_mismatch");
   }
-  const verification = spawnSync(
-    "/usr/bin/git",
-    ["-C", source, "verify-tag", TAG],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "ignore", "ignore"],
-    },
-  );
-  if (verification.status !== 0)
-    throw new Error("release_tag_signature_invalid");
+  await verifyTrackedReleaseTagSignature(source, TAG);
   const remote = spawnSync(
     "/usr/bin/git",
     [
@@ -998,9 +990,110 @@ export async function verifySourceAuthority(
   );
   if (
     remote.status !== 0 ||
+    !remote.stdout.includes(
+      `${git("rev-parse", `refs/tags/${TAG}`)}\trefs/tags/${TAG}`,
+    ) ||
     !remote.stdout.includes(`${envelope.source.commit}\trefs/tags/${TAG}^{}`)
   ) {
     throw new Error("release_tag_not_pushed");
+  }
+}
+
+/**
+ * Verify an SSH-signed release tag against the public trust root committed in
+ * the exact source tree. Every Git configuration input is fixed here so a
+ * user's HOME, global config, or system config cannot add another signer.
+ */
+export async function verifyTrackedReleaseTagSignature(
+  sourceCheckout: string,
+  tag: string,
+): Promise<void> {
+  const source = await realpath(sourceCheckout);
+  const hermeticGitEnvironment: NodeJS.ProcessEnv = {
+    HOME: "/nonexistent",
+    XDG_CONFIG_HOME: "/nonexistent",
+    PATH: "/usr/bin:/bin",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    TZ: "UTC",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const rawAllowedSigners = resolve(source, RELEASE_ALLOWED_SIGNERS_FILE);
+  const rawTrustMetadata = await lstat(rawAllowedSigners);
+  if (!rawTrustMetadata.isFile() || rawTrustMetadata.isSymbolicLink()) {
+    throw new Error("release_tag_trust_root_invalid");
+  }
+  const allowedSigners = await secureResolveInside(
+    source,
+    RELEASE_ALLOWED_SIGNERS_FILE,
+  );
+  const tracked = spawnSync(
+    "/usr/bin/git",
+    ["-C", source, "ls-tree", "HEAD", "--", RELEASE_ALLOWED_SIGNERS_FILE],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: hermeticGitEnvironment,
+    },
+  );
+  const trust = await readFile(allowedSigners, "utf8");
+  const committed = spawnSync(
+    "/usr/bin/git",
+    ["-C", source, "show", `HEAD:${RELEASE_ALLOWED_SIGNERS_FILE}`],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: hermeticGitEnvironment,
+    },
+  );
+  if (
+    tracked.status !== 0 ||
+    !/^100644 blob [0-9a-f]{40}\s+release\/trust\/allowed-signers\n?$/u.test(
+      tracked.stdout,
+    ) ||
+    committed.status !== 0 ||
+    committed.stdout !== trust
+  ) {
+    throw new Error("release_tag_trust_root_invalid");
+  }
+  const lines = trust
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  if (
+    lines.length !== 1 ||
+    !/^shoutatomiyama0614@gmail[.]com ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u.test(
+      lines[0]!,
+    )
+  ) {
+    throw new Error("release_tag_trust_root_invalid");
+  }
+  const verification = spawnSync(
+    "/usr/bin/git",
+    [
+      "-c",
+      "gpg.format=ssh",
+      "-c",
+      `gpg.ssh.allowedSignersFile=${allowedSigners}`,
+      "-c",
+      "gpg.ssh.program=/usr/bin/ssh-keygen",
+      "-c",
+      "gpg.minTrustLevel=fully",
+      "-C",
+      source,
+      "verify-tag",
+      tag,
+    ],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+      env: hermeticGitEnvironment,
+    },
+  );
+  if (verification.status !== 0) {
+    throw new Error("release_tag_signature_invalid");
   }
 }
 
@@ -1664,9 +1757,16 @@ export function deploymentHasExactVersionAtFullTraffic(
 async function fetchBytes(
   url: string,
   init: Pick<RequestInit, "method" | "headers"> = {},
+  deadlineAtMs?: number,
 ): Promise<{ response: Response; bytes: Uint8Array }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const remaining =
+    deadlineAtMs === undefined ? 15_000 : deadlineAtMs - Date.now();
+  if (remaining <= 0) {
+    throw new Error("staging_edge_propagation_deadline_exceeded");
+  }
+  const timeoutMs = Math.min(15_000, remaining);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       ...init,
@@ -1686,9 +1786,16 @@ async function fetchExpectedStatus(
   url: string,
   status: number,
   init: Pick<RequestInit, "method" | "headers"> = {},
+  deadlineAtMs?: number,
 ): Promise<{ response: Response; bytes: Uint8Array }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const remaining =
+    deadlineAtMs === undefined ? 15_000 : deadlineAtMs - Date.now();
+  if (remaining <= 0) {
+    throw new Error("staging_edge_propagation_deadline_exceeded");
+  }
+  const timeoutMs = Math.min(15_000, remaining);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       ...init,
@@ -1711,20 +1818,67 @@ function exactJson(bytes: Uint8Array, expected: unknown, label: string): void {
     throw new Error(`${label}_mismatch`);
 }
 
-export async function runLiveChecks(options: {
+export interface LiveCheckOptions {
   readonly target: TargetPolicy;
   readonly manifest: StoreArtifactManifest;
   readonly artifactRoot: string;
   readonly candidateChecks: readonly CandidateHealthCheck[];
-}): Promise<HealthCheck[]> {
+  readonly deadlineAtMs?: number;
+}
+
+export const STAGING_EDGE_HEALTH_ATTEMPTS = 6;
+export const STAGING_EDGE_HEALTH_DELAY_MS = 2_000;
+export const STAGING_EDGE_HEALTH_DEADLINE_MS = 60_000;
+
+export async function runWithStagingEdgePropagationRetry<T>(
+  check: (deadlineAtMs: number) => Promise<T>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) =>
+    new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)),
+  now: () => number = Date.now,
+): Promise<T> {
+  const deadlineAtMs = now() + STAGING_EDGE_HEALTH_DEADLINE_MS;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= STAGING_EDGE_HEALTH_ATTEMPTS; attempt += 1) {
+    if (now() >= deadlineAtMs) break;
+    try {
+      return await check(deadlineAtMs);
+    } catch (error) {
+      lastError = error;
+      if (attempt < STAGING_EDGE_HEALTH_ATTEMPTS) {
+        const remaining = deadlineAtMs - now();
+        if (remaining <= 0) break;
+        await wait(Math.min(STAGING_EDGE_HEALTH_DELAY_MS, remaining));
+      }
+    }
+  }
+  throw new Error("staging_edge_propagation_exhausted", {
+    cause: lastError,
+  });
+}
+
+export async function runStagingLiveChecks(
+  options: LiveCheckOptions,
+): Promise<HealthCheck[]> {
+  return runWithStagingEdgePropagationRetry((deadlineAtMs) =>
+    runLiveChecks({ ...options, deadlineAtMs }),
+  );
+}
+
+export async function runLiveChecks(
+  options: LiveCheckOptions,
+): Promise<HealthCheck[]> {
   const origin = options.target.origin.replace(/\/$/u, "");
-  const health = await fetchBytes(`${origin}/healthz`);
+  const health = await fetchBytes(
+    `${origin}/healthz`,
+    {},
+    options.deadlineAtMs,
+  );
   exactJson(
     health.bytes,
     { status: "ok", software: "takosumi-store", version: VERSION },
     "healthz",
   );
-  const ready = await fetchBytes(`${origin}/readyz`);
+  const ready = await fetchBytes(`${origin}/readyz`, {}, options.deadlineAtMs);
   exactJson(
     ready.bytes,
     {
@@ -1734,9 +1888,10 @@ export async function runLiveChecks(options: {
     "readyz",
   );
   const tcs = JSON.parse(
-    Buffer.from((await fetchBytes(`${origin}/.well-known/tcs`)).bytes).toString(
-      "utf8",
-    ),
+    Buffer.from(
+      (await fetchBytes(`${origin}/.well-known/tcs`, {}, options.deadlineAtMs))
+        .bytes,
+    ).toString("utf8"),
   ) as JsonObject;
   const server = isRecord(tcs.server) ? tcs.server : {};
   const software = isRecord(server.software) ? server.software : {};
@@ -1751,6 +1906,7 @@ export async function runLiveChecks(options: {
   const listingResponse = await fetchBytes(
     `${origin}${options.target.readbackListingPath}`,
     { headers: { accept: "application/json", origin: corsOrigin } },
+    options.deadlineAtMs,
   );
   if (
     listingResponse.response.headers.get("access-control-allow-origin") !== "*"
@@ -1768,6 +1924,7 @@ export async function runLiveChecks(options: {
         "access-control-request-headers": "accept",
       },
     },
+    options.deadlineAtMs,
   );
   if (
     listingPreflight.response.headers.get("access-control-allow-origin") !==
@@ -1814,7 +1971,7 @@ export async function runLiveChecks(options: {
   ) {
     throw new Error("canonical_listing_icon_url_invalid");
   }
-  const icon = await fetchBytes(iconUrl.href);
+  const icon = await fetchBytes(iconUrl.href, {}, options.deadlineAtMs);
   const iconMediaType = icon.response.headers.get("content-type") ?? "";
   const expectedIconDigest = `sha256:${iconUrl.pathname.slice("/icons/".length)}`;
   if (
@@ -1837,6 +1994,8 @@ export async function runLiveChecks(options: {
   const apiFallback = await fetchExpectedStatus(
     `${origin}/tcs/v1/release-safety-not-found`,
     404,
+    {},
+    options.deadlineAtMs,
   );
   const apiFallbackJson = JSON.parse(
     Buffer.from(apiFallback.bytes).toString("utf8"),
@@ -1858,11 +2017,17 @@ export async function runLiveChecks(options: {
   );
   if (!staticAsset || !index) throw new Error("spa_release_assets_missing");
   const publicAssetPath = staticAsset.path.slice("assets/".length);
-  const remoteStatic = await fetchBytes(`${origin}/${publicAssetPath}`);
+  const remoteStatic = await fetchBytes(
+    `${origin}/${publicAssetPath}`,
+    {},
+    options.deadlineAtMs,
+  );
   if (sha256Bytes(remoteStatic.bytes) !== staticAsset.sha256)
     throw new Error("spa_static_asset_mismatch");
   const fallback = await fetchBytes(
     `${origin}/release-safety/${VERSION}/fallback`,
+    {},
+    options.deadlineAtMs,
   );
   if (
     sha256Bytes(fallback.bytes) !== index.sha256 ||

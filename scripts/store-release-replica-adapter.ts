@@ -59,6 +59,20 @@ import {
   deploySealedStore,
   migrationLineageMatches,
 } from "./store-release-fixed-adapter.ts";
+import {
+  REPLICA_MUTATION_JOURNAL_FILE,
+  commitReplicaMutation,
+  committedReplicaMutation,
+  openReplicaMutationJournal,
+  requireAttemptCreatedResource,
+  retainReplicaMutationIntent,
+  retainReplicaMutationIntents,
+  validateReplicaMutationJournal,
+  type ReplicaMutationDescriptor,
+  type ReplicaMutationJournal,
+  type ReplicaMutationJournalAuthority,
+  type ReplicaMutationReceipt,
+} from "./store-release-replica-mutation-journal.ts";
 
 const ACTIONS = [
   "prepare-input",
@@ -632,6 +646,8 @@ function validateReplicaReleaseOperation(
     "upload-intent-recorded",
     "version-uploaded",
     "deployed",
+    "trigger-intent-recorded",
+    "trigger-deployed",
     "verified",
   ];
   const phase = String(value.phase);
@@ -845,6 +861,29 @@ export async function recoverProvisionCleanupProgress(options: {
     }
     throw error;
   }
+}
+
+export async function recoverCleanupProgress(options: {
+  progress: Progress;
+  envelope: ReleaseEnvelope;
+  config: ReplicaConfig;
+  evidenceDirectory: string;
+  readbackListingPath: string;
+  runner: WranglerRunner;
+  cwd: string;
+}): Promise<Progress> {
+  const forwardRecovered = await recoverForwardRepairCleanupProgress(options);
+  if (
+    forwardRecovered.completedSteps.some((step) =>
+      step.startsWith("forward-repair-cleanup-recovery:"),
+    )
+  ) {
+    return forwardRecovered;
+  }
+  return recoverProvisionCleanupProgress({
+    ...options,
+    progress: forwardRecovered,
+  });
 }
 
 export async function resolveReplicaAttestationVerifiedAt(options: {
@@ -2869,6 +2908,235 @@ async function writeProgress(path: string, progress: Progress): Promise<void> {
   await writePrivateJson(path, progress, { replace: true });
 }
 
+export interface ExactMutationReadback<T> {
+  readonly value: T;
+  readonly digest: string;
+  readonly resourceId?: string;
+}
+
+function replicaMutationAuthority(
+  envelope: ReleaseEnvelope,
+  config: ReplicaConfig,
+  preflightAbsenceDigest: string,
+): ReplicaMutationJournalAuthority {
+  return {
+    releaseId: envelope.releaseId,
+    replicaId: config.replicaId,
+    accountId: config.target.accountId,
+    targetDigest: digestJson(config.target),
+    preflightAbsenceDigest,
+  };
+}
+
+function mutationReceipt<T>(options: {
+  readonly accountId: string;
+  readonly descriptor: ReplicaMutationDescriptor;
+  readonly readback: ExactMutationReadback<T>;
+  readonly commandOutput?: string;
+  readonly recovery: ReplicaMutationReceipt["recovery"];
+  readonly result: ReplicaMutationReceipt["result"];
+  readonly createdOnly: boolean;
+}): ReplicaMutationReceipt {
+  return {
+    accountId: options.accountId,
+    resourceName: options.descriptor.resourceName,
+    ...(options.descriptor.resourceId === undefined &&
+    options.readback.resourceId === undefined
+      ? {}
+      : {
+          resourceId:
+            options.descriptor.resourceId ?? options.readback.resourceId,
+        }),
+    ...(options.descriptor.objectKey === undefined
+      ? {}
+      : { objectKey: options.descriptor.objectKey }),
+    liveReadbackDigest: options.readback.digest,
+    ...(options.commandOutput === undefined
+      ? {}
+      : { commandReceiptDigest: sha256Bytes(options.commandOutput) }),
+    recovery: options.recovery,
+    result: options.result,
+    createdOnly: options.createdOnly,
+  };
+}
+
+export async function runExactPresentMutation<T>(options: {
+  readonly path: string;
+  readonly journal: ReplicaMutationJournal;
+  readonly descriptor: ReplicaMutationDescriptor;
+  readonly accountId: string;
+  readonly createdOnly: boolean;
+  readonly readback: () => Promise<ExactMutationReadback<T> | null>;
+  readonly mutate: () => Promise<string> | string;
+}): Promise<{
+  readonly journal: ReplicaMutationJournal;
+  readonly readback: ExactMutationReadback<T>;
+}> {
+  const retained = await retainReplicaMutationIntent(
+    options.path,
+    options.journal,
+    options.descriptor,
+  );
+  let journal = retained.journal;
+  const committed = committedReplicaMutation(journal, options.descriptor.id);
+  if (committed) {
+    const live = await options.readback();
+    if (
+      !live ||
+      live.digest !== committed.receipt?.liveReadbackDigest ||
+      (options.descriptor.resourceId !== undefined &&
+        live.resourceId !== options.descriptor.resourceId) ||
+      (committed.receipt?.resourceId !== undefined &&
+        live.resourceId !== committed.receipt.resourceId)
+    ) {
+      throw new Error("replica_mutation_committed_readback_mismatch");
+    }
+    return { journal, readback: live };
+  }
+  if (retained.existing) {
+    const recovered = await options.readback();
+    if (recovered) {
+      journal = await commitReplicaMutation(
+        options.path,
+        journal,
+        options.descriptor,
+        mutationReceipt({
+          accountId: options.accountId,
+          descriptor: options.descriptor,
+          readback: recovered,
+          recovery: "resume",
+          result: "exact-present",
+          createdOnly: options.createdOnly,
+        }),
+      );
+      return { journal, readback: recovered };
+    }
+  }
+  let output: string;
+  try {
+    output = await options.mutate();
+  } catch (error) {
+    const recovered = await options.readback();
+    if (!recovered) throw error;
+    journal = await commitReplicaMutation(
+      options.path,
+      journal,
+      options.descriptor,
+      mutationReceipt({
+        accountId: options.accountId,
+        descriptor: options.descriptor,
+        readback: recovered,
+        recovery: "lost-response",
+        result: "exact-present",
+        createdOnly: options.createdOnly,
+      }),
+    );
+    return { journal, readback: recovered };
+  }
+  const live = await options.readback();
+  if (!live) throw new Error("replica_mutation_postcondition_missing");
+  journal = await commitReplicaMutation(
+    options.path,
+    journal,
+    options.descriptor,
+    mutationReceipt({
+      accountId: options.accountId,
+      descriptor: options.descriptor,
+      readback: live,
+      commandOutput: output,
+      recovery: "direct",
+      result: "exact-present",
+      createdOnly: options.createdOnly,
+    }),
+  );
+  return { journal, readback: live };
+}
+
+export async function runExactAbsentMutation(options: {
+  readonly path: string;
+  readonly journal: ReplicaMutationJournal;
+  readonly descriptor: ReplicaMutationDescriptor;
+  readonly accountId: string;
+  readonly readback: () => Promise<ExactMutationReadback<unknown> | null>;
+  readonly mutate: () => Promise<string> | string;
+}): Promise<ReplicaMutationJournal> {
+  const retained = await retainReplicaMutationIntent(
+    options.path,
+    options.journal,
+    options.descriptor,
+  );
+  let journal = retained.journal;
+  const absence = (): ExactMutationReadback<null> => ({
+    value: null,
+    digest: digestJson({
+      kind: "takosumi.store-replica-mutation-absence@v1",
+      accountId: options.accountId,
+      descriptor: options.descriptor,
+    }),
+  });
+  const committed = committedReplicaMutation(journal, options.descriptor.id);
+  if (committed) {
+    if (await options.readback()) {
+      throw new Error("replica_mutation_committed_absence_mismatch");
+    }
+    if (committed.receipt?.liveReadbackDigest !== absence().digest) {
+      throw new Error("replica_mutation_committed_readback_mismatch");
+    }
+    return journal;
+  }
+  if (!(await options.readback())) {
+    return commitReplicaMutation(
+      options.path,
+      journal,
+      options.descriptor,
+      mutationReceipt({
+        accountId: options.accountId,
+        descriptor: options.descriptor,
+        readback: absence(),
+        recovery: "resume",
+        result: "exact-absent",
+        createdOnly: false,
+      }),
+    );
+  }
+  let output: string;
+  try {
+    output = await options.mutate();
+  } catch (error) {
+    if (await options.readback()) throw error;
+    return commitReplicaMutation(
+      options.path,
+      journal,
+      options.descriptor,
+      mutationReceipt({
+        accountId: options.accountId,
+        descriptor: options.descriptor,
+        readback: absence(),
+        recovery: "lost-response",
+        result: "exact-absent",
+        createdOnly: false,
+      }),
+    );
+  }
+  if (await options.readback()) {
+    throw new Error("replica_mutation_postcondition_present");
+  }
+  return commitReplicaMutation(
+    options.path,
+    journal,
+    options.descriptor,
+    mutationReceipt({
+      accountId: options.accountId,
+      descriptor: options.descriptor,
+      readback: absence(),
+      commandOutput: output,
+      recovery: "direct",
+      result: "exact-absent",
+      createdOnly: false,
+    }),
+  );
+}
+
 function updateResource(
   progress: Progress,
   type: Progress["resources"][number]["type"],
@@ -2917,6 +3185,193 @@ function parseKvId(output: string): string {
   const value = candidates.at(-1)?.[1];
   if (!value || !KV.test(value)) throw new Error("replica_kv_id_missing");
   return value;
+}
+
+function exactD1CreateReadback(
+  runner: WranglerRunner,
+  cwd: string,
+  accountId: string,
+  name: string,
+): ExactMutationReadback<{
+  readonly name: string;
+  readonly id: string;
+}> | null {
+  const id = exactD1DatabaseId(runner(["d1", "list", "--json"], { cwd }), name);
+  if (!id) return null;
+  const value = { accountId, name, id };
+  return { value, resourceId: id, digest: digestJson(value) };
+}
+
+function exactKvCreateReadback(
+  runner: WranglerRunner,
+  cwd: string,
+  accountId: string,
+  name: string,
+): ExactMutationReadback<{
+  readonly name: string;
+  readonly id: string;
+}> | null {
+  const id = exactKvNamespaceId(
+    runner(["kv", "namespace", "list"], { cwd }),
+    name,
+  );
+  if (!id) return null;
+  const value = { accountId, name, id };
+  return { value, resourceId: id, digest: digestJson(value) };
+}
+
+async function exactR2CreateReadback(
+  client: CloudflareReadClient,
+  name: string,
+): Promise<ExactMutationReadback<JsonObject> | null> {
+  const buckets = await listR2Buckets(client, name);
+  if (buckets.length === 0) return null;
+  const bucket = buckets[0]!;
+  if (bucket.name !== name) {
+    throw new Error("replica_r2_create_readback_identity_mismatch");
+  }
+  const value = { accountId: client.accountId, name, bucket };
+  return { value, digest: digestJson(value) };
+}
+
+function exactMigrationReadback(options: {
+  runner: WranglerRunner;
+  cwd: string;
+  databaseName: string;
+  manifest: StoreArtifactManifest;
+}): ExactMutationReadback<unknown> | null {
+  const pending = options.runner(
+    [
+      "d1",
+      "migrations",
+      "list",
+      options.databaseName,
+      "--remote",
+      "--config",
+      "wrangler.toml",
+    ],
+    { cwd: options.cwd },
+  );
+  if (!/No migrations to apply[.!]?/iu.test(pending)) return null;
+  assertMigrationReadback(pending, options.manifest.migrations.length);
+  const lineage = parseJsonOutput(
+    options.runner(
+      [
+        "d1",
+        "execute",
+        options.databaseName,
+        "--remote",
+        "--config",
+        "wrangler.toml",
+        "--command",
+        "SELECT name FROM d1_migrations ORDER BY id",
+        "--json",
+      ],
+      { cwd: options.cwd },
+    ),
+    "replica_provision_migration_lineage",
+  );
+  if (!migrationLineageMatches(lineage, options.manifest)) {
+    throw new Error("replica_provision_migration_lineage_mismatch");
+  }
+  return { value: lineage, digest: digestJson(lineage) };
+}
+
+function collectReplicaListingRows(value: unknown): JsonObject[] {
+  const rows: JsonObject[] = [];
+  const visit = (entry: unknown): void => {
+    if (Array.isArray(entry)) {
+      entry.forEach(visit);
+      return;
+    }
+    if (!isRecord(entry)) return;
+    if (entry.id === "tako/takos") rows.push(entry);
+    Object.values(entry).forEach(visit);
+  };
+  visit(value);
+  return rows;
+}
+
+function exactSnapshotImportReadback(options: {
+  runner: WranglerRunner;
+  cwd: string;
+  databaseName: string;
+  expectedListing: JsonObject;
+}): ExactMutationReadback<JsonObject> | null {
+  const response = inspectRemote(
+    options.runner,
+    [
+      "d1",
+      "execute",
+      options.databaseName,
+      "--remote",
+      "--config",
+      "wrangler.toml",
+      "--command",
+      `SELECT ${PRODUCTION_EXPORT_COLUMNS.join(", ")} FROM listings WHERE id = 'tako/takos'`,
+      "--json",
+    ],
+    options.cwd,
+  );
+  if (response.status === "not-found") {
+    return null;
+  }
+  const rows = collectReplicaListingRows(
+    parseJsonOutput(response.stdout, "replica_snapshot_import_readback"),
+  );
+  if (rows.length === 0) return null;
+  if (
+    rows.length !== 1 ||
+    canonicalJson(rows[0]) !== canonicalJson(options.expectedListing)
+  ) {
+    throw new Error("replica_snapshot_import_readback_mismatch");
+  }
+  return { value: rows[0]!, digest: digestJson(rows[0]!) };
+}
+
+async function exactIconReadback(options: {
+  runner: WranglerRunner;
+  cwd: string;
+  bucketName: string;
+  key: string;
+  expectedDigest: string;
+  mediaType: string;
+}): Promise<ExactMutationReadback<JsonObject> | null> {
+  const root = await mkdtemp(join(tmpdir(), "takosumi-store-icon-readback-"));
+  await chmod(root, 0o700);
+  try {
+    const file = join(root, "object");
+    const response = inspectRemote(
+      options.runner,
+      [
+        "r2",
+        "object",
+        "get",
+        `${options.bucketName}/${options.key}`,
+        "--remote",
+        "--file",
+        file,
+      ],
+      options.cwd,
+    );
+    if (response.status === "not-found") return null;
+    if (response.status !== "ok") {
+      throw new Error("replica_icon_readback_failed");
+    }
+    const digest = sha256Bytes(await readFile(file));
+    if (digest !== options.expectedDigest) {
+      throw new Error("replica_icon_remote_readback_mismatch");
+    }
+    const value = {
+      bucketName: options.bucketName,
+      key: options.key,
+      sha256: digest,
+      mediaType: options.mediaType,
+    };
+    return { value, digest: digestJson(value) };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 function replicaToml(
@@ -3070,7 +3525,7 @@ async function provision(options: {
     if (!(error instanceof Error) || !error.message.includes("ENOENT"))
       throw error;
   }
-  if (retainedProgress) {
+  if (retainedProgress?.status === "provisioned") {
     const { databaseId, kvNamespaceId, versionId } =
       provisionedProgressResourceIds(retainedProgress);
     const target: TargetPolicy = {
@@ -3167,129 +3622,242 @@ async function provision(options: {
       retainedInventory,
     });
   }
-  const preflightAbsence = {
-    worker:
-      !workerVersionPresent(
+  if (retainedProgress && retainedProgress.status !== "provisioning") {
+    throw new Error("replica_terminal_identity_reuse_forbidden");
+  }
+  let progress: Progress;
+  let preflightAbsenceDigest: string;
+  if (retainedProgress) {
+    progress = retainedProgress;
+    preflightAbsenceDigest = progress.preflightAbsenceDigest;
+  } else {
+    const preflightAbsence = {
+      worker:
+        !workerVersionPresent(
+          options.runner,
+          options.sourceCheckout,
+          options.config.target.workerName,
+        ) &&
+        (await scriptSubdomainState(
+          options.cloudflareReadClient,
+          options.config.target.workerName,
+        )) === "missing",
+      d1:
+        exactD1DatabaseId(
+          options.runner(["d1", "list", "--json"], {
+            cwd: options.sourceCheckout,
+          }),
+          options.config.target.databaseName,
+        ) === null,
+      kv:
+        exactKvNamespaceId(
+          options.runner(["kv", "namespace", "list"], {
+            cwd: options.sourceCheckout,
+          }),
+          options.config.target.kvNamespaceName,
+        ) === null,
+      r2:
+        (
+          await listR2Buckets(
+            options.cloudflareReadClient,
+            options.config.target.iconsBucketName,
+          )
+        ).length === 0,
+    };
+    if (Object.values(preflightAbsence).some((absent) => absent !== true)) {
+      throw new Error("replica_preflight_target_not_absent");
+    }
+    preflightAbsenceDigest = digestJson({
+      kind: "takosumi.store-replica-preflight-absence@v1",
+      target: options.config.target,
+      ...preflightAbsence,
+    });
+    progress = {
+      kind: "takosumi.store-release-replica-progress@v1",
+      status: "provisioning",
+      surfaceId: SURFACE_ID,
+      releaseId: options.envelope.releaseId,
+      replicaId: options.config.replicaId,
+      accountId: options.config.target.accountId,
+      target: options.config.target,
+      artifactDigests: options.envelope.candidate.artifactDigests,
+      createdAt: options.config.createdAt,
+      expiresAt: options.config.expiresAt,
+      resources: [
+        {
+          type: "d1",
+          name: options.config.target.databaseName,
+          state: "intent-recorded",
+        },
+        {
+          type: "kv",
+          name: options.config.target.kvNamespaceName,
+          state: "intent-recorded",
+        },
+        {
+          type: "r2",
+          name: options.config.target.iconsBucketName,
+          state: "intent-recorded",
+        },
+        {
+          type: "worker",
+          name: options.config.target.workerName,
+          state: "intent-recorded",
+        },
+      ],
+      preflightAbsenceDigest,
+      completedSteps: ["all-resource-intents-recorded-before-mutation"],
+      productionFallback: false,
+    };
+    await writeProgress(progressPath, progress);
+  }
+  const mutationJournalPath = join(
+    options.evidenceDirectory,
+    REPLICA_MUTATION_JOURNAL_FILE,
+  );
+  let mutationJournal = await openReplicaMutationJournal(
+    mutationJournalPath,
+    replicaMutationAuthority(
+      options.envelope,
+      options.config,
+      preflightAbsenceDigest,
+    ),
+  );
+  const d1Descriptor: ReplicaMutationDescriptor = {
+    id: "provision:d1:create",
+    kind: "d1-create",
+    resourceType: "d1",
+    resourceName: options.config.target.databaseName,
+    expectedDigest: digestJson({
+      accountId: options.config.target.accountId,
+      name: options.config.target.databaseName,
+      preflightAbsenceDigest,
+    }),
+  };
+  let issuedDatabaseId: string | undefined;
+  const d1Create = await runExactPresentMutation({
+    path: mutationJournalPath,
+    journal: mutationJournal,
+    descriptor: d1Descriptor,
+    accountId: options.config.target.accountId,
+    createdOnly: true,
+    readback: async () => {
+      const live = exactD1CreateReadback(
         options.runner,
         options.sourceCheckout,
-        options.config.target.workerName,
-      ) &&
-      (await scriptSubdomainState(
-        options.cloudflareReadClient,
-        options.config.target.workerName,
-      )) === "missing",
-    d1:
-      exactD1DatabaseId(
-        options.runner(["d1", "list", "--json"], {
-          cwd: options.sourceCheckout,
-        }),
+        options.config.target.accountId,
         options.config.target.databaseName,
-      ) === null,
-    kv:
-      exactKvNamespaceId(
-        options.runner(["kv", "namespace", "list"], {
-          cwd: options.sourceCheckout,
-        }),
-        options.config.target.kvNamespaceName,
-      ) === null,
-    r2:
-      (
-        await listR2Buckets(
-          options.cloudflareReadClient,
-          options.config.target.iconsBucketName,
-        )
-      ).length === 0,
-  };
-  if (Object.values(preflightAbsence).some((absent) => absent !== true)) {
-    throw new Error("replica_preflight_target_not_absent");
-  }
-  const preflightAbsenceDigest = digestJson({
-    kind: "takosumi.store-replica-preflight-absence@v1",
-    target: options.config.target,
-    ...preflightAbsence,
+      );
+      if (
+        live &&
+        ((issuedDatabaseId && live.resourceId !== issuedDatabaseId) ||
+          (progress.resources.find((resource) => resource.type === "d1")?.id &&
+            live.resourceId !==
+              progress.resources.find((resource) => resource.type === "d1")
+                ?.id))
+      ) {
+        throw new Error("replica_d1_create_receipt_id_mismatch");
+      }
+      return live;
+    },
+    mutate: () => {
+      const output = options.runner(
+        ["d1", "create", options.config.target.databaseName],
+        { cwd: options.sourceCheckout },
+      );
+      issuedDatabaseId = parseD1Id(output);
+      return output;
+    },
   });
-  let progress: Progress = {
-    kind: "takosumi.store-release-replica-progress@v1",
-    status: "provisioning",
-    surfaceId: SURFACE_ID,
-    releaseId: options.envelope.releaseId,
-    replicaId: options.config.replicaId,
-    accountId: options.config.target.accountId,
-    target: options.config.target,
-    artifactDigests: options.envelope.candidate.artifactDigests,
-    createdAt: options.config.createdAt,
-    expiresAt: options.config.expiresAt,
-    resources: [
-      {
-        type: "d1",
-        name: options.config.target.databaseName,
-        state: "intent-recorded",
-      },
-      {
-        type: "kv",
-        name: options.config.target.kvNamespaceName,
-        state: "intent-recorded",
-      },
-      {
-        type: "r2",
-        name: options.config.target.iconsBucketName,
-        state: "intent-recorded",
-      },
-      {
-        type: "worker",
-        name: options.config.target.workerName,
-        state: "intent-recorded",
-      },
-    ],
-    preflightAbsenceDigest,
-    completedSteps: ["all-resource-intents-recorded-before-mutation"],
-    productionFallback: false,
-  };
-  await writeProgress(progressPath, progress);
-  let databaseId: string;
-  try {
-    const d1Output = options.runner(
-      ["d1", "create", options.config.target.databaseName],
-      { cwd: options.sourceCheckout },
-    );
-    databaseId = parseD1Id(d1Output);
-  } catch (error) {
-    progress = updateResource(progress, "d1", { state: "presence-unknown" });
-    await writeProgress(progressPath, progress);
-    throw error;
-  }
+  mutationJournal = d1Create.journal;
+  const databaseId = String(d1Create.readback.resourceId);
   progress = updateResource(progress, "d1", {
     id: databaseId,
     state: "present",
   });
   await writeProgress(progressPath, progress);
-  let kvNamespaceId: string;
-  try {
-    const kvOutput = options.runner(
-      ["kv", "namespace", "create", options.config.target.kvNamespaceName],
-      { cwd: options.sourceCheckout },
-    );
-    kvNamespaceId = parseKvId(kvOutput);
-  } catch (error) {
-    progress = updateResource(progress, "kv", { state: "presence-unknown" });
-    await writeProgress(progressPath, progress);
-    throw error;
-  }
+  const kvDescriptor: ReplicaMutationDescriptor = {
+    id: "provision:kv:create",
+    kind: "kv-create",
+    resourceType: "kv",
+    resourceName: options.config.target.kvNamespaceName,
+    expectedDigest: digestJson({
+      accountId: options.config.target.accountId,
+      name: options.config.target.kvNamespaceName,
+      preflightAbsenceDigest,
+    }),
+  };
+  let issuedKvId: string | undefined;
+  const kvCreate = await runExactPresentMutation({
+    path: mutationJournalPath,
+    journal: mutationJournal,
+    descriptor: kvDescriptor,
+    accountId: options.config.target.accountId,
+    createdOnly: true,
+    readback: async () => {
+      const live = exactKvCreateReadback(
+        options.runner,
+        options.sourceCheckout,
+        options.config.target.accountId,
+        options.config.target.kvNamespaceName,
+      );
+      if (
+        live &&
+        ((issuedKvId && live.resourceId !== issuedKvId) ||
+          (progress.resources.find((resource) => resource.type === "kv")?.id &&
+            live.resourceId !==
+              progress.resources.find((resource) => resource.type === "kv")
+                ?.id))
+      ) {
+        throw new Error("replica_kv_create_receipt_id_mismatch");
+      }
+      return live;
+    },
+    mutate: () => {
+      const output = options.runner(
+        ["kv", "namespace", "create", options.config.target.kvNamespaceName],
+        { cwd: options.sourceCheckout },
+      );
+      issuedKvId = parseKvId(output);
+      return output;
+    },
+  });
+  mutationJournal = kvCreate.journal;
+  const kvNamespaceId = String(kvCreate.readback.resourceId);
   progress = updateResource(progress, "kv", {
     id: kvNamespaceId,
     state: "present",
   });
   await writeProgress(progressPath, progress);
-  try {
-    options.runner(
-      ["r2", "bucket", "create", options.config.target.iconsBucketName],
-      { cwd: options.sourceCheckout },
-    );
-  } catch (error) {
-    progress = updateResource(progress, "r2", { state: "presence-unknown" });
-    await writeProgress(progressPath, progress);
-    throw error;
-  }
+  const r2Descriptor: ReplicaMutationDescriptor = {
+    id: "provision:r2:create",
+    kind: "r2-create",
+    resourceType: "r2",
+    resourceName: options.config.target.iconsBucketName,
+    expectedDigest: digestJson({
+      accountId: options.config.target.accountId,
+      name: options.config.target.iconsBucketName,
+      preflightAbsenceDigest,
+    }),
+  };
+  const r2Create = await runExactPresentMutation({
+    path: mutationJournalPath,
+    journal: mutationJournal,
+    descriptor: r2Descriptor,
+    accountId: options.config.target.accountId,
+    createdOnly: true,
+    readback: () =>
+      exactR2CreateReadback(
+        options.cloudflareReadClient,
+        options.config.target.iconsBucketName,
+      ),
+    mutate: () =>
+      options.runner(
+        ["r2", "bucket", "create", options.config.target.iconsBucketName],
+        { cwd: options.sourceCheckout },
+      ),
+  });
+  mutationJournal = r2Create.journal;
   progress = updateResource(progress, "r2", { state: "present" });
   await writeProgress(progressPath, progress);
   const releaseRoot = await mkdtemp(
@@ -3310,18 +3878,48 @@ async function provision(options: {
         flag: "wx",
       },
     );
-    options.runner(
-      [
-        "d1",
-        "migrations",
-        "apply",
-        options.config.target.databaseName,
-        "--remote",
-        "--config",
-        "wrangler.toml",
-      ],
-      { cwd: releaseRoot },
-    );
+    const migrationDescriptor: ReplicaMutationDescriptor = {
+      id: "provision:d1:migrations",
+      kind: "d1-migrations-apply",
+      resourceType: "d1",
+      resourceName: options.config.target.databaseName,
+      resourceId: databaseId,
+      expectedDigest: digestJson({
+        databaseId,
+        migrations: options.manifest.migrations.map((entry) => ({
+          path: entry.path,
+          sha256: entry.sha256,
+        })),
+      }),
+    };
+    const migration = await runExactPresentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: migrationDescriptor,
+      accountId: options.config.target.accountId,
+      createdOnly: false,
+      readback: async () =>
+        exactMigrationReadback({
+          runner: options.runner,
+          cwd: releaseRoot,
+          databaseName: options.config.target.databaseName,
+          manifest: options.manifest,
+        }),
+      mutate: () =>
+        options.runner(
+          [
+            "d1",
+            "migrations",
+            "apply",
+            options.config.target.databaseName,
+            "--remote",
+            "--config",
+            "wrangler.toml",
+          ],
+          { cwd: releaseRoot },
+        ),
+    });
+    mutationJournal = migration.journal;
     const sqlPath = join(releaseRoot, "sanitized-snapshot.sql");
     const materializedSql = options.snapshotScan.sql.replaceAll(
       "{{TAKOSUMI_STORE_REPLICA_ORIGIN}}",
@@ -3331,59 +3929,108 @@ async function provision(options: {
       throw new Error("replica_snapshot_origin_materialization_failed");
     }
     await writeFile(sqlPath, materializedSql, { mode: 0o600, flag: "wx" });
-    options.runner(
-      [
-        "d1",
-        "execute",
-        options.config.target.databaseName,
-        "--remote",
-        "--config",
-        "wrangler.toml",
-        "--file",
-        sqlPath,
-        "--yes",
-      ],
-      { cwd: releaseRoot },
-    );
+    const expectedListing = {
+      ...options.snapshotScan.listing,
+      icon_url: String(options.snapshotScan.listing.icon_url).replace(
+        "{{TAKOSUMI_STORE_REPLICA_ORIGIN}}",
+        options.config.target.origin.replace(/\/$/u, ""),
+      ),
+    };
+    const snapshotDescriptor: ReplicaMutationDescriptor = {
+      id: "provision:d1:snapshot-import",
+      kind: "d1-snapshot-import",
+      resourceType: "d1",
+      resourceName: options.config.target.databaseName,
+      resourceId: databaseId,
+      expectedDigest: digestJson({
+        snapshotDigest: options.snapshotScan.snapshotDigest,
+        sqlDigest: options.snapshotScan.sqlDigest,
+        listing: expectedListing,
+      }),
+    };
+    const snapshot = await runExactPresentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: snapshotDescriptor,
+      accountId: options.config.target.accountId,
+      createdOnly: false,
+      readback: async () =>
+        exactSnapshotImportReadback({
+          runner: options.runner,
+          cwd: releaseRoot,
+          databaseName: options.config.target.databaseName,
+          expectedListing,
+        }),
+      mutate: () =>
+        options.runner(
+          [
+            "d1",
+            "execute",
+            options.config.target.databaseName,
+            "--remote",
+            "--config",
+            "wrangler.toml",
+            "--file",
+            sqlPath,
+            "--yes",
+          ],
+          { cwd: releaseRoot },
+        ),
+    });
+    mutationJournal = snapshot.journal;
     const iconReadback: { key: string; sha256: string; mediaType: string }[] =
       [];
     const iconDirectory = join(releaseRoot, "replica-icons");
     await mkdir(iconDirectory, { mode: 0o700 });
     for (const [index, icon] of options.snapshotScan.icons.entries()) {
       const source = join(iconDirectory, `${index}.source`);
-      const readback = join(iconDirectory, `${index}.readback`);
       await writeFile(source, icon.bytes, { mode: 0o600, flag: "wx" });
-      options.runner(
-        [
-          "r2",
-          "object",
-          "put",
-          `${options.config.target.iconsBucketName}/${icon.key}`,
-          "--remote",
-          "--file",
-          source,
-          "--content-type",
-          icon.mediaType,
-          "--force",
-        ],
-        { cwd: releaseRoot },
-      );
-      options.runner(
-        [
-          "r2",
-          "object",
-          "get",
-          `${options.config.target.iconsBucketName}/${icon.key}`,
-          "--remote",
-          "--file",
-          readback,
-        ],
-        { cwd: releaseRoot },
-      );
-      const readbackDigest = sha256Bytes(await readFile(readback));
-      if (readbackDigest !== icon.sha256) {
-        throw new Error("replica_icon_remote_readback_mismatch");
-      }
+      const descriptor: ReplicaMutationDescriptor = {
+        id: `provision:r2:icon:${index}`,
+        kind: "r2-icon-put",
+        resourceType: "r2",
+        resourceName: options.config.target.iconsBucketName,
+        objectKey: icon.key,
+        expectedDigest: digestJson({
+          key: icon.key,
+          sha256: icon.sha256,
+          mediaType: icon.mediaType,
+        }),
+      };
+      const iconPut = await runExactPresentMutation({
+        path: mutationJournalPath,
+        journal: mutationJournal,
+        descriptor,
+        accountId: options.config.target.accountId,
+        createdOnly: true,
+        readback: () =>
+          exactIconReadback({
+            runner: options.runner,
+            cwd: releaseRoot,
+            bucketName: options.config.target.iconsBucketName,
+            key: icon.key,
+            expectedDigest: icon.sha256,
+            mediaType: icon.mediaType,
+          }),
+        mutate: () =>
+          options.runner(
+            [
+              "r2",
+              "object",
+              "put",
+              `${options.config.target.iconsBucketName}/${icon.key}`,
+              "--remote",
+              "--file",
+              source,
+              "--content-type",
+              icon.mediaType,
+              "--force",
+            ],
+            { cwd: releaseRoot },
+          ),
+      });
+      mutationJournal = iconPut.journal;
+      const readbackDigest = icon.sha256;
       iconReadback.push({
         key: icon.key,
         sha256: icon.sha256,
@@ -3412,16 +4059,61 @@ async function provision(options: {
       options.evidenceDirectory,
       PROVISION_OPERATION_FILE,
     );
+    const workerDescriptors: ReplicaMutationDescriptor[] = [
+      {
+        id: "provision:worker:upload",
+        kind: "worker-upload",
+        resourceType: "worker",
+        resourceName: options.config.target.workerName,
+        expectedDigest: digestJson({
+          artifactDigests: options.envelope.candidate.artifactDigests,
+          target: digestJson(target),
+        }),
+      },
+      {
+        id: "provision:worker:deploy",
+        kind: "worker-deploy",
+        resourceType: "worker",
+        resourceName: options.config.target.workerName,
+        expectedDigest: digestJson({
+          traffic: 100,
+          target: digestJson(target),
+        }),
+      },
+      {
+        id: "provision:worker:trigger",
+        kind: "worker-trigger-deploy",
+        resourceType: "worker",
+        resourceName: options.config.target.workerName,
+        expectedDigest: digestJson({
+          origin: options.config.target.origin,
+          previewsEnabled: false,
+        }),
+      },
+    ];
+    const workerIntentExisting = new Map<string, boolean>();
+    for (const descriptor of workerDescriptors) {
+      const retained = await retainReplicaMutationIntent(
+        mutationJournalPath,
+        mutationJournal,
+        descriptor,
+      );
+      mutationJournal = retained.journal;
+      workerIntentExisting.set(descriptor.id, retained.existing);
+    }
     let readback: Awaited<ReturnType<typeof deploySealedStore>>;
     try {
       readback = await deploySealedStore({
-        runner: options.runner,
+        runner: replicaDeployRunner(options.runner),
         cwd: releaseRoot,
         target,
         envelope: options.envelope,
         manifest: options.manifest,
         candidateChecks: checks,
         deployTriggers: true,
+        preverifiedSchema: {
+          migrationLineageDigest: migration.readback.digest,
+        },
         readTopology: () =>
           readRuntimeTopology(
             options.cloudflareReadClient,
@@ -3441,6 +4133,60 @@ async function provision(options: {
       });
       await writeProgress(progressPath, progress);
       throw error;
+    }
+    const workerReadbacks = new Map<string, ExactMutationReadback<unknown>>([
+      [
+        "provision:worker:upload",
+        {
+          value: readback.version,
+          resourceId: readback.versionId,
+          digest: digestJson(readback.version),
+        },
+      ],
+      [
+        "provision:worker:deploy",
+        {
+          value: readback.deployments,
+          resourceId: readback.versionId,
+          digest: digestJson(readback.deployments),
+        },
+      ],
+      [
+        "provision:worker:trigger",
+        { value: readback.topology, digest: digestJson(readback.topology) },
+      ],
+    ]);
+    for (const descriptor of workerDescriptors) {
+      const exact = workerReadbacks.get(descriptor.id)!;
+      const committed = committedReplicaMutation(
+        mutationJournal,
+        descriptor.id,
+      );
+      if (committed) {
+        if (
+          committed.receipt?.liveReadbackDigest !== exact.digest ||
+          (committed.receipt.resourceId !== undefined &&
+            committed.receipt.resourceId !== exact.resourceId)
+        ) {
+          throw new Error("replica_worker_mutation_readback_mismatch");
+        }
+        continue;
+      }
+      mutationJournal = await commitReplicaMutation(
+        mutationJournalPath,
+        mutationJournal,
+        descriptor,
+        mutationReceipt({
+          accountId: options.config.target.accountId,
+          descriptor,
+          readback: exact,
+          recovery: workerIntentExisting.get(descriptor.id)
+            ? "resume"
+            : "direct",
+          result: "exact-present",
+          createdOnly: descriptor.kind === "worker-upload",
+        }),
+      );
     }
     progress = updateResource(progress, "worker", {
       id: readback.versionId,
@@ -3736,9 +4482,13 @@ async function verifyForwardRepairResumeState(options: {
   }
   if (
     !operation ||
-    !["version-uploaded", "deployed", "verified"].includes(
-      String(operation.phase),
-    )
+    ![
+      "version-uploaded",
+      "deployed",
+      "trigger-intent-recorded",
+      "trigger-deployed",
+      "verified",
+    ].includes(String(operation.phase))
   ) {
     if (versions.length !== 0 || subdomainState !== "missing") {
       throw new Error("replica_forward_repair_intervening_worker_present");
@@ -3784,7 +4534,12 @@ async function verifyForwardRepairResumeState(options: {
     expectedVersionId,
   );
   if (
-    (["deployed", "verified"].includes(String(operation.phase)) &&
+    ([
+      "deployed",
+      "trigger-intent-recorded",
+      "trigger-deployed",
+      "verified",
+    ].includes(String(operation.phase)) &&
       !exactDeployment) ||
     (String(operation.phase) === "version-uploaded" &&
       !exactDeployment &&
@@ -3911,36 +4666,85 @@ export async function rehearseForwardRepair(options: {
         .hostname,
       readbackListingPath: options.readbackListingPath,
     };
+    const mutationJournalPath = join(
+      options.evidenceDirectory,
+      REPLICA_MUTATION_JOURNAL_FILE,
+    );
+    let mutationJournal = await openReplicaMutationJournal(
+      mutationJournalPath,
+      replicaMutationAuthority(
+        options.envelope,
+        options.config,
+        String(options.initialInventory.remoteEvidence.preflightAbsenceDigest),
+      ),
+    );
     let workerAbsenceDigest: string;
     if (progress.status === "intent-recorded") {
-      const versionPresent = workerVersionPresent(
-        options.runner,
-        releaseRoot,
-        options.initialInventory.target.workerName,
-        removedVersionId,
-      );
-      const subdomainState = await scriptSubdomainState(
-        options.cloudflareReadClient,
-        options.initialInventory.target.workerName,
-      );
-      if (
-        (!versionPresent && subdomainState !== "missing") ||
-        (versionPresent && subdomainState !== "enabled")
-      ) {
-        throw new Error("replica_failure_injection_worker_state_ambiguous");
-      }
-      if (versionPresent) {
-        requireExactWorkerDeployment(
-          options.runner,
-          releaseRoot,
-          options.initialInventory.target.workerName,
-          removedVersionId,
-        );
-        options.runner(
-          ["delete", options.initialInventory.target.workerName, "--force"],
-          { cwd: releaseRoot },
-        );
-      }
+      const rehearsalDelete: ReplicaMutationDescriptor = {
+        id: "rehearsal:worker:delete",
+        kind: "worker-rehearsal-delete",
+        resourceType: "worker",
+        resourceName: options.initialInventory.target.workerName,
+        resourceId: removedVersionId,
+        expectedDigest: digestJson({ removedVersionId }),
+      };
+      mutationJournal = await runExactAbsentMutation({
+        path: mutationJournalPath,
+        journal: mutationJournal,
+        descriptor: rehearsalDelete,
+        accountId: options.initialInventory.accountId,
+        readback: async () => {
+          const present = workerVersionPresent(
+            options.runner,
+            releaseRoot,
+            options.initialInventory.target.workerName,
+            removedVersionId,
+          );
+          const subdomain = await scriptSubdomainState(
+            options.cloudflareReadClient,
+            options.initialInventory.target.workerName,
+          );
+          if (!present) {
+            if (subdomain !== "missing") {
+              throw new Error(
+                "replica_failure_injection_worker_state_ambiguous",
+              );
+            }
+            return null;
+          }
+          if (subdomain !== "enabled") {
+            throw new Error("replica_failure_injection_worker_state_ambiguous");
+          }
+          const deploymentDigest = requireExactWorkerDeployment(
+            options.runner,
+            releaseRoot,
+            options.initialInventory.target.workerName,
+            removedVersionId,
+          );
+          const version = verifyOwnedReplicaVersion({
+            runner: options.runner,
+            cwd: releaseRoot,
+            envelope: options.envelope,
+            target,
+            versionId: removedVersionId,
+          });
+          const value = {
+            versionDigest: digestJson(version),
+            deploymentDigest,
+            subdomain,
+          };
+          return {
+            value,
+            resourceId: removedVersionId,
+            digest: digestJson(value),
+          };
+        },
+        mutate: () =>
+          options.runner(
+            ["delete", options.initialInventory.target.workerName, "--force"],
+            { cwd: releaseRoot },
+          ),
+      });
       const versionAbsent = !workerVersionPresent(
         options.runner,
         releaseRoot,
@@ -4029,18 +4833,58 @@ export async function rehearseForwardRepair(options: {
       throw new Error("replica_forward_repair_storage_preservation_drift");
     }
     const genericChecks = replicaHealthChecks(target, options.envelope);
-    const repairRunner = ((
-      args: readonly string[],
-      runnerOptions: { cwd: string },
-    ): string => {
-      if (args[0] === "deployments" && args[1] === "status") {
-        const result = inspectRemote(options.runner, args, runnerOptions.cwd);
-        if (result.status === "not-found") return '{"versions":[]}';
-        return result.stdout;
-      }
-      return options.runner(args, runnerOptions);
-    }) as WranglerRunner;
-    repairRunner.inspect = options.runner.inspect?.bind(options.runner);
+    const repairRunner = replicaDeployRunner(options.runner);
+    const repairMigration = exactMigrationReadback({
+      runner: options.runner,
+      cwd: releaseRoot,
+      databaseName: target.databaseName,
+      manifest: options.manifest,
+    });
+    if (!repairMigration) {
+      throw new Error("replica_forward_repair_migration_state_incomplete");
+    }
+    const repairDescriptors: ReplicaMutationDescriptor[] = [
+      {
+        id: "rehearsal:worker:repair-upload",
+        kind: "worker-repair-upload",
+        resourceType: "worker",
+        resourceName: target.workerName,
+        expectedDigest: digestJson({
+          artifactDigests: options.envelope.candidate.artifactDigests,
+          target: digestJson(target),
+        }),
+      },
+      {
+        id: "rehearsal:worker:repair-deploy",
+        kind: "worker-repair-deploy",
+        resourceType: "worker",
+        resourceName: target.workerName,
+        expectedDigest: digestJson({
+          traffic: 100,
+          target: digestJson(target),
+        }),
+      },
+      {
+        id: "rehearsal:worker:repair-trigger",
+        kind: "worker-repair-trigger-deploy",
+        resourceType: "worker",
+        resourceName: target.workerName,
+        expectedDigest: digestJson({
+          origin: target.origin,
+          previewsEnabled: false,
+        }),
+      },
+    ];
+    const repairIntentExisting = new Map<string, boolean>();
+    for (const descriptor of repairDescriptors) {
+      const retained = await retainReplicaMutationIntent(
+        mutationJournalPath,
+        mutationJournal,
+        descriptor,
+      );
+      mutationJournal = retained.journal;
+      repairIntentExisting.set(descriptor.id, retained.existing);
+    }
     const readback = await deploySealedStore({
       runner: repairRunner,
       cwd: releaseRoot,
@@ -4049,6 +4893,9 @@ export async function rehearseForwardRepair(options: {
       manifest: options.manifest,
       candidateChecks: genericChecks,
       deployTriggers: true,
+      preverifiedSchema: {
+        migrationLineageDigest: repairMigration.digest,
+      },
       readTopology: () =>
         readRuntimeTopology(
           options.cloudflareReadClient,
@@ -4062,6 +4909,60 @@ export async function rehearseForwardRepair(options: {
         expectedPreDeploymentDigest: digestJson({ versions: [] }),
       },
     });
+    const repairReadbacks = new Map<string, ExactMutationReadback<unknown>>([
+      [
+        "rehearsal:worker:repair-upload",
+        {
+          value: readback.version,
+          resourceId: readback.versionId,
+          digest: digestJson(readback.version),
+        },
+      ],
+      [
+        "rehearsal:worker:repair-deploy",
+        {
+          value: readback.deployments,
+          resourceId: readback.versionId,
+          digest: digestJson(readback.deployments),
+        },
+      ],
+      [
+        "rehearsal:worker:repair-trigger",
+        { value: readback.topology, digest: digestJson(readback.topology) },
+      ],
+    ]);
+    for (const descriptor of repairDescriptors) {
+      const exact = repairReadbacks.get(descriptor.id)!;
+      const committed = committedReplicaMutation(
+        mutationJournal,
+        descriptor.id,
+      );
+      if (committed) {
+        if (
+          committed.receipt?.liveReadbackDigest !== exact.digest ||
+          (committed.receipt.resourceId !== undefined &&
+            committed.receipt.resourceId !== exact.resourceId)
+        ) {
+          throw new Error("replica_worker_repair_mutation_readback_mismatch");
+        }
+        continue;
+      }
+      mutationJournal = await commitReplicaMutation(
+        mutationJournalPath,
+        mutationJournal,
+        descriptor,
+        mutationReceipt({
+          accountId: options.initialInventory.accountId,
+          descriptor,
+          readback: exact,
+          recovery: repairIntentExisting.get(descriptor.id)
+            ? "resume"
+            : "direct",
+          result: "exact-present",
+          createdOnly: descriptor.kind === "worker-repair-upload",
+        }),
+      );
+    }
     if (readback.versionId === removedVersionId) {
       throw new Error("replica_forward_repair_reused_removed_version");
     }
@@ -4444,6 +5345,27 @@ function inspectRemote(
   return { status: result.status, stdout: result.stdout };
 }
 
+export function replicaDeployRunner(runner: WranglerRunner): WranglerRunner {
+  const wrapped = ((
+    args: readonly string[],
+    options: { cwd: string },
+  ): string => {
+    const emptyResult =
+      args[0] === "deployments" && args[1] === "status"
+        ? '{"versions":[]}'
+        : args[0] === "versions" && args[1] === "list"
+          ? "[]"
+          : null;
+    if (emptyResult !== null) {
+      const result = inspectRemote(runner, args, options.cwd);
+      return result.status === "not-found" ? emptyResult : result.stdout;
+    }
+    return runner(args, options);
+  }) as WranglerRunner;
+  wrapped.inspect = runner.inspect?.bind(runner);
+  return wrapped;
+}
+
 function listWorkerVersionsExact(
   runner: WranglerRunner,
   cwd: string,
@@ -4482,7 +5404,7 @@ function verifyOwnedReplicaVersion(options: {
   target: TargetPolicy;
   envelope: ReleaseEnvelope;
   versionId: string;
-}): void {
+}): unknown {
   const value = parseJsonOutput(
     options.runner(
       [
@@ -4508,6 +5430,7 @@ function verifyOwnedReplicaVersion(options: {
     throw new Error("replica_worker_owned_version_annotation_mismatch");
   }
   assertVersionBindings(value, options.versionId, options.target);
+  return value;
 }
 
 function readOwnedOperationVersionId(options: {
@@ -4523,6 +5446,8 @@ function readOwnedOperationVersionId(options: {
       "upload-intent-recorded",
       "version-uploaded",
       "deployed",
+      "trigger-intent-recorded",
+      "trigger-deployed",
       "verified",
     ].includes(phase)
   ) {
@@ -4694,6 +5619,119 @@ async function listAllR2Objects(
   throw new Error("replica_r2_object_inventory_page_limit");
 }
 
+async function exactR2ObjectPresenceReadback(options: {
+  runner: WranglerRunner;
+  cwd: string;
+  bucketName: string;
+  key: string;
+}): Promise<ExactMutationReadback<JsonObject> | null> {
+  const root = await mkdtemp(join(tmpdir(), "takosumi-store-r2-presence-"));
+  await chmod(root, 0o700);
+  try {
+    const file = join(root, "object");
+    const response = inspectRemote(
+      options.runner,
+      [
+        "r2",
+        "object",
+        "get",
+        `${options.bucketName}/${options.key}`,
+        "--remote",
+        "--file",
+        file,
+      ],
+      options.cwd,
+    );
+    if (response.status === "not-found") return null;
+    if (response.status !== "ok") {
+      throw new Error("replica_r2_object_presence_readback_failed");
+    }
+    const value = {
+      bucketName: options.bucketName,
+      key: options.key,
+      sha256: sha256Bytes(await readFile(file)),
+    };
+    return { value, digest: digestJson(value) };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+export async function sealR2ObjectDeleteInventory(options: {
+  path: string;
+  journal: ReplicaMutationJournal;
+  accountId: string;
+  bucketName: string;
+  liveObjectKeys: readonly string[];
+}): Promise<{
+  journal: ReplicaMutationJournal;
+  descriptors: readonly ReplicaMutationDescriptor[];
+  inventoryDigest: string;
+}> {
+  const liveObjectKeys = [...options.liveObjectKeys];
+  if (
+    liveObjectKeys.some((key) => key.length === 0) ||
+    new Set(liveObjectKeys).size !== liveObjectKeys.length
+  ) {
+    throw new Error("replica_r2_cleanup_live_inventory_invalid");
+  }
+  const retained = options.journal.operations.filter(
+    (operation) => operation.descriptor.kind === "r2-object-delete",
+  );
+  const retainedKeys = retained.map((operation) =>
+    String(operation.descriptor.objectKey),
+  );
+  let sealedObjectKeys: string[];
+  if (retained.length === 0) {
+    sealedObjectKeys = liveObjectKeys.sort().reverse();
+  } else if (retained.some((operation) => operation.phase === "committed")) {
+    sealedObjectKeys = retainedKeys;
+  } else {
+    if (retainedKeys.some((key) => !liveObjectKeys.includes(key))) {
+      throw new Error("replica_r2_cleanup_partial_inventory_drift");
+    }
+    sealedObjectKeys = liveObjectKeys.sort().reverse();
+  }
+  if (liveObjectKeys.some((key) => !sealedObjectKeys.includes(key))) {
+    throw new Error("replica_r2_cleanup_inventory_unsealed");
+  }
+  const objectInventoryDigest = digestJson({
+    kind: "takosumi.store-replica-r2-cleanup-inventory@v1",
+    accountId: options.accountId,
+    bucketName: options.bucketName,
+    keys: [...sealedObjectKeys].sort(),
+  });
+  const descriptors = sealedObjectKeys.map(
+    (key, index): ReplicaMutationDescriptor => ({
+      id: `cleanup:r2:object:${index}`,
+      kind: "r2-object-delete",
+      resourceType: "r2",
+      resourceName: options.bucketName,
+      objectKey: key,
+      expectedDigest: objectInventoryDigest,
+    }),
+  );
+  if (
+    retained.length > descriptors.length ||
+    retained.some(
+      (operation, index) =>
+        canonicalJson(operation.descriptor) !==
+        canonicalJson(descriptors[index]),
+    )
+  ) {
+    throw new Error("replica_r2_cleanup_partial_inventory_gap");
+  }
+  return {
+    journal: await retainReplicaMutationIntents(
+      options.path,
+      options.journal,
+      descriptors,
+    ),
+    descriptors,
+    inventoryDigest: objectInventoryDigest,
+  };
+}
+
 export async function destroyExact(options: {
   inventory: Inventory | Progress;
   envelope: ReleaseEnvelope;
@@ -4782,6 +5820,29 @@ export async function destroyExact(options: {
         productionFallback: false,
       };
   await writeProgress(options.progressPath, progress);
+  const mutationJournalPath = join(
+    dirname(options.progressPath),
+    REPLICA_MUTATION_JOURNAL_FILE,
+  );
+  const journalTarget = {
+    accountId: target.accountId,
+    workerName: target.workerName,
+    databaseName: target.databaseName,
+    kvNamespaceName: target.kvNamespaceName,
+    iconsBucketName: target.iconsBucketName,
+    origin: target.origin,
+  };
+  const mutationAuthority: ReplicaMutationJournalAuthority = {
+    releaseId: options.inventory.releaseId,
+    replicaId: options.inventory.replicaId,
+    accountId: options.inventory.accountId,
+    targetDigest: digestJson(journalTarget),
+    preflightAbsenceDigest: progress.preflightAbsenceDigest,
+  };
+  let mutationJournal = validateReplicaMutationJournal(
+    await readPrivateJson(mutationJournalPath, dirname(mutationJournalPath)),
+    mutationAuthority,
+  );
   const preflightWorker = progress.resources.find(
     (resource) => resource.type === "worker",
   )!;
@@ -4852,47 +5913,164 @@ export async function destroyExact(options: {
   const preflightObjects = preflightR2Present
     ? await listAllR2Objects(options.cloudflareReadClient, preflightR2.name)
     : [];
-  const expectedObjectKeys = options.snapshotScan.icons
-    .map((icon) => icon.key)
-    .sort();
-  if (
-    preflightR2Present &&
-    canonicalJson(preflightObjects.map((entry) => String(entry.key)).sort()) !==
-      canonicalJson(expectedObjectKeys)
-  ) {
-    throw new Error("replica_r2_object_inventory_mismatch");
+  const recoverCreatedOnlyIntent = async <T>(optionsInput: {
+    kind:
+      | "d1-create"
+      | "kv-create"
+      | "r2-create"
+      | "worker-upload"
+      | "worker-repair-upload";
+    name: string;
+    readback: () => Promise<ExactMutationReadback<T> | null>;
+  }): Promise<void> => {
+    const matches = mutationJournal.operations.filter(
+      (operation) =>
+        operation.descriptor.kind === optionsInput.kind &&
+        operation.descriptor.resourceName === optionsInput.name,
+    );
+    if (matches.length !== 1) {
+      throw new Error("replica_cleanup_created_only_intent_missing");
+    }
+    if (
+      matches[0]!.phase === "committed" &&
+      optionsInput.kind !== "r2-create"
+    ) {
+      return;
+    }
+    const recovered = await runExactPresentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: matches[0]!.descriptor,
+      accountId: progress.accountId,
+      createdOnly: true,
+      readback: optionsInput.readback,
+      mutate: () => {
+        throw new Error("replica_cleanup_create_mutation_forbidden");
+      },
+    });
+    mutationJournal = recovered.journal;
+  };
+  if (preflightD1Id) {
+    await recoverCreatedOnlyIntent({
+      kind: "d1-create",
+      name: preflightD1.name,
+      readback: async () =>
+        exactD1CreateReadback(
+          options.runner,
+          options.cwd,
+          progress.accountId,
+          preflightD1.name,
+        ),
+    });
+  }
+  if (preflightKvId) {
+    await recoverCreatedOnlyIntent({
+      kind: "kv-create",
+      name: preflightKv.name,
+      readback: async () =>
+        exactKvCreateReadback(
+          options.runner,
+          options.cwd,
+          progress.accountId,
+          preflightKv.name,
+        ),
+    });
   }
   if (preflightR2Present) {
-    const readbackRoot = await mkdtemp(
-      join(tmpdir(), "takosumi-store-replica-cleanup-preflight-"),
-    );
-    await chmod(readbackRoot, 0o700);
-    try {
-      for (const [index, icon] of options.snapshotScan.icons.entries()) {
-        const path = join(readbackRoot, `${index}.readback`);
-        const result = inspectRemote(
-          options.runner,
-          [
-            "r2",
-            "object",
-            "get",
-            `${preflightR2.name}/${icon.key}`,
-            "--remote",
-            "--file",
-            path,
-          ],
-          options.cwd,
-        );
-        if (
-          result.status !== "ok" ||
-          sha256Bytes(await readFile(path)) !== icon.sha256
-        ) {
-          throw new Error("replica_r2_object_ownership_mismatch");
-        }
-      }
-    } finally {
-      await rm(readbackRoot, { recursive: true, force: true });
+    await recoverCreatedOnlyIntent({
+      kind: "r2-create",
+      name: preflightR2.name,
+      readback: () =>
+        exactR2CreateReadback(options.cloudflareReadClient, preflightR2.name),
+    });
+  }
+  if (preflightWorkerPresent) {
+    if (!preflightWorker.id || !preflightD1Id || !preflightKvId) {
+      throw new Error("replica_worker_binding_authority_missing");
     }
+    const workerCreateMatches = mutationJournal.operations.filter(
+      (operation) =>
+        ["worker-upload", "worker-repair-upload"].includes(
+          operation.descriptor.kind,
+        ) &&
+        operation.descriptor.resourceName === preflightWorker.name &&
+        (operation.receipt?.resourceId === preflightWorker.id ||
+          operation.phase === "intent-recorded"),
+    );
+    if (workerCreateMatches.length !== 1) {
+      throw new Error("replica_cleanup_worker_created_only_intent_ambiguous");
+    }
+    const workerCreateKind = workerCreateMatches[0]!.descriptor.kind;
+    if (
+      workerCreateKind !== "worker-upload" &&
+      workerCreateKind !== "worker-repair-upload"
+    ) {
+      throw new Error("replica_cleanup_worker_created_only_kind_invalid");
+    }
+    await recoverCreatedOnlyIntent({
+      kind: workerCreateKind,
+      name: preflightWorker.name,
+      readback: async () => {
+        const workerTarget: TargetPolicy = {
+          configPath: "replica-generated.toml",
+          accountId: progress.accountId,
+          workerName: progress.target.workerName,
+          origin: progress.target.origin,
+          databaseName: progress.target.databaseName,
+          databaseId: preflightD1Id,
+          kvNamespaceId: preflightKvId,
+          iconsBucketName: progress.target.iconsBucketName,
+          publishCapability: false,
+          compatibilityDate: "2026-06-25",
+          compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
+          requiredVarNames: ["APP_URL"],
+          requiredSecretNames: [],
+          customDomainHostname: new URL(progress.target.origin).hostname,
+          readbackListingPath: options.readbackListingPath,
+        };
+        const version = verifyOwnedReplicaVersion({
+          runner: options.runner,
+          cwd: options.cwd,
+          envelope: options.envelope,
+          versionId: preflightWorker.id!,
+          target: workerTarget,
+        });
+        return {
+          value: version,
+          resourceId: preflightWorker.id,
+          digest: digestJson(version),
+        };
+      },
+    });
+    requireAttemptCreatedResource(
+      mutationJournal,
+      workerCreateKind,
+      preflightWorker.name,
+      preflightWorker.id,
+    );
+  }
+  if (preflightD1Id) {
+    requireAttemptCreatedResource(
+      mutationJournal,
+      "d1-create",
+      preflightD1.name,
+      preflightD1Id,
+    );
+  }
+  if (preflightKvId) {
+    requireAttemptCreatedResource(
+      mutationJournal,
+      "kv-create",
+      preflightKv.name,
+      preflightKvId,
+    );
+  }
+  if (preflightR2Present) {
+    requireAttemptCreatedResource(
+      mutationJournal,
+      "r2-create",
+      preflightR2.name,
+    );
   }
   const cleanupPreflightDigest = digestJson({
     kind: "takosumi.store-replica-cleanup-preflight@v1",
@@ -4930,244 +6108,221 @@ export async function destroyExact(options: {
   }
   const worker = progress.resources.find(
     (resource) => resource.type === "worker",
-  );
-  if (worker) {
-    const present = workerVersionPresent(
-      options.runner,
-      options.cwd,
-      worker.name,
-      worker.id,
-    );
-    const subdomainState = await scriptSubdomainState(
-      options.cloudflareReadClient,
-      worker.name,
-    );
-    if (present && !worker.id) {
-      throw new Error("replica_worker_cleanup_version_authority_missing");
-    }
-    if (present) {
-      exactWorkerDeploymentDigest(
-        options.runner,
-        options.cwd,
-        worker.name,
-        String(worker.id),
-      );
-    }
-    if (!present && subdomainState !== "missing") {
-      throw new Error("replica_worker_inventory_topology_mismatch");
-    }
-    if (present) {
-      const databaseId = progress.resources.find(
-        (resource) => resource.type === "d1",
-      )?.id;
-      const kvNamespaceId = progress.resources.find(
-        (resource) => resource.type === "kv",
-      )?.id;
-      if (!databaseId || !kvNamespaceId) {
-        throw new Error("replica_worker_binding_authority_missing");
-      }
-      verifyOwnedReplicaVersion({
-        runner: options.runner,
-        cwd: options.cwd,
-        envelope: options.envelope,
-        versionId: String(worker.id),
-        target: {
-          configPath: "replica-generated.toml",
+  )!;
+  const databaseId = progress.resources.find(
+    (resource) => resource.type === "d1",
+  )?.id;
+  const kvNamespaceId = progress.resources.find(
+    (resource) => resource.type === "kv",
+  )?.id;
+  if (worker.id && databaseId && kvNamespaceId) {
+    const workerDelete: ReplicaMutationDescriptor = {
+      id: "cleanup:worker:delete",
+      kind: "worker-delete",
+      resourceType: "worker",
+      resourceName: worker.name,
+      resourceId: worker.id,
+      expectedDigest: digestJson({ versionId: worker.id }),
+    };
+    mutationJournal = await runExactAbsentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: workerDelete,
+      accountId: progress.accountId,
+      readback: async () => {
+        const present = workerVersionPresent(
+          options.runner,
+          options.cwd,
+          worker.name,
+          worker.id,
+        );
+        const subdomain = await scriptSubdomainState(
+          options.cloudflareReadClient,
+          worker.name,
+        );
+        if (!present) {
+          if (subdomain !== "missing") {
+            throw new Error("replica_worker_inventory_topology_mismatch");
+          }
+          return null;
+        }
+        verifyOwnedReplicaVersion({
+          runner: options.runner,
+          cwd: options.cwd,
+          envelope: options.envelope,
+          versionId: worker.id!,
+          target: {
+            configPath: "replica-generated.toml",
+            accountId: progress.accountId,
+            workerName: progress.target.workerName,
+            origin: progress.target.origin,
+            databaseName: progress.target.databaseName,
+            databaseId,
+            kvNamespaceId,
+            iconsBucketName: progress.target.iconsBucketName,
+            publishCapability: false,
+            compatibilityDate: "2026-06-25",
+            compatibilityFlags: [
+              "global_fetch_strictly_public",
+              "nodejs_compat",
+            ],
+            requiredVarNames: ["APP_URL"],
+            requiredSecretNames: [],
+            customDomainHostname: new URL(progress.target.origin).hostname,
+            readbackListingPath: options.readbackListingPath,
+          },
+        });
+        const deploymentDigest = requireExactWorkerDeployment(
+          options.runner,
+          options.cwd,
+          worker.name,
+          worker.id!,
+        );
+        const value = {
           accountId: progress.accountId,
-          workerName: progress.target.workerName,
-          origin: progress.target.origin,
-          databaseName: progress.target.databaseName,
-          databaseId,
-          kvNamespaceId,
-          iconsBucketName: progress.target.iconsBucketName,
-          publishCapability: false,
-          compatibilityDate: "2026-06-25",
-          compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
-          requiredVarNames: ["APP_URL"],
-          requiredSecretNames: [],
-          customDomainHostname: new URL(progress.target.origin).hostname,
-          readbackListingPath: options.readbackListingPath,
-        },
-      });
-      options.runner(["delete", worker.name, "--force"], { cwd: options.cwd });
-    }
-    if (workerVersionPresent(options.runner, options.cwd, worker.name)) {
-      throw new Error("replica_worker_post_delete_present");
-    }
-    if (
-      (await scriptSubdomainState(
-        options.cloudflareReadClient,
-        worker.name,
-      )) !== "missing"
-    ) {
-      throw new Error("replica_worker_subdomain_post_delete_present");
-    }
-    if (
-      worker.id &&
-      exactWorkerDeploymentDigest(
-        options.runner,
-        options.cwd,
-        worker.name,
-        worker.id,
-      ) !== null
-    ) {
-      throw new Error("replica_worker_deployment_post_delete_present");
-    }
+          workerName: worker.name,
+          versionId: worker.id,
+          deploymentDigest,
+          subdomain,
+        };
+        return { value, resourceId: worker.id, digest: digestJson(value) };
+      },
+      mutate: () =>
+        options.runner(["delete", worker.name, "--force"], {
+          cwd: options.cwd,
+        }),
+    });
     progress = updateResource(progress, "worker", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
+  } else if (preflightWorkerPresent) {
+    throw new Error("replica_worker_binding_authority_missing");
   }
-  const d1 = progress.resources.find((resource) => resource.type === "d1");
-  if (d1) {
-    const found = exactD1DatabaseId(
-      options.runner(["d1", "list", "--json"], { cwd: options.cwd }),
-      d1.name,
-      d1.id,
-    );
-    if (found && d1.id && found !== d1.id) {
-      throw new Error("replica_d1_inventory_id_mismatch");
-    }
-    if (found) {
-      progress = updateResource(progress, "d1", {
-        id: found,
-        state: "present",
-      });
-      await writeProgress(options.progressPath, progress);
-      options.runner(["d1", "delete", found, "--skip-confirmation"], {
+
+  const r2 = progress.resources.find((resource) => resource.type === "r2")!;
+  const liveObjectKeys = preflightObjects.map((entry) => String(entry.key));
+  const sealedObjects = await sealR2ObjectDeleteInventory({
+    path: mutationJournalPath,
+    journal: mutationJournal,
+    accountId: progress.accountId,
+    bucketName: r2.name,
+    liveObjectKeys,
+  });
+  mutationJournal = sealedObjects.journal;
+  for (const descriptor of sealedObjects.descriptors) {
+    const key = descriptor.objectKey!;
+    mutationJournal = await runExactAbsentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor,
+      accountId: progress.accountId,
+      readback: () =>
+        exactR2ObjectPresenceReadback({
+          runner: options.runner,
+          cwd: options.cwd,
+          bucketName: r2.name,
+          key,
+        }),
+      mutate: () =>
+        options.runner(
+          ["r2", "object", "delete", `${r2.name}/${key}`, "--remote"],
+          { cwd: options.cwd },
+        ),
+    });
+  }
+  if (
+    (await listAllR2Objects(options.cloudflareReadClient, r2.name)).length !== 0
+  ) {
+    throw new Error("replica_r2_object_inventory_post_delete_present");
+  }
+  const r2Delete: ReplicaMutationDescriptor = {
+    id: "cleanup:r2:bucket:delete",
+    kind: "r2-bucket-delete",
+    resourceType: "r2",
+    resourceName: r2.name,
+    expectedDigest: sealedObjects.inventoryDigest,
+  };
+  mutationJournal = await runExactAbsentMutation({
+    path: mutationJournalPath,
+    journal: mutationJournal,
+    descriptor: r2Delete,
+    accountId: progress.accountId,
+    readback: async () =>
+      exactR2CreateReadback(options.cloudflareReadClient, r2.name),
+    mutate: () =>
+      options.runner(["r2", "bucket", "delete", r2.name], {
         cwd: options.cwd,
-      });
-    }
-    if (
-      exactD1DatabaseId(
-        options.runner(["d1", "list", "--json"], { cwd: options.cwd }),
-        d1.name,
-        d1.id,
-      )
-    ) {
-      throw new Error("replica_d1_post_delete_present");
-    }
-    progress = updateResource(progress, "d1", { state: "deleted" });
-    await writeProgress(options.progressPath, progress);
-  }
-  const kv = progress.resources.find((resource) => resource.type === "kv");
-  if (kv) {
-    const kvId = exactKvNamespaceId(
-      options.runner(["kv", "namespace", "list"], { cwd: options.cwd }),
-      kv.name,
-      kv.id,
-    );
-    if (kvId && kv.id && kvId !== kv.id) {
-      throw new Error("replica_kv_inventory_id_mismatch");
-    }
-    if (kvId) {
-      progress = updateResource(progress, "kv", { id: kvId, state: "present" });
-      await writeProgress(options.progressPath, progress);
-      options.runner(
-        [
-          "kv",
-          "namespace",
-          "delete",
-          "--namespace-id",
-          kvId,
-          "--skip-confirmation",
-        ],
-        { cwd: options.cwd },
-      );
-    }
-    if (
-      exactKvNamespaceId(
-        options.runner(["kv", "namespace", "list"], { cwd: options.cwd }),
-        kv.name,
-        kv.id,
-      )
-    ) {
-      throw new Error("replica_kv_post_delete_present");
-    }
+      }),
+  });
+  progress = updateResource(progress, "r2", { state: "deleted" });
+  await writeProgress(options.progressPath, progress);
+
+  const kv = progress.resources.find((resource) => resource.type === "kv")!;
+  if (kv.id) {
+    const kvDelete: ReplicaMutationDescriptor = {
+      id: "cleanup:kv:delete",
+      kind: "kv-delete",
+      resourceType: "kv",
+      resourceName: kv.name,
+      resourceId: kv.id,
+      expectedDigest: digestJson({ id: kv.id, keys: preflightKvKeys }),
+    };
+    mutationJournal = await runExactAbsentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: kvDelete,
+      accountId: progress.accountId,
+      readback: async () =>
+        exactKvCreateReadback(
+          options.runner,
+          options.cwd,
+          progress.accountId,
+          kv.name,
+        ),
+      mutate: () =>
+        options.runner(
+          [
+            "kv",
+            "namespace",
+            "delete",
+            "--namespace-id",
+            kv.id!,
+            "--skip-confirmation",
+          ],
+          { cwd: options.cwd },
+        ),
+    });
     progress = updateResource(progress, "kv", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
   }
-  const r2 = progress.resources.find((resource) => resource.type === "r2");
-  if (r2) {
-    const present =
-      (await listR2Buckets(options.cloudflareReadClient, r2.name)).length === 1;
-    if (present) {
-      const objects = await listAllR2Objects(
-        options.cloudflareReadClient,
-        r2.name,
-      );
-      const expectedKeys = options.snapshotScan.icons
-        .map((icon) => icon.key)
-        .sort();
-      const actualKeys = objects.map((entry) => String(entry.key)).sort();
-      if (canonicalJson(actualKeys) !== canonicalJson(expectedKeys)) {
-        throw new Error("replica_r2_object_inventory_mismatch");
-      }
-      const readbackRoot = await mkdtemp(
-        join(tmpdir(), "takosumi-store-replica-cleanup-"),
-      );
-      await chmod(readbackRoot, 0o700);
-      try {
-        for (const [index, icon] of options.snapshotScan.icons.entries()) {
-          const before = join(readbackRoot, `${index}.before`);
-          const beforeResult = inspectRemote(
-            options.runner,
-            [
-              "r2",
-              "object",
-              "get",
-              `${r2.name}/${icon.key}`,
-              "--remote",
-              "--file",
-              before,
-            ],
-            options.cwd,
-          );
-          if (beforeResult.status === "ok") {
-            if (sha256Bytes(await readFile(before)) !== icon.sha256) {
-              throw new Error("replica_r2_object_ownership_mismatch");
-            }
-            options.runner(
-              ["r2", "object", "delete", `${r2.name}/${icon.key}`, "--remote"],
-              { cwd: options.cwd },
-            );
-          }
-          const after = join(readbackRoot, `${index}.after`);
-          if (
-            inspectRemote(
-              options.runner,
-              [
-                "r2",
-                "object",
-                "get",
-                `${r2.name}/${icon.key}`,
-                "--remote",
-                "--file",
-                after,
-              ],
-              options.cwd,
-            ).status !== "not-found"
-          ) {
-            throw new Error("replica_r2_object_post_delete_present");
-          }
-        }
-        if (
-          (await listAllR2Objects(options.cloudflareReadClient, r2.name))
-            .length !== 0
-        ) {
-          throw new Error("replica_r2_object_inventory_post_delete_present");
-        }
-      } finally {
-        await rm(readbackRoot, { recursive: true, force: true });
-      }
-      options.runner(["r2", "bucket", "delete", r2.name], {
-        cwd: options.cwd,
-      });
-    }
-    if (
-      (await listR2Buckets(options.cloudflareReadClient, r2.name)).length !== 0
-    ) {
-      throw new Error("replica_r2_post_delete_present");
-    }
-    progress = updateResource(progress, "r2", { state: "deleted" });
+
+  const d1 = progress.resources.find((resource) => resource.type === "d1")!;
+  if (d1.id) {
+    const d1Delete: ReplicaMutationDescriptor = {
+      id: "cleanup:d1:delete",
+      kind: "d1-delete",
+      resourceType: "d1",
+      resourceName: d1.name,
+      resourceId: d1.id,
+      expectedDigest: digestJson({ id: d1.id }),
+    };
+    mutationJournal = await runExactAbsentMutation({
+      path: mutationJournalPath,
+      journal: mutationJournal,
+      descriptor: d1Delete,
+      accountId: progress.accountId,
+      readback: async () =>
+        exactD1CreateReadback(
+          options.runner,
+          options.cwd,
+          progress.accountId,
+          d1.name,
+        ),
+      mutate: () =>
+        options.runner(["d1", "delete", d1.id!, "--skip-confirmation"], {
+          cwd: options.cwd,
+        }),
+    });
+    progress = updateResource(progress, "d1", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
   }
   progress = {
@@ -5528,10 +6683,11 @@ export async function runStoreReplicaAdapter(options: {
       targetInventoryDigest: digestJson(inventory),
       exactTarget: inventory.target,
       actions: [
-        "delete exact replica Worker",
-        "delete exact replica D1",
-        "delete exact replica KV",
-        "delete exact replica R2",
+        "delete exact journal-created replica Worker",
+        "enumerate and delete the journal-created R2 bucket's complete live object inventory in reverse order",
+        "delete exact journal-created replica R2 bucket",
+        "delete exact journal-created replica KV",
+        "delete exact journal-created replica D1",
       ],
       productionFallback: false,
     };
@@ -5704,16 +6860,7 @@ export async function runStoreReplicaAdapter(options: {
     throw new Error("replica_cleanup_authority_missing");
   }
   if (!inventory && progress) {
-    progress = await recoverProvisionCleanupProgress({
-      progress,
-      envelope,
-      config,
-      evidenceDirectory,
-      readbackListingPath: policy.policy.production.readbackListingPath,
-      runner,
-      cwd: parent.sourceCheckout,
-    });
-    progress = await recoverForwardRepairCleanupProgress({
+    progress = await recoverCleanupProgress({
       progress,
       envelope,
       config,
