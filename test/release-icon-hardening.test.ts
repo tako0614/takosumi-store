@@ -142,6 +142,40 @@ describe("sanitized replica icon bytes", () => {
       ),
     ).toThrow("replica_snapshot_icon_0_unsafe_svg");
   });
+
+  test("rejects a credential literal in otherwise inert SVG text", () => {
+    const unsafeSvg = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>sk_live_not_allowed_in_icon</text></svg>',
+    );
+    expect(() =>
+      scanSanitizedSnapshot(
+        snapshotBundle(unsafeSvg, "image/svg+xml"),
+        production,
+      ),
+    ).toThrow("replica_snapshot_icon_0_credential_literal_detected");
+  });
+
+  test("rejects PII in otherwise inert SVG text", () => {
+    const unsafeSvg = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>owner@example.com</text></svg>',
+    );
+    expect(() =>
+      scanSanitizedSnapshot(
+        snapshotBundle(unsafeSvg, "image/svg+xml"),
+        production,
+      ),
+    ).toThrow("replica_snapshot_icon_0_pii_literal_detected");
+  });
+
+  test("rejects PII carried in decoded raster metadata bytes", () => {
+    const unsafePng = Buffer.concat([
+      validIcons[0].bytes,
+      Buffer.from("metadata-owner@example.com"),
+    ]);
+    expect(() =>
+      scanSanitizedSnapshot(snapshotBundle(unsafePng, "image/png"), production),
+    ).toThrow("replica_snapshot_icon_0_pii_literal_detected");
+  });
 });
 
 const staticBytes = Buffer.from("console.log('sealed');\n");

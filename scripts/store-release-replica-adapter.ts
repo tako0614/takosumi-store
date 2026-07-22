@@ -14,9 +14,12 @@ import { dirname, join } from "node:path";
 
 import {
   REPLICA_CHECK_NAMES,
+  RELEASE_CREDENTIAL_PATTERNS,
+  RELEASE_PII_PATTERNS,
   SURFACE_ID,
   VERSION,
   assertIconMediaType,
+  assertNoReleaseCredentialOrPii,
   assertMigrationReadback,
   assertVersionBindings,
   candidateHealthChecks,
@@ -701,26 +704,7 @@ export function scanSanitizedSnapshot(
       throw new Error("replica_snapshot_contains_production_identity");
     }
   }
-  const forbidden = [
-    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/iu,
-    /\bsk_(?:live|test)_[A-Za-z0-9]+/u,
-    /\bAKIA[0-9A-Z]{16}\b/u,
-    /\bBearer\s+[A-Za-z0-9._~+/-]+=*/iu,
-    /\b(?:password|passwd|secret|token|api[_-]?key)\b\s*[,=:]\s*['"][^'"]{8,}/iu,
-  ];
-  if (forbidden.some((pattern) => pattern.test(sql))) {
-    throw new Error("replica_snapshot_credential_literal_detected");
-  }
-  const piiPatterns = [
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+[.][A-Z]{2,}\b/iu,
-    /\b(?:\d{1,3}[.]){3}\d{1,3}\b/u,
-    /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b/iu,
-    /\beyJ[A-Za-z0-9_-]{8,}[.]eyJ[A-Za-z0-9_-]{8,}[.][A-Za-z0-9_-]{8,}\b/u,
-    /\b(?:cookie|set-cookie|session[_-]?(?:id|token)|csrf[_-]?token)\b\s*[,=:]\s*['"][^'"]{4,}/iu,
-  ];
-  if (piiPatterns.some((pattern) => pattern.test(sql))) {
-    throw new Error("replica_snapshot_pii_literal_detected");
-  }
+  assertNoReleaseCredentialOrPii(sql, "replica_snapshot");
   const icons = parsed.icons.map((entry, index) => {
     if (
       !isRecord(entry) ||
@@ -745,6 +729,15 @@ export function scanSanitizedSnapshot(
       iconBytes,
       String(entry.mediaType),
       `replica_snapshot_icon_${index}`,
+    );
+    assertNoReleaseCredentialOrPii(iconBytes, `replica_snapshot_icon_${index}`);
+    assertNoReleaseCredentialOrPii(
+      canonicalJson({
+        key: entry.key,
+        mediaType: entry.mediaType,
+        sha256: entry.sha256,
+      }),
+      `replica_snapshot_icon_metadata_${index}`,
     );
     const digest = sha256Bytes(iconBytes);
     if (
@@ -779,8 +772,8 @@ export function scanSanitizedSnapshot(
       sqlDigest,
       iconDigests: icons.map((icon) => icon.sha256),
       productionIdentityCount: 7,
-      credentialPatternCount: forbidden.length,
-      piiPatternCount: piiPatterns.length,
+      credentialPatternCount: RELEASE_CREDENTIAL_PATTERNS.length,
+      piiPatternCount: RELEASE_PII_PATTERNS.length,
       mutableTableAllowlist: ["listings"],
       status: "passed",
     }),

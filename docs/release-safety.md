@@ -62,7 +62,11 @@ Before any remote mutation, adapters recompute the complete artifact filesystem
 inventory, all file and component-set digests, SBOM/provenance digests, and the
 aggregate artifact digest. They also verify the actual Bun executable/version,
 `bun.lock`, Wrangler bundled entrypoint, package metadata, and version against
-the candidate; manifest text alone is never toolchain evidence.
+the candidate. The full installed `node_modules` runtime is also sealed as an
+ordered path/type/mode/content/symlink tree and recomputed before Wrangler is
+executed and again after its version probe. Optional or transitive packages
+therefore cannot be replaced beneath a valid entrypoint digest; manifest text
+alone is never toolchain evidence.
 
 ## Fixed staging and production
 
@@ -124,8 +128,10 @@ contains digest-bound SQL plus the bounded icon bytes referenced by its
 canonical listing. It is scanned for production target identities and
 credential-like literals, email/IP/JWT/cookie-like values, and any mutation
 outside the public `listings` table. Icon declarations must match PNG, JPEG, or
-WebP signatures or a fail-closed safe-SVG profile. It never fetches production
-D1/R2 data.
+WebP signatures or a fail-closed safe-SVG profile. Decoded icon bytes (including
+otherwise inert SVG text and binary image metadata) and the exact allowed icon
+metadata are subject to the same credential and PII scan. It never fetches
+production D1/R2 data.
 
 Provisioning restores only that local sanitized bundle, uploads the same sealed
 Worker/assets, and proves the controller's four fixed replica checks. The

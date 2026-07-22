@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   readFile,
+  readlink,
   realpath,
   readdir,
   rename,
@@ -128,6 +129,7 @@ export interface StoreArtifactManifest {
     readonly wrangler: string;
     readonly wranglerEntrypointDigest: string;
     readonly wranglerPackageJsonDigest: string;
+    readonly nodeModulesRuntimeDigest: string;
     readonly lockfileDigest: string;
   };
 }
@@ -225,8 +227,153 @@ export function sha256Bytes(bytes: Uint8Array | string): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+type RuntimeTreeEntry =
+  | {
+      readonly path: string;
+      readonly kind: "file";
+      readonly size: number;
+      readonly mode: number;
+      readonly sha256: string;
+    }
+  | {
+      readonly path: string;
+      readonly kind: "symlink";
+      readonly target: string;
+      readonly resolvedTarget: string;
+    };
+
+/**
+ * Seal the complete installed JavaScript/native runtime that Wrangler can
+ * resolve. The inventory deliberately covers all of node_modules rather than
+ * attempting to infer a partial import graph: optional and platform-specific
+ * imports must not become an unsealed path under release credentials.
+ */
+export async function digestNodeModulesRuntimeTree(
+  sourceCheckout: string,
+): Promise<string> {
+  const source = await realpath(sourceCheckout);
+  const runtimeRoot = await realpath(join(source, "node_modules"));
+  const runtimeRelativeToSource = relative(source, runtimeRoot);
+  if (
+    runtimeRelativeToSource === ".." ||
+    runtimeRelativeToSource.startsWith(`..${sep}`) ||
+    isAbsolute(runtimeRelativeToSource)
+  ) {
+    throw new Error("release_runtime_tree_outside_source");
+  }
+  const entries: RuntimeTreeEntry[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const children = await readdir(directory, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name, "en"));
+    for (const child of children) {
+      const path = join(directory, child.name);
+      const relativePath = relative(runtimeRoot, path).split(sep).join("/");
+      const metadata = await lstat(path);
+      if (metadata.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      if (metadata.isFile()) {
+        entries.push({
+          path: relativePath,
+          kind: "file",
+          size: metadata.size,
+          mode: metadata.mode & 0o777,
+          sha256: sha256Bytes(await readFile(path)),
+        });
+        continue;
+      }
+      if (metadata.isSymbolicLink()) {
+        const target = await readlink(path);
+        const resolved = await realpath(path);
+        const resolvedTarget = relative(runtimeRoot, resolved)
+          .split(sep)
+          .join("/");
+        if (
+          resolvedTarget === ".." ||
+          resolvedTarget.startsWith("../") ||
+          isAbsolute(resolvedTarget)
+        ) {
+          throw new Error(
+            `release_runtime_symlink_outside_tree:${relativePath}`,
+          );
+        }
+        entries.push({
+          path: relativePath,
+          kind: "symlink",
+          target,
+          resolvedTarget,
+        });
+        continue;
+      }
+      throw new Error(`release_runtime_special_file_forbidden:${relativePath}`);
+    }
+  };
+  await visit(runtimeRoot);
+  if (entries.length === 0) throw new Error("release_runtime_tree_empty");
+  return digestJson({
+    kind: "takosumi.store-runtime-tree@v1",
+    root: "node_modules",
+    entries,
+  });
+}
+
 const SVG_UNSAFE_MARKUP =
   /(?:<!|<\?|<!--[\s\S]*?-->|<(?:[A-Za-z][\w.-]*:)?(?:script|foreignObject|iframe|object|embed|style|link|image|use|audio|video|animate|set|discard|handler|listener)\b|\b(?:on[a-z]+|href|src|style)\s*=|\b(?:javascript|data):|&)/iu;
+
+export const RELEASE_CREDENTIAL_PATTERNS = [
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/iu,
+  /\bsk_(?:live|test)_[A-Za-z0-9]+/u,
+  /\bAKIA[0-9A-Z]{16}\b/u,
+  /\bBearer\s+[A-Za-z0-9._~+/-]+=*/iu,
+  /\b(?:password|passwd|secret|token|api[_-]?key)\b\s*[,=:]\s*['"][^'"]{8,}/iu,
+] as const;
+
+export const RELEASE_PII_PATTERNS = [
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+[.][A-Z]{2,}\b/iu,
+  /\b(?:\d{1,3}[.]){3}\d{1,3}\b/u,
+  /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b/iu,
+  /\beyJ[A-Za-z0-9_-]{8,}[.]eyJ[A-Za-z0-9_-]{8,}[.][A-Za-z0-9_-]{8,}\b/u,
+  /\b(?:cookie|set-cookie|session[_-]?(?:id|token)|csrf[_-]?token)\b\s*[,=:]\s*['"][^'"]{4,}/iu,
+] as const;
+
+function scanRepresentations(value: string | Uint8Array): readonly string[] {
+  if (typeof value === "string") return [value];
+  const bytes = Buffer.from(value);
+  const utf16be = Buffer.alloc(bytes.byteLength - (bytes.byteLength % 2));
+  for (let index = 0; index < utf16be.byteLength; index += 2) {
+    utf16be[index] = bytes[index + 1]!;
+    utf16be[index + 1] = bytes[index]!;
+  }
+  return [
+    bytes.toString("utf8"),
+    bytes.toString("latin1"),
+    bytes.toString("utf16le"),
+    utf16be.toString("utf16le"),
+  ].map((text) => text.replaceAll("\0", ""));
+}
+
+/** Scan decoded image bytes and their allowed metadata fail-closed. */
+export function assertNoReleaseCredentialOrPii(
+  value: string | Uint8Array,
+  label: string,
+): void {
+  const representations = scanRepresentations(value);
+  if (
+    representations.some((text) =>
+      RELEASE_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text)),
+    )
+  ) {
+    throw new Error(`${label}_credential_literal_detected`);
+  }
+  if (
+    representations.some((text) =>
+      RELEASE_PII_PATTERNS.some((pattern) => pattern.test(text)),
+    )
+  ) {
+    throw new Error(`${label}_pii_literal_detected`);
+  }
+}
 
 /**
  * Fail-closed verification for icon bytes carried by replica bundles and live
@@ -1008,6 +1155,7 @@ export function validateArtifactManifest(
       "wrangler",
       "wranglerEntrypointDigest",
       "wranglerPackageJsonDigest",
+      "nodeModulesRuntimeDigest",
       "lockfileDigest",
     ],
     "artifact_manifest_toolchain",
@@ -1021,6 +1169,7 @@ export function validateArtifactManifest(
       manifest.toolchain.bunExecutableDigest,
       manifest.toolchain.wranglerEntrypointDigest,
       manifest.toolchain.wranglerPackageJsonDigest,
+      manifest.toolchain.nodeModulesRuntimeDigest,
       manifest.toolchain.lockfileDigest,
     ].some((digest) => !SHA256.test(digest))
   ) {
@@ -1156,6 +1305,22 @@ export async function verifyActualToolchain(
   const wranglerPackageJson = await realpath(
     join(source, "node_modules/wrangler/package.json"),
   );
+  const runtimeDigestBefore = await digestNodeModulesRuntimeTree(source);
+  const packageValue = JSON.parse(
+    await readFile(wranglerPackageJson, "utf8"),
+  ) as { version?: unknown };
+  if (
+    runtimeDigestBefore !== manifest.toolchain.nodeModulesRuntimeDigest ||
+    sha256Bytes(await readFile(wranglerEntrypoint)) !==
+      manifest.toolchain.wranglerEntrypointDigest ||
+    sha256Bytes(await readFile(wranglerPackageJson)) !==
+      manifest.toolchain.wranglerPackageJsonDigest
+  ) {
+    throw new Error("release_wrangler_runtime_tree_mismatch");
+  }
+  if (packageValue.version !== manifest.toolchain.wrangler) {
+    throw new Error("release_wrangler_package_version_mismatch");
+  }
   const wranglerVersion = spawnSync(
     process.execPath,
     [wranglerEntrypoint, "--version"],
@@ -1167,19 +1332,15 @@ export async function verifyActualToolchain(
   );
   if (
     wranglerVersion.status !== 0 ||
-    wranglerVersion.stdout.trim() !== manifest.toolchain.wrangler ||
-    sha256Bytes(await readFile(wranglerEntrypoint)) !==
-      manifest.toolchain.wranglerEntrypointDigest ||
-    sha256Bytes(await readFile(wranglerPackageJson)) !==
-      manifest.toolchain.wranglerPackageJsonDigest
+    wranglerVersion.stdout.trim() !== manifest.toolchain.wrangler
   ) {
     throw new Error("release_wrangler_toolchain_mismatch");
   }
-  const packageValue = JSON.parse(
-    await readFile(wranglerPackageJson, "utf8"),
-  ) as { version?: unknown };
-  if (packageValue.version !== manifest.toolchain.wrangler) {
-    throw new Error("release_wrangler_package_version_mismatch");
+  if (
+    (await digestNodeModulesRuntimeTree(source)) !==
+    manifest.toolchain.nodeModulesRuntimeDigest
+  ) {
+    throw new Error("release_wrangler_runtime_mutated_during_verification");
   }
   return { wranglerEntrypoint };
 }
@@ -1665,6 +1826,11 @@ export async function runLiveChecks(options: {
     icon.bytes,
     iconMediaType,
     "canonical_listing_icon_readback",
+  );
+  assertNoReleaseCredentialOrPii(icon.bytes, "canonical_listing_icon_readback");
+  assertNoReleaseCredentialOrPii(
+    canonicalJson({ href: iconUrl.href, mediaType: iconMediaType }),
+    "canonical_listing_icon_metadata",
   );
   const apiFallback = await fetchExpectedStatus(
     `${origin}/tcs/v1/release-safety-not-found`,

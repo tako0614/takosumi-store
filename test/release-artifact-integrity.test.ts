@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmod,
+  access,
   mkdir,
   mkdtemp,
   readFile,
@@ -21,6 +22,7 @@ import {
   artifactSetDigest,
   digestFile,
   digestJson,
+  digestNodeModulesRuntimeTree,
   sha256Bytes,
   verifyActualToolchain,
   verifyArtifact,
@@ -30,6 +32,8 @@ import {
 } from "../scripts/store-release-common.ts";
 
 const temporaryRoots: string[] = [];
+const sourceRoot = join(import.meta.dir, "..");
+const installedRuntimeDigest = digestNodeModulesRuntimeTree(sourceRoot);
 
 afterEach(async () => {
   await Promise.all(
@@ -89,7 +93,6 @@ async function fixture(): Promise<{
   migrations.sort((left, right) => left.path.localeCompare(right.path, "en"));
   const sbom = await record("sbom.cdx.json");
   const provenance = await record("provenance.intoto.jsonl");
-  const sourceRoot = join(import.meta.dir, "..");
   const wranglerEntrypoint = join(
     sourceRoot,
     "node_modules/wrangler/wrangler-dist/cli.js",
@@ -107,6 +110,7 @@ async function fixture(): Promise<{
     wrangler: wranglerPackage.version,
     wranglerEntrypointDigest: sha256Bytes(await readFile(wranglerEntrypoint)),
     wranglerPackageJsonDigest: sha256Bytes(await readFile(wranglerPackageJson)),
+    nodeModulesRuntimeDigest: await installedRuntimeDigest,
     lockfileDigest: sha256Bytes(await readFile(join(sourceRoot, "bun.lock"))),
   };
   const components = { worker, assets, migrations, sbom, provenance };
@@ -216,7 +220,6 @@ describe("sealed Store artifacts", () => {
 
   test("verifies the executable, lock, Wrangler bundle, metadata, and versions", async () => {
     const value = await fixture();
-    const sourceRoot = join(import.meta.dir, "..");
     await expect(
       verifyActualToolchain(sourceRoot, value.manifest),
     ).resolves.toMatchObject({
@@ -230,6 +233,66 @@ describe("sealed Store artifacts", () => {
           wranglerEntrypointDigest: `sha256:${"0".repeat(64)}`,
         },
       }),
-    ).rejects.toThrow("release_wrangler_toolchain_mismatch");
+    ).rejects.toThrow("release_wrangler_runtime_tree_mismatch");
+  });
+
+  test("rejects a poisoned transitive module before Wrangler can execute it", async () => {
+    const source = await mkdtemp(join(tmpdir(), "store-runtime-closure-"));
+    temporaryRoots.push(source);
+    const wranglerRoot = join(source, "node_modules/wrangler");
+    const transitivePath = join(source, "node_modules/transitive/index.js");
+    await Promise.all([
+      mkdir(join(wranglerRoot, "wrangler-dist"), {
+        recursive: true,
+        mode: 0o700,
+      }),
+      mkdir(join(source, "node_modules/transitive"), {
+        recursive: true,
+        mode: 0o700,
+      }),
+    ]);
+    const marker = join(source, "poison-executed");
+    const entrypoint = join(wranglerRoot, "wrangler-dist/cli.js");
+    const packageJson = join(wranglerRoot, "package.json");
+    await Promise.all([
+      writeFile(join(source, "bun.lock"), "sealed-lock\n", { mode: 0o600 }),
+      writeFile(
+        entrypoint,
+        'import "../../transitive/index.js";\nconsole.log("9.9.9");\n',
+        { mode: 0o600 },
+      ),
+      writeFile(
+        packageJson,
+        '{"name":"wrangler","type":"module","version":"9.9.9"}\n',
+        {
+          mode: 0o600,
+        },
+      ),
+      writeFile(transitivePath, "export const sealed = true;\n", {
+        mode: 0o600,
+      }),
+    ]);
+    const value = await fixture();
+    const sealedManifest: StoreArtifactManifest = {
+      ...value.manifest,
+      toolchain: {
+        bun: Bun.version,
+        bunExecutableDigest: sha256Bytes(await readFile(process.execPath)),
+        wrangler: "9.9.9",
+        wranglerEntrypointDigest: sha256Bytes(await readFile(entrypoint)),
+        wranglerPackageJsonDigest: sha256Bytes(await readFile(packageJson)),
+        nodeModulesRuntimeDigest: await digestNodeModulesRuntimeTree(source),
+        lockfileDigest: sha256Bytes(await readFile(join(source, "bun.lock"))),
+      },
+    };
+    await writeFile(
+      transitivePath,
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "executed");\n`,
+      { mode: 0o600 },
+    );
+    await expect(verifyActualToolchain(source, sealedManifest)).rejects.toThrow(
+      "release_wrangler_runtime_tree_mismatch",
+    );
+    await expect(access(marker)).rejects.toThrow();
   });
 });
