@@ -57,7 +57,12 @@ KV: takosumi-store-staging-kv
 R2: takosumi-store-staging-icons
 ```
 
-The lifecycle is `plan -> provision -> attest -> adopt`. Before the first
+The lifecycle is
+`plan -> preflight-provision-no-write -> provision -> attest -> adopt`.
+The preflight repeats every exact Cloudflare readback, compiles the exact
+bootstrap Worker with `wrangler versions upload --dry-run`, and exercises the
+read-only Wrangler Versions API through the sealed Node entrypoint. It must
+finish before a signed bootstrap source tag is cut. Before the first
 Cloudflare mutation, provision writes create-only intents for all five
 resources. A lost create response is recovered only when one exact-name owner
 is found; zero or multiple matches become fail-closed `presence-unknown`
@@ -78,11 +83,11 @@ names are rejected for every bootstrap action.
 ## Build once
 
 The release commit must be clean canonical `main`, pushed to `origin/main`,
-and be the peeled commit of a pushed, signed, annotated `v0.1.6` tag.
+and be the peeled commit of a pushed, signed, annotated `v0.1.7` tag.
 
 ```bash
 bun run release:candidate -- \
-  --evidence-directory /absolute/operator/evidence/store-0.1.6 \
+  --evidence-directory /absolute/operator/evidence/store-0.1.7 \
   --operator-root /absolute/operator/root
 ```
 

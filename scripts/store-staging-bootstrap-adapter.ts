@@ -41,6 +41,7 @@ import {
 export const BOOTSTRAP_POLICY_FILE = "store/staging-bootstrap-policy.json";
 export const BOOTSTRAP_ACTIONS = [
   "plan",
+  "preflight-provision-no-write",
   "provision",
   "attest",
   "adopt",
@@ -67,6 +68,8 @@ const PROGRESS_FILE = "store-staging-bootstrap-progress.json";
 const INVENTORY_FILE = "store-staging-bootstrap-inventory.json";
 const EVIDENCE_FILE: Record<BootstrapAction, string> = {
   plan: "store-staging-bootstrap-plan.json",
+  "preflight-provision-no-write":
+    "store-staging-bootstrap-provision-preflight.json",
   provision: INVENTORY_FILE,
   attest: "store-staging-bootstrap-attestation.json",
   adopt: "store-staging-bootstrap-adoption.json",
@@ -881,6 +884,138 @@ function bootstrapWorker(): string {
   return `export default {async fetch(request){const path=new URL(request.url).pathname;if(path==="/healthz")return Response.json({status:"bootstrap",software:"takosumi-store",version:"${VERSION}"},{headers:{"cache-control":"no-store"}});return Response.json({error:{code:"staging_bootstrap_in_progress"}},{status:503,headers:{"cache-control":"no-store"}})}};\n`;
 }
 
+async function prepareBootstrapWorkspace(
+  target: BootstrapStagingTarget,
+  databaseId: string,
+  kvNamespaceId: string,
+  secretPath: string,
+): Promise<string> {
+  const temporary = await mkdtemp(join(tmpdir(), "takosumi-store-bootstrap-"));
+  await chmod(temporary, 0o700);
+  try {
+    const assets = join(temporary, "assets");
+    await mkdir(assets, { mode: 0o700 });
+    await writeFile(
+      join(assets, "index.html"),
+      "<!doctype html><title>Store bootstrap</title>\n",
+      { mode: 0o400, flag: "wx" },
+    );
+    await writeFile(join(temporary, "bootstrap.mjs"), bootstrapWorker(), {
+      mode: 0o400,
+      flag: "wx",
+    });
+    await writeFile(
+      join(temporary, "wrangler.toml"),
+      makeStagingConfig(target, databaseId, kvNamespaceId, {
+        main: "bootstrap.mjs",
+        assets: "./assets",
+      }),
+      { mode: 0o400, flag: "wx" },
+    );
+    const salt = (await readPrivateFile(secretPath, { maxBytes: 4096 }))
+      .toString("utf8")
+      .trim();
+    if (salt.length < 32) throw new Error("bootstrap_session_secret_invalid");
+    await writeFile(
+      join(temporary, "secrets.json"),
+      `${JSON.stringify({ SESSION_HASH_SALT: salt })}\n`,
+      { mode: 0o400, flag: "wx" },
+    );
+    return temporary;
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function preflightProvisionNoWrite(options: {
+  envelope: BootstrapEnvelope;
+  policy: BootstrapPolicy;
+  source: string;
+  evidence: string;
+  secretPath: string;
+  runner: WranglerRunner;
+  client: CloudflareReadClient;
+}): Promise<JsonObject> {
+  const recovery = await planStoreStagingRecovery(options);
+  const exactRemote = recovery.exactRemote;
+  if (
+    !isRecord(exactRemote) ||
+    !isRecord(exactRemote.d1) ||
+    !isRecord(exactRemote.kv) ||
+    exactRemote.d1.present !== true ||
+    exactRemote.kv.present !== true ||
+    !UUID.test(String(exactRemote.d1.id ?? "")) ||
+    !KV_ID.test(String(exactRemote.kv.id ?? "")) ||
+    recovery.nextAbsentResource !== "worker"
+  ) {
+    throw new Error("bootstrap_preflight_recovery_state_invalid");
+  }
+  const temporary = await prepareBootstrapWorkspace(
+    options.policy.staging,
+    String(exactRemote.d1.id),
+    String(exactRemote.kv.id),
+    options.secretPath,
+  );
+  try {
+    options.runner(
+      [
+        "versions",
+        "upload",
+        "bootstrap.mjs",
+        "--no-bundle",
+        "--assets",
+        "assets",
+        "--config",
+        "wrangler.toml",
+        "--secrets-file",
+        "secrets.json",
+        "--tag",
+        BOOTSTRAP_TAG,
+        "--message",
+        options.envelope.operationId,
+        "--dry-run",
+      ],
+      { cwd: temporary },
+    );
+    if (!options.runner.inspect)
+      throw new Error("bootstrap_preflight_inspect_missing");
+    const versions = options.runner.inspect(
+      [
+        "versions",
+        "list",
+        "--name",
+        options.policy.staging.workerName,
+        "--config",
+        "wrangler.toml",
+        "--json",
+      ],
+      { cwd: temporary },
+    );
+    if (versions.status !== "ok")
+      throw new Error("bootstrap_preflight_versions_list_failed");
+    const parsed = parseJsonOutput(
+      versions.stdout,
+      "bootstrap_preflight_versions",
+    );
+    if (!Array.isArray(parsed))
+      throw new Error("bootstrap_preflight_versions_invalid");
+    return {
+      kind: "takosumi.store-staging-bootstrap-provision-preflight@v1",
+      operationId: options.envelope.operationId,
+      recoveryDigest: digestJson(recovery),
+      exactRemote,
+      nextAbsentResource: recovery.nextAbsentResource,
+      wranglerDryRun: "passed",
+      wranglerVersionsRead: "passed",
+      wranglerVersionsCount: parsed.length,
+      productionFallback: false,
+    };
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
 export async function provisionStoreStaging(options: {
   envelope: BootstrapEnvelope;
   policy: BootstrapPolicy;
@@ -986,38 +1121,13 @@ export async function provisionStoreStaging(options: {
   progress = updateProgress(progress, "r2", "present");
   await writeProgress(options.evidence, progress);
 
-  const temporary = await mkdtemp(join(tmpdir(), "takosumi-store-bootstrap-"));
-  await chmod(temporary, 0o700);
+  const temporary = await prepareBootstrapWorkspace(
+    target,
+    databaseId,
+    kvNamespaceId,
+    options.secretPath,
+  );
   try {
-    const assets = join(temporary, "assets");
-    await mkdir(assets, { mode: 0o700 });
-    await writeFile(
-      join(assets, "index.html"),
-      "<!doctype html><title>Store bootstrap</title>\n",
-      { mode: 0o400, flag: "wx" },
-    );
-    await writeFile(join(temporary, "bootstrap.mjs"), bootstrapWorker(), {
-      mode: 0o400,
-      flag: "wx",
-    });
-    await writeFile(
-      join(temporary, "wrangler.toml"),
-      makeStagingConfig(target, databaseId, kvNamespaceId, {
-        main: "bootstrap.mjs",
-        assets: "./assets",
-      }),
-      { mode: 0o400, flag: "wx" },
-    );
-    const salt = (await readPrivateFile(options.secretPath, { maxBytes: 4096 }))
-      .toString("utf8")
-      .trim();
-    if (salt.length < 32) throw new Error("bootstrap_session_secret_invalid");
-    await writeFile(
-      join(temporary, "secrets.json"),
-      `${JSON.stringify({ SESSION_HASH_SALT: salt })}\n`,
-      { mode: 0o400, flag: "wx" },
-    );
-
     const recordedWorker = progressResource(progress, "worker");
     let version =
       recordedWorker.state === "present" && recordedWorker.id
@@ -1625,6 +1735,21 @@ export async function runStoreStagingBootstrapAdapter(options: {
       ...(recovery ? { recovery, recoveryDigest: digestJson(recovery) } : {}),
       productionFallback: false,
     };
+  } else if (action === "preflight-provision-no-write") {
+    const secretPath =
+      process.env.TAKOSUMI_RELEASE_STAGING_SESSION_HASH_SALT_FILE;
+    if (!secretPath?.startsWith("/"))
+      throw new Error("bootstrap_session_secret_file_missing");
+    evidenceFile = `store-staging-bootstrap-provision-preflight-${envelope.source.commit.slice(0, 12)}-${envelope.authority.recoveryProgressDigest!.slice(7, 19)}.json`;
+    evidenceValue = await preflightProvisionNoWrite({
+      envelope,
+      policy: policyRecord.policy,
+      source,
+      evidence,
+      secretPath,
+      runner,
+      client,
+    });
   } else if (action === "provision") {
     const secretPath =
       process.env.TAKOSUMI_RELEASE_STAGING_SESSION_HASH_SALT_FILE;
