@@ -93,11 +93,11 @@ names are rejected for every bootstrap action.
 ## Build once
 
 The release commit must be clean canonical `main`, pushed to `origin/main`,
-and be the peeled commit of a pushed, signed, annotated `v0.1.12` tag.
+and be the peeled commit of a pushed, signed, annotated `v0.1.13` tag.
 
 ```bash
 bun run release:candidate -- \
-  --evidence-directory /absolute/operator/evidence/store-0.1.12 \
+  --evidence-directory /absolute/operator/evidence/store-0.1.13 \
   --operator-root /absolute/operator/root
 ```
 
@@ -192,8 +192,11 @@ TAKOSUMI_RELEASE_REPLICA_SANITIZED_SNAPSHOT_FILE
 TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE
 ```
 
-Before remote mutation, the adapter retains intent records for the fresh D1,
-KV, R2, and Worker. Names contain the replica ID, targets cannot overlap
+Before remote mutation, the adapter retains an exact mutation journal for the
+fresh D1, KV, R2, and Worker. D1/KV/R2 creation, migration application,
+snapshot import, every icon put, Worker upload/deploy, and the workers.dev
+trigger each advance from `intent-recorded` to `committed` only after exact
+live readback. Names contain the replica ID, targets cannot overlap
 production, and `productionFallback` is always false. The snapshot bundle
 contains digest-bound SQL plus the bounded icon bytes referenced by its
 canonical listing. It is scanned for production target identities and
@@ -211,8 +214,9 @@ Initial Worker publication has its own monotonic operation journal with the
 pre-upload Version set, release annotations, exact bindings, and deployment
 head. Cleanup can recover an uploaded-only Version after a lost response and
 delete it only after exact ownership readback. A fully provisioned retry returns
-the exact retained inventory after live readback; partial progress requires
-cleanup, and a terminal replica identity is never reused.
+the exact retained inventory after live readback. Partial provisioning resumes
+from committed readback receipts without repeating completed mutations; a
+terminal replica identity is never reused.
 
 Provisioning restores only that local sanitized bundle, uploads the same sealed
 Worker/assets, and proves the controller's four fixed replica checks. The
@@ -221,17 +225,19 @@ before deleting the exact isolated Worker, proves D1/KV/R2 catalog and icon
 bytes survived, and forward-repairs with the same sealed candidate and empty
 pre-deploy head. Foreign or additional Worker Versions block both failure
 injection and cleanup. The attestation binds the exact initial/repaired
-inventories, scanner proof, failure rehearsal, and data evidence. A lost create
-response is retained as `presence-unknown`, and a non-terminal progress record
-blocks re-provisioning until quarantine. A destroyed or quarantined replica ID
-is terminal and cannot be provisioned again. Cleanup uses the unique replica-bound
-names and exact retained IDs; KV is discovered by exact title and only a single
-exact namespace ID can be deleted. Before provisioning, Worker, D1, KV, and R2
-absence is digest-bound. The replica enables only its exact derived
-`workers.dev` origin with preview URLs disabled. Cleanup requires the exact
-sanitized R2 object set and bytes, removes objects before the bucket, resumes
-retained progress monotonically, and proves post-delete absence for every
-resource before terminal evidence. Every terminal step is retained.
+inventories, scanner proof, failure rehearsal, and data evidence. A lost
+response is recovered only from the retained intent plus exact live state; an
+adopted, reused, foreign, pre-existing, ambiguous, or ID-mismatched resource is
+never promoted into cleanup authority. A destroyed or quarantined replica ID
+is terminal and cannot be provisioned again. Cleanup requires committed
+created-only receipts bound to the exact account, generated name, and D1/KV or
+Worker ID. Before provisioning, Worker, D1, KV, and R2 absence is digest-bound.
+The replica enables only its exact derived `workers.dev` origin with preview
+URLs disabled. R2 cleanup does not require a completed snapshot: it seals the
+attempt-owned bucket's complete paginated live object inventory, deletes that
+inventory in reverse order, then deletes the bucket, KV, and D1. Every delete
+has its own intent, exact absence readback, and committed receipt; terminal
+evidence is written only after every resource is absent.
 
 Catalog seeding is intentionally absent. `scripts/load-official-listings.ts`
 resolves mutable source metadata and is a separate content-authority concern,

@@ -361,7 +361,7 @@ describe("release mutation safety", () => {
       return "";
     };
     const envelope = {
-      releaseId: "takosumi-store-0.1.12-attempt-1",
+      releaseId: "takosumi-store-0.1.13-attempt-1",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests: ["sha256:a", "sha256:b", "sha256:c"] },
     } as unknown as ReleaseEnvelope;
@@ -702,7 +702,7 @@ describe("encrypted production replica snapshot", () => {
       },
     } as import("../scripts/store-release-common.ts").CloudflareReadClient;
     const envelope = {
-      releaseId: "takosumi-store-0.1.12-input-test",
+      releaseId: "takosumi-store-0.1.13-input-test",
       source: { commit: "a".repeat(40) },
       controllerSource: { commit: "b".repeat(40) },
       authority: { replicaAdapterDigest: `sha256:${"c".repeat(64)}` },

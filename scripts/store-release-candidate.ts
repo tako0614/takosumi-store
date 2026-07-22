@@ -38,6 +38,7 @@ import {
   targetFingerprint,
   validateArtifactManifest,
   validateRealizedConfig,
+  verifyTrackedReleaseTagSignature,
   walkFiles,
   writePrivateJson,
   type StoreArtifactManifest,
@@ -98,10 +99,7 @@ async function assertReleaseSource(root: string): Promise<{
   if (git(root, "rev-parse", `refs/tags/${TAG}^{}`) !== commit) {
     throw new Error("release_tag_commit_mismatch");
   }
-  const verifyTag = spawnSync("/usr/bin/git", ["-C", root, "verify-tag", TAG], {
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  if (verifyTag.status !== 0) throw new Error("release_tag_signature_invalid");
+  await verifyTrackedReleaseTagSignature(root, TAG);
   const remoteMain = git(
     root,
     "ls-remote",
@@ -120,7 +118,12 @@ async function assertReleaseSource(root: string): Promise<{
     `refs/tags/${TAG}`,
     `refs/tags/${TAG}^{}`,
   );
-  if (!remoteTag.includes(`${commit}\trefs/tags/${TAG}^{}`)) {
+  if (
+    !remoteTag.includes(
+      `${git(root, "rev-parse", `refs/tags/${TAG}`)}\trefs/tags/${TAG}`,
+    ) ||
+    !remoteTag.includes(`${commit}\trefs/tags/${TAG}^{}`)
+  ) {
     throw new Error("release_tag_not_pushed");
   }
   const sourcePackage = JSON.parse(

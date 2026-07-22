@@ -70,7 +70,7 @@ function versionReadback(value: TargetPolicy, releaseId?: string): unknown {
       ? {
           annotations: {
             "workers/message": releaseId,
-            "workers/tag": "0.1.12",
+            "workers/tag": "0.1.13",
           },
         }
       : {}),
@@ -118,7 +118,7 @@ function installLiveFetchMock(): void {
       return Response.json({
         status: "ok",
         software: "takosumi-store",
-        version: "0.1.12",
+        version: "0.1.13",
       });
     }
     if (url.pathname === "/readyz") {
@@ -130,7 +130,7 @@ function installLiveFetchMock(): void {
     if (url.pathname === "/.well-known/tcs") {
       return Response.json({
         server: {
-          software: { name: "takosumi-store", version: "0.1.12" },
+          software: { name: "takosumi-store", version: "0.1.13" },
           baseUrl: "https://store.takosumi.com",
         },
       });
@@ -216,7 +216,7 @@ describe("release operation journal retry", () => {
       };
       const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
       const envelope = {
-        releaseId: "takosumi-store-0.1.12-retry",
+        releaseId: "takosumi-store-0.1.13-retry",
         source: { commit: "d".repeat(40) },
         candidate: { artifactDigests },
       } as unknown as ReleaseEnvelope;
@@ -308,7 +308,7 @@ describe("release operation journal retry", () => {
     };
     const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
     const envelope = {
-      releaseId: "takosumi-store-0.1.12-lost-deploy",
+      releaseId: "takosumi-store-0.1.13-lost-deploy",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests },
     } as unknown as ReleaseEnvelope;
@@ -394,6 +394,120 @@ describe("release operation journal retry", () => {
     });
   });
 
+  test("does not redeploy an exact trigger after a later health failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-journal-trigger-"));
+    roots.push(root);
+    await chmod(root, 0o700);
+    const journalPath = join(root, "output/operation.json");
+    const releaseTarget = target();
+    const currentDeployment = {
+      versions: [{ version_id: versionId, percentage: 100 }],
+    };
+    const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
+    const envelope = {
+      releaseId: "takosumi-store-0.1.13-trigger-retry",
+      source: { commit: "d".repeat(40) },
+      candidate: { artifactDigests },
+    } as unknown as ReleaseEnvelope;
+    const authority = {
+      kind: "takosumi.store-release-operation@v1",
+      environment: "replica-forward-repair",
+      surfaceId: "takosumi-store",
+      releaseId: envelope.releaseId,
+      sourceCommit: envelope.source.commit,
+      artifactDigests,
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      target: {
+        accountId: releaseTarget.accountId,
+        workerName: releaseTarget.workerName,
+        databaseId: releaseTarget.databaseId,
+        kvNamespaceId: releaseTarget.kvNamespaceId,
+        iconsBucketName: releaseTarget.iconsBucketName,
+        origin: releaseTarget.origin,
+      },
+      preDeploymentDigest: digestJson({ versions: [] }),
+    };
+    await writePrivateJson(journalPath, {
+      ...authority,
+      phase: "deployed",
+      versionId,
+      preUploadVersionIds: [],
+      updatedAt: "2026-07-22T00:00:00.000Z",
+    });
+    let triggerCalls = 0;
+    const runner = (args: readonly string[]): string => {
+      if (args[0] === "deployments") return JSON.stringify(currentDeployment);
+      if (args[0] === "d1" && args[1] === "migrations")
+        return "No migrations to apply.";
+      if (args[0] === "d1" && args[1] === "execute") {
+        return JSON.stringify([
+          { results: migrationNames.map((name) => ({ name })) },
+        ]);
+      }
+      if (args[0] === "versions" && args[1] === "view") {
+        return JSON.stringify(
+          versionReadback(releaseTarget, envelope.releaseId),
+        );
+      }
+      if (args[0] === "triggers") {
+        triggerCalls += 1;
+        return "";
+      }
+      return "";
+    };
+    const manifest = {
+      migrations: migrationNames.map((name) => ({
+        path: `migrations/${name}`,
+      })),
+      assets: [
+        {
+          path: "assets/assets/index-review.js",
+          sha256: sha256Bytes(staticBytes),
+        },
+        { path: "assets/index.html", sha256: sha256Bytes(indexBytes) },
+      ],
+    } as unknown as StoreArtifactManifest;
+    const run = () =>
+      deploySealedStore({
+        runner,
+        cwd: root,
+        target: releaseTarget,
+        envelope,
+        manifest,
+        candidateChecks: [],
+        deployTriggers: true,
+        readTopology: async () => ({
+          mode: "workers-dev",
+          hostname: "takosumi-store.account.workers.dev",
+          workerName: "takosumi-store",
+        }),
+        journal: {
+          path: journalPath,
+          environment: "replica-forward-repair",
+          targetFingerprint: authority.targetFingerprint,
+          expectedPreDeploymentDigest: digestJson({ versions: [] }),
+        },
+      });
+    globalThis.fetch = (async () =>
+      new Response("not propagated", {
+        status: 503,
+      })) as unknown as typeof fetch;
+    await expect(run()).rejects.toThrow();
+    expect(triggerCalls).toBe(1);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({
+      phase: "trigger-deployed",
+      versionId,
+    });
+
+    installLiveFetchMock();
+    await expect(run()).resolves.toMatchObject({ versionId });
+    expect(triggerCalls).toBe(1);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({
+      phase: "verified",
+      versionId,
+    });
+  });
+
   test("recovers one annotated version after a lost upload response", async () => {
     installLiveFetchMock();
     const root = await mkdtemp(join(tmpdir(), "store-journal-lost-upload-"));
@@ -404,7 +518,7 @@ describe("release operation journal retry", () => {
     const oldVersionId = "10000000-0000-4000-8000-000000000000";
     const artifactDigests = ["sha256:a", "sha256:b", "sha256:c"];
     const envelope = {
-      releaseId: "takosumi-store-0.1.12-lost-upload",
+      releaseId: "takosumi-store-0.1.13-lost-upload",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests },
     } as unknown as ReleaseEnvelope;
