@@ -28,7 +28,13 @@ import {
   deploySealedStore,
   ensureStagingCanary,
 } from "../scripts/store-release-fixed-adapter.ts";
-import { scanSanitizedSnapshot } from "../scripts/store-release-replica-adapter.ts";
+import {
+  assertReleaseSecretFileLocation,
+  decryptSnapshot,
+  encryptSnapshot,
+  prepareReplicaInput,
+  scanSanitizedSnapshot,
+} from "../scripts/store-release-replica-adapter.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -351,7 +357,7 @@ describe("release mutation safety", () => {
       return "";
     };
     const envelope = {
-      releaseId: "takosumi-store-0.1.10-attempt-1",
+      releaseId: "takosumi-store-0.1.11-attempt-1",
       source: { commit: "d".repeat(40) },
       candidate: { artifactDigests: ["sha256:a", "sha256:b", "sha256:c"] },
     } as unknown as ReleaseEnvelope;
@@ -513,6 +519,253 @@ describe("fresh replica evidence", () => {
           production,
         ),
       ).toThrow("replica_snapshot_pii_literal_detected");
+    }
+  });
+});
+
+describe("encrypted production replica snapshot", () => {
+  test("authenticates ciphertext, AAD, and key without retaining plaintext", () => {
+    const plaintext = Buffer.from(
+      'production-derived-public-catalog-marker:{"id":"tako/takos"}',
+    );
+    const key = Buffer.alloc(32, 0x11);
+    const authority = {
+      configFingerprint: `sha256:${"1".repeat(64)}`,
+      migrationPlanDigest: `sha256:${"2".repeat(64)}`,
+      productionTargetFingerprint: `sha256:${"3".repeat(64)}`,
+    };
+    const envelope = {
+      releaseId: "store-encrypted-snapshot-test",
+      source: { commit: "a".repeat(40) },
+      controllerSource: { commit: "b".repeat(40) },
+      authority: { replicaAdapterDigest: `sha256:${"4".repeat(64)}` },
+      candidate: {
+        artifactDigests: [`sha256:${"5".repeat(64)}`],
+        policyDigest: `sha256:${"6".repeat(64)}`,
+      },
+    } as unknown as ReleaseEnvelope;
+    const encrypted = encryptSnapshot(plaintext, key, envelope, authority);
+    const independentlyEncrypted = encryptSnapshot(
+      plaintext,
+      key,
+      envelope,
+      authority,
+    );
+    expect(independentlyEncrypted.nonceBase64).not.toBe(encrypted.nonceBase64);
+    const retainedBytes = Buffer.from(`${canonicalJson(encrypted)}\n`);
+    expect(retainedBytes.includes(plaintext)).toBe(false);
+    expect(
+      Buffer.from(decryptSnapshot(encrypted, key, envelope, authority)).equals(
+        plaintext,
+      ),
+    ).toBe(true);
+    expect(() =>
+      decryptSnapshot(encrypted, Buffer.alloc(32, 0x22), envelope, authority),
+    ).toThrow("replica_encrypted_snapshot_authentication_failed");
+    expect(() =>
+      decryptSnapshot(
+        encrypted,
+        key,
+        {
+          ...envelope,
+          source: { commit: "c".repeat(40) },
+        } as ReleaseEnvelope,
+        authority,
+      ),
+    ).toThrow("replica_encrypted_snapshot_aad_mismatch");
+    const ciphertext = Buffer.from(
+      String(encrypted.ciphertextBase64),
+      "base64",
+    );
+    ciphertext[0] = ciphertext[0]! ^ 0x01;
+    expect(() =>
+      decryptSnapshot(
+        { ...encrypted, ciphertextBase64: ciphertext.toString("base64") },
+        key,
+        envelope,
+        authority,
+      ),
+    ).toThrow("replica_encrypted_snapshot_authentication_failed");
+  });
+
+  test("prepares a retry-stable ciphertext bundle from one read-only public production row", async () => {
+    const base = await mkdtemp(join(tmpdir(), "store-replica-input-test-"));
+    temporaryRoots.push(base);
+    await chmod(base, 0o700);
+    const root = join(base, "evidence");
+    const secretRoot = join(base, "operator-secrets");
+    await mkdir(root, { mode: 0o700 });
+    await mkdir(secretRoot, { mode: 0o700 });
+    const keyPath = join(secretRoot, "snapshot.key");
+    const subdomainPath = join(secretRoot, "workers-subdomain");
+    await writeFile(keyPath, Buffer.alloc(32, 0x31), { mode: 0o600 });
+    await writeFile(subdomainPath, "example\n", { mode: 0o600 });
+    const previousKey = process.env.TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE;
+    const previousSubdomain =
+      process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE;
+    process.env.TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE = keyPath;
+    process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE = subdomainPath;
+    const previousFetch = globalThis.fetch;
+    const iconBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    globalThis.fetch = (async () =>
+      new Response(iconBytes, {
+        headers: {
+          "content-type": "image/png",
+          "content-length": String(iconBytes.byteLength),
+        },
+      })) as unknown as typeof fetch;
+    const listing = {
+      id: "tako/takos",
+      scope: "tako",
+      slug: "takos",
+      git: "https://github.com/tako0614/takos.git",
+      ref: "HEAD",
+      path: "deploy/opentofu",
+      kind: "capsule",
+      surface: "workspace",
+      provider: null,
+      category: "productivity",
+      tags: "[]",
+      suggested_name: "takos",
+      name_ja: "Takos",
+      name_en: "Takos",
+      description_ja: "AI workspace",
+      description_en: "AI workspace",
+      badge_ja: null,
+      badge_en: null,
+      icon_url:
+        "https://raw.githubusercontent.com/tako0614/takos/HEAD/web/public/logo.png",
+      inputs: "{}",
+      output_allowlist: "[]",
+      publisher_handle: "tako0614",
+      publisher_display_name: "Takos",
+      status: "visible",
+      created_at: "2026-07-01T00:00:00.000Z",
+      updated_at: "2026-07-01T00:00:00.000Z",
+    };
+    const calls: string[][] = [];
+    const runner = (args: readonly string[]): string => {
+      calls.push([...args]);
+      return JSON.stringify([{ results: [listing] }]);
+    };
+    const envelope = {
+      releaseId: "takosumi-store-0.1.11-input-test",
+      source: { commit: "a".repeat(40) },
+      controllerSource: { commit: "b".repeat(40) },
+      authority: { replicaAdapterDigest: `sha256:${"c".repeat(64)}` },
+      candidate: {
+        artifactDigests: [`sha256:${"d".repeat(64)}`],
+        policyDigest: `sha256:${"e".repeat(64)}`,
+      },
+    } as unknown as ReleaseEnvelope;
+    const manifest = {
+      digests: { migrations: `sha256:${"f".repeat(64)}` },
+    } as unknown as StoreArtifactManifest;
+    try {
+      const first = await prepareReplicaInput({
+        envelope,
+        policy: target(),
+        manifest,
+        evidenceDirectory: root,
+        runner,
+        productionConfigPath: "/operator/store/wrangler.production.toml",
+      });
+      const retained = await readFile(
+        join(root, "worker-release-replica-sanitized-snapshot.json"),
+      );
+      const second = await prepareReplicaInput({
+        envelope,
+        policy: target(),
+        manifest,
+        evidenceDirectory: root,
+        runner,
+        productionConfigPath: "/operator/store/wrangler.production.toml",
+      });
+      expect(canonicalJson(second.evidence)).toBe(
+        canonicalJson(first.evidence),
+      );
+      expect(
+        Buffer.from(
+          await readFile(
+            join(root, "worker-release-replica-sanitized-snapshot.json"),
+          ),
+        ).equals(retained),
+      ).toBe(true);
+      expect(retained.includes(Buffer.from("tako/takos"))).toBe(false);
+      expect(calls).toHaveLength(2);
+      for (const args of calls) {
+        expect(args.slice(0, 3)).toEqual([
+          "d1",
+          "execute",
+          "takosumi-store-db",
+        ]);
+        const query = args[args.indexOf("--command") + 1]!;
+        expect(query).toStartWith("SELECT ");
+        expect(query).toContain("WHERE id = 'tako/takos'");
+        expect(query).not.toMatch(
+          /\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE)\b/iu,
+        );
+      }
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousKey === undefined) {
+        delete process.env.TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE;
+      } else {
+        process.env.TAKOSUMI_RELEASE_REPLICA_SNAPSHOT_KEY_FILE = previousKey;
+      }
+      if (previousSubdomain === undefined) {
+        delete process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE;
+      } else {
+        process.env.TAKOSUMI_RELEASE_REPLICA_WORKERS_SUBDOMAIN_FILE =
+          previousSubdomain;
+      }
+    }
+  });
+
+  test("rejects release keys retained with evidence or inside a Git worktree", async () => {
+    const base = await mkdtemp(join(tmpdir(), "store-secret-location-test-"));
+    temporaryRoots.push(base);
+    await chmod(base, 0o700);
+    const evidence = join(base, "evidence");
+    const external = join(base, "operator-secrets");
+    await mkdir(evidence, { mode: 0o700 });
+    await mkdir(external, { mode: 0o700 });
+    const evidenceKey = join(evidence, "snapshot.key");
+    const externalKey = join(external, "snapshot.key");
+    const repoKey = join(import.meta.dir, `.replica-key-test-${process.pid}`);
+    await writeFile(evidenceKey, Buffer.alloc(32), { mode: 0o600 });
+    await writeFile(externalKey, Buffer.alloc(32), { mode: 0o600 });
+    await writeFile(repoKey, Buffer.alloc(32), { mode: 0o600 });
+    try {
+      await expect(
+        assertReleaseSecretFileLocation(
+          evidenceKey,
+          evidence,
+          "replica_snapshot_encryption_key",
+        ),
+      ).rejects.toThrow(
+        "replica_snapshot_encryption_key_inside_evidence_forbidden",
+      );
+      await expect(
+        assertReleaseSecretFileLocation(
+          repoKey,
+          evidence,
+          "replica_snapshot_encryption_key",
+        ),
+      ).rejects.toThrow(
+        "replica_snapshot_encryption_key_inside_git_worktree_forbidden",
+      );
+      expect(
+        await assertReleaseSecretFileLocation(
+          externalKey,
+          evidence,
+          "replica_snapshot_encryption_key",
+        ),
+      ).toBe(externalKey);
+    } finally {
+      await rm(repoKey, { force: true });
     }
   });
 });
