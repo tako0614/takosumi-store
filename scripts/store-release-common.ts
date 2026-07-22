@@ -18,7 +18,7 @@ export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
 export const CANONICAL_CANARY_SOURCE_GIT =
   "https://github.com/tako0614/takos.git";
-export const VERSION = "0.1.9";
+export const VERSION = "0.1.10";
 export const TAG = `v${VERSION}`;
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
 export const ARTIFACT_MANIFEST_FILE = "takosumi-store-artifact-manifest.json";
@@ -1851,13 +1851,14 @@ export async function runLiveChecks(options: {
     throw new Error("api_fallback_behavior_mismatch");
   }
   const staticAsset = options.manifest.assets.find((file) =>
-    /^assets\/index-.*[.]js$/u.test(file.path),
+    /^assets\/assets\/index-.*[.]js$/u.test(file.path),
   );
   const index = options.manifest.assets.find(
-    (file) => file.path === "index.html",
+    (file) => file.path === "assets/index.html",
   );
   if (!staticAsset || !index) throw new Error("spa_release_assets_missing");
-  const remoteStatic = await fetchBytes(`${origin}/${staticAsset.path}`);
+  const publicAssetPath = staticAsset.path.slice("assets/".length);
+  const remoteStatic = await fetchBytes(`${origin}/${publicAssetPath}`);
   if (sha256Bytes(remoteStatic.bytes) !== staticAsset.sha256)
     throw new Error("spa_static_asset_mismatch");
   const fallback = await fetchBytes(

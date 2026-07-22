@@ -9,7 +9,7 @@ describe("release health routes", () => {
     expect(await response.json()).toEqual({
       status: "ok",
       software: "takosumi-store",
-      version: "0.1.9",
+      version: "0.1.10",
     });
   });
 
