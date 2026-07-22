@@ -1,0 +1,46 @@
+{
+  "kind": "takosumi.store-release-policy@v1",
+  "surfaceId": "takosumi-store",
+  "production": {
+    "configPath": "store/wrangler.production.toml",
+    "accountId": "00000000000000000000000000000000",
+    "workerName": "takosumi-store",
+    "origin": "https://store.takosumi.com",
+    "databaseName": "takosumi-store-db",
+    "databaseId": "00000000-0000-4000-8000-000000000000",
+    "kvNamespaceId": "00000000000000000000000000000000",
+    "iconsBucketName": "takosumi-store-icons",
+    "publishCapability": true,
+    "compatibilityDate": "2026-06-25",
+    "compatibilityFlags": ["global_fetch_strictly_public", "nodejs_compat"],
+    "requiredVarNames": [
+      "APP_URL",
+      "TAKOSUMI_ACCOUNTS_CLIENT_ID",
+      "TAKOSUMI_ACCOUNTS_ISSUER_URL"
+    ],
+    "requiredSecretNames": ["SESSION_HASH_SALT"],
+    "customDomainHostname": "store.takosumi.com",
+    "readbackListingPath": "/tcs/v1/listings/tako/takos"
+  },
+  "staging": {
+    "configPath": "store/wrangler.staging.toml",
+    "accountId": "00000000000000000000000000000000",
+    "workerName": "takosumi-store-staging",
+    "origin": "https://store-staging.takosumi.com",
+    "databaseName": "takosumi-store-staging-db",
+    "databaseId": "00000000-0000-4000-8000-000000000001",
+    "kvNamespaceId": "11111111111111111111111111111111",
+    "iconsBucketName": "takosumi-store-staging-icons",
+    "publishCapability": true,
+    "compatibilityDate": "2026-06-25",
+    "compatibilityFlags": ["global_fetch_strictly_public", "nodejs_compat"],
+    "requiredVarNames": [
+      "APP_URL",
+      "TAKOSUMI_ACCOUNTS_CLIENT_ID",
+      "TAKOSUMI_ACCOUNTS_ISSUER_URL"
+    ],
+    "requiredSecretNames": ["SESSION_HASH_SALT"],
+    "customDomainHostname": "store-staging.takosumi.com",
+    "readbackListingPath": "/tcs/v1/listings/tako/takos"
+  }
+}

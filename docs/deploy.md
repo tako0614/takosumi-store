@@ -26,7 +26,7 @@ bunx wrangler d1 create takosumi-store-db
 bunx wrangler kv namespace create takosumi-store-kv
 bunx wrangler r2 bucket create takosumi-store-icons
 bunx wrangler d1 migrations apply takosumi-store-db \
-  --config "$STORE_WRANGLER_CONFIG"                  # apply 0001 + 0002
+  --config "$STORE_WRANGLER_CONFIG"                  # apply every migration in migrations/
 # build the SPA and deploy the worker (serves SPA + API on one origin):
 bun run build
 bunx wrangler deploy --config "$STORE_WRANGLER_CONFIG"
@@ -51,6 +51,20 @@ Publishing remains disabled unless `SESSION_HASH_SALT`,
 `TAKOSUMI_ACCOUNTS_ISSUER_URL`, and `TAKOSUMI_ACCOUNTS_CLIENT_ID` are configured
 for the deployment.
 
+These are self-host instructions, not the official Takosumi-operated release
+channel. For the guarded wrapper, give the self-host Worker a name other than
+`takosumi-store` and run:
+
+```bash
+bun run deploy:self-host -- \
+  --i-understand-this-is-self-host \
+  --config "$STORE_WRANGLER_CONFIG"
+```
+
+The wrapper refuses the official `store.takosumi.com` target and any invocation
+under the ecosystem release controller. The official Store is released only
+through [the fixed release-safety flow](./release-safety.md).
+
 ## Consuming the store
 
 The takos / takosumi clients consume the store's [read API](./SPEC.md) directly
@@ -66,8 +80,9 @@ publishing this Store itself as an installable app:
 
 1. Push this repo to its remote (`https://github.com/tako0614/takosumi-store.git`).
 2. Run the public CI and release verification against the exact candidate SHA.
-3. Tag the exact verified release commit as `v0.1.1`; never rebuild or overwrite
-   a release tag.
+3. Create a signed annotated `v0.1.1` tag at that exact commit and push both the
+   commit and tag. The candidate builder rejects lightweight, unsigned,
+   unpushed, or differently peeled tags.
 4. Register it as a submodule from the ecosystem root once the remote exists:
    `git submodule add https://github.com/tako0614/takosumi-store.git takosumi-store`.
 5. Register the Store listing or distribution entry with the repository URL and
