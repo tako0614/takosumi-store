@@ -1,7 +1,7 @@
 output "takos_app" {
   value = {
     name    = "takosumi-store"
-    version = "0.1.5"
+    version = "0.1.6"
 
     compute = {
       web = {

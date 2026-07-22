@@ -47,7 +47,7 @@ bun run dev       # wrangler dev (local D1)
 - [x] M4 install handoff
 - [x] M5 package-as-Capsule (`outputs.tf`) + distribution seed
 
-The next public source release is `v0.1.5`. Release tags are immutable: changed
+The next public source release is `v0.1.6`. Release tags are immutable: changed
 bytes require a new version.
 
 Docs: the open read spec is in [`docs/SPEC.md`](docs/SPEC.md); deploying (Capsule

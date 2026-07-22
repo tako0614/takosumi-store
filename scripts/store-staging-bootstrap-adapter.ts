@@ -494,6 +494,96 @@ async function exactDomain(
   return domain as JsonObject | null;
 }
 
+async function listWorkerVersions(
+  client: CloudflareReadClient,
+  workerName: string,
+): Promise<JsonObject[]> {
+  const response = await client.get(
+    `/accounts/${client.accountId}/workers/scripts/${encodeURIComponent(workerName)}/versions`,
+    { per_page: "1000" },
+  );
+  if (response.status === "not-found") return [];
+  if (!isRecord(response.result) || !Array.isArray(response.result.items))
+    throw new Error("bootstrap_worker_versions_invalid");
+  const versions = response.result.items.filter(isRecord);
+  if (versions.length !== response.result.items.length)
+    throw new Error("bootstrap_worker_versions_invalid");
+  return versions;
+}
+
+async function readWorkerVersion(
+  client: CloudflareReadClient,
+  workerName: string,
+  versionId: string,
+): Promise<JsonObject | null> {
+  const response = await client.get(
+    `/accounts/${client.accountId}/workers/scripts/${encodeURIComponent(workerName)}/versions/${encodeURIComponent(versionId)}`,
+  );
+  if (response.status === "not-found") return null;
+  if (!isRecord(response.result) || response.result.id !== versionId)
+    throw new Error("bootstrap_worker_version_invalid");
+  return response.result;
+}
+
+export async function recoverWorkerVersion(
+  client: CloudflareReadClient,
+  workerName: string,
+  operationId: string,
+): Promise<JsonObject | null> {
+  const matches: JsonObject[] = [];
+  for (const summary of await listWorkerVersions(client, workerName)) {
+    const id = String(summary.id ?? "");
+    if (!UUID.test(id)) throw new Error("bootstrap_worker_version_id_invalid");
+    const version = await readWorkerVersion(client, workerName, id);
+    const annotations =
+      version && isRecord(version.annotations) ? version.annotations : {};
+    if (
+      annotations["workers/message"] === operationId &&
+      annotations["workers/tag"] === BOOTSTRAP_TAG
+    ) {
+      matches.push(version!);
+    }
+  }
+  if (matches.length > 1)
+    throw new Error("bootstrap_version_recovery_ambiguous");
+  return matches[0] ?? null;
+}
+
+async function currentWorkerDeployment(
+  client: CloudflareReadClient,
+  workerName: string,
+): Promise<JsonObject | null> {
+  const response = await client.get(
+    `/accounts/${client.accountId}/workers/scripts/${encodeURIComponent(workerName)}/deployments`,
+  );
+  if (response.status === "not-found") return null;
+  if (!isRecord(response.result) || !Array.isArray(response.result.deployments))
+    throw new Error("bootstrap_worker_deployments_invalid");
+  const deployments = response.result.deployments.filter(isRecord);
+  if (deployments.length !== response.result.deployments.length)
+    throw new Error("bootstrap_worker_deployments_invalid");
+  deployments.sort(
+    (left, right) =>
+      Date.parse(String(right.created_on ?? "")) -
+      Date.parse(String(left.created_on ?? "")),
+  );
+  return deployments[0] ?? null;
+}
+
+export async function exactWorkerPresent(
+  client: CloudflareReadClient,
+  workerName: string,
+): Promise<boolean> {
+  const settings = await client.get(
+    `/accounts/${client.accountId}/workers/scripts/${encodeURIComponent(workerName)}/settings`,
+  );
+  if (settings.status === "ok") return true;
+  return (
+    (await listWorkerVersions(client, workerName)).length > 0 ||
+    (await currentWorkerDeployment(client, workerName)) !== null
+  );
+}
+
 async function dnsRecordPresent(
   client: CloudflareReadClient,
   hostname: string,
@@ -531,30 +621,13 @@ async function dnsRecordPresent(
   );
 }
 
-function workerState(
-  runner: WranglerRunner,
-  cwd: string,
-  workerName: string,
-): "present" | "absent" {
-  const value = runner.inspect?.(
-    ["deployments", "status", "--name", workerName, "--json"],
-    { cwd },
-  );
-  if (!value) throw new Error("bootstrap_runner_inspection_missing");
-  if (value.status === "failed")
-    throw new Error("bootstrap_worker_presence_unknown");
-  return value.status === "ok" ? "present" : "absent";
-}
-
 async function assertAbsent(
   policy: BootstrapPolicy,
-  runner: WranglerRunner,
-  cwd: string,
   client: CloudflareReadClient,
 ): Promise<JsonObject> {
   const target = policy.staging;
   const absence = {
-    worker: workerState(runner, cwd, target.workerName) === "absent",
+    worker: !(await exactWorkerPresent(client, target.workerName)),
     d1: (await exactD1Id(client, target.databaseName)) === null,
     kv: (await exactKvId(client, target.kvNamespaceName)) === null,
     r2: !(await exactR2(client, target.iconsBucketName)),
@@ -687,12 +760,7 @@ async function readOrCreateProgress(options: {
   }
   if (options.envelope.authority.recoveryProgressDigest !== undefined)
     throw new Error("bootstrap_recovery_progress_missing");
-  await assertAbsent(
-    options.policy,
-    options.runner,
-    options.source,
-    options.client,
-  );
+  await assertAbsent(options.policy, options.client);
   const target = options.policy.staging;
   const progress: BootstrapProgress = {
     kind: "takosumi.store-staging-bootstrap-progress@v1",
@@ -754,9 +822,10 @@ export async function planStoreStagingRecovery(options: {
   const databaseId = await exactD1Id(options.client, target.databaseName);
   const kvNamespaceId = await exactKvId(options.client, target.kvNamespaceName);
   const r2Present = await exactR2(options.client, target.iconsBucketName);
-  const workerPresent =
-    workerState(options.runner, options.source, target.workerName) ===
-    "present";
+  const workerPresent = await exactWorkerPresent(
+    options.client,
+    target.workerName,
+  );
   const domain = await exactDomain(
     options.client,
     target.customDomainHostname,
@@ -949,118 +1018,108 @@ export async function provisionStoreStaging(options: {
       { mode: 0o400, flag: "wx" },
     );
 
-    let versionId: string;
-    try {
-      versionId = parseVersionId(
-        options.runner(
-          [
-            "versions",
-            "upload",
-            "bootstrap.mjs",
-            "--no-bundle",
-            "--assets",
-            "assets",
-            "--config",
-            "wrangler.toml",
-            "--secrets-file",
-            "secrets.json",
-            "--tag",
-            BOOTSTRAP_TAG,
-            "--message",
+    const recordedWorker = progressResource(progress, "worker");
+    let version =
+      recordedWorker.state === "present" && recordedWorker.id
+        ? await readWorkerVersion(
+            options.client,
+            target.workerName,
+            recordedWorker.id,
+          )
+        : await recoverWorkerVersion(
+            options.client,
+            target.workerName,
             options.envelope.operationId,
-          ],
-          { cwd: temporary },
-        ),
-      );
-    } catch (error) {
-      const listed = parseJsonOutput(
-        options.runner(
-          ["versions", "list", "--name", target.workerName, "--json"],
-          { cwd: temporary },
-        ),
-        "bootstrap_version_recovery",
-      );
-      if (!Array.isArray(listed)) throw error;
-      const recovered = recoverExactlyOne(
-        listed,
-        (entry) => {
-          if (!isRecord(entry)) return false;
-          const annotations = isRecord(entry.annotations)
-            ? entry.annotations
-            : {};
-          return (
-            annotations["workers/message"] === options.envelope.operationId &&
-            annotations["workers/tag"] === BOOTSTRAP_TAG
           );
-        },
-        "bootstrap_version_recovery",
+    let versionId = version ? String(version.id ?? "") : "";
+    if (!version) {
+      let uploadError: unknown = null;
+      try {
+        versionId = parseVersionId(
+          options.runner(
+            [
+              "versions",
+              "upload",
+              "bootstrap.mjs",
+              "--no-bundle",
+              "--assets",
+              "assets",
+              "--config",
+              "wrangler.toml",
+              "--secrets-file",
+              "secrets.json",
+              "--tag",
+              BOOTSTRAP_TAG,
+              "--message",
+              options.envelope.operationId,
+            ],
+            { cwd: temporary },
+          ),
+        );
+      } catch (error) {
+        uploadError = error;
+      }
+      version = await recoverWorkerVersion(
+        options.client,
+        target.workerName,
+        options.envelope.operationId,
       );
-      const recoveredId = isRecord(recovered) ? String(recovered.id ?? "") : "";
-      if (!UUID.test(recoveredId)) {
+      if (!version && UUID.test(versionId)) {
+        version = await readWorkerVersion(
+          options.client,
+          target.workerName,
+          versionId,
+        );
+      }
+      if (!version) {
         await writeProgress(
           options.evidence,
           updateProgress(progress, "worker", "presence-unknown"),
         );
-        throw error;
+        throw uploadError ?? new Error("bootstrap_version_readback_missing");
       }
-      versionId = recoveredId;
+      versionId = String(version.id ?? "");
     }
+    if (!UUID.test(versionId))
+      throw new Error("bootstrap_worker_version_id_invalid");
     const realized = targetPolicy(target, databaseId, kvNamespaceId);
-    const version = parseJsonOutput(
-      options.runner(
-        [
-          "versions",
-          "view",
-          versionId,
-          "--name",
-          target.workerName,
-          "--config",
-          "wrangler.toml",
-          "--json",
-        ],
-        { cwd: temporary },
-      ),
-      "bootstrap_version_readback",
-    );
     assertVersionBindings(version, versionId, realized);
     progress = updateProgress(progress, "worker", "present", versionId);
     await writeProgress(options.evidence, progress);
-    try {
-      options.runner(
-        [
-          "versions",
-          "deploy",
-          `${versionId}@100%`,
-          "--name",
-          target.workerName,
-          "--config",
-          "wrangler.toml",
-          "--yes",
-          "--message",
-          options.envelope.operationId,
-        ],
-        { cwd: temporary },
-      );
-    } catch (error) {
-      const recovered = parseJsonOutput(
-        options.runner(
-          ["deployments", "status", "--name", target.workerName, "--json"],
-          { cwd: temporary },
-        ),
-        "bootstrap_deployment_recovery",
-      );
-      if (!deploymentHasExactVersionAtFullTraffic(recovered, versionId))
-        throw error;
-    }
-    const deployment = parseJsonOutput(
-      options.runner(
-        ["deployments", "status", "--name", target.workerName, "--json"],
-        { cwd: temporary },
-      ),
-      "bootstrap_deployment_readback",
+    let deployment = await currentWorkerDeployment(
+      options.client,
+      target.workerName,
     );
-    if (!deploymentHasExactVersionAtFullTraffic(deployment, versionId))
-      throw new Error("bootstrap_deployment_readback_mismatch");
+    if (!deploymentHasExactVersionAtFullTraffic(deployment, versionId)) {
+      let deployError: unknown = null;
+      try {
+        options.runner(
+          [
+            "versions",
+            "deploy",
+            `${versionId}@100%`,
+            "--name",
+            target.workerName,
+            "--config",
+            "wrangler.toml",
+            "--yes",
+            "--message",
+            options.envelope.operationId,
+          ],
+          { cwd: temporary },
+        );
+      } catch (error) {
+        deployError = error;
+      }
+      deployment = await currentWorkerDeployment(
+        options.client,
+        target.workerName,
+      );
+      if (!deploymentHasExactVersionAtFullTraffic(deployment, versionId))
+        throw (
+          deployError ?? new Error("bootstrap_deployment_readback_mismatch")
+        );
+    }
     try {
       options.runner(
         [
@@ -1387,8 +1446,6 @@ async function readInventory(
 
 async function assertBootstrapStillOwnsTarget(
   inventory: BootstrapInventory,
-  runner: WranglerRunner,
-  cwd: string,
   client: CloudflareReadClient,
 ): Promise<{ version: unknown; deployment: unknown; topology: JsonObject }> {
   const target = targetPolicy(
@@ -1403,27 +1460,13 @@ async function assertBootstrapStillOwnsTarget(
     !(await exactR2(client, target.iconsBucketName))
   )
     throw new Error("bootstrap_storage_ownership_mismatch");
-  const version = parseJsonOutput(
-    runner(
-      [
-        "versions",
-        "view",
-        inventory.target.versionId,
-        "--name",
-        target.workerName,
-        "--json",
-      ],
-      { cwd },
-    ),
-    "bootstrap_version_attest",
+  const version = await readWorkerVersion(
+    client,
+    target.workerName,
+    inventory.target.versionId,
   );
   assertVersionBindings(version, inventory.target.versionId, target);
-  const deployment = parseJsonOutput(
-    runner(["deployments", "status", "--name", target.workerName, "--json"], {
-      cwd,
-    }),
-    "bootstrap_deployment_attest",
-  );
+  const deployment = await currentWorkerDeployment(client, target.workerName);
   if (
     !deploymentHasExactVersionAtFullTraffic(
       deployment,
@@ -1570,7 +1613,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
       : null;
     const absence = recovery
       ? null
-      : await assertAbsent(policyRecord.policy, runner, source, client);
+      : await assertAbsent(policyRecord.policy, client);
     if (recovery) evidenceFile = "store-staging-bootstrap-recovery-plan.json";
     evidenceValue = {
       kind: "takosumi.store-staging-bootstrap-plan@v1",
@@ -1603,12 +1646,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
       evidence,
     );
     assertBootstrapAuthorityActive(progress);
-    const readback = await assertBootstrapStillOwnsTarget(
-      inventory,
-      runner,
-      source,
-      client,
-    );
+    const readback = await assertBootstrapStillOwnsTarget(inventory, client);
     if (action === "attest") {
       evidenceValue = {
         kind: "takosumi.store-staging-bootstrap-attestation@v1",
@@ -1766,7 +1804,7 @@ export async function runStoreStagingBootstrapAdapter(options: {
         await rm(temporary, { recursive: true, force: true });
       }
       if (
-        workerState(runner, source, inventory.target.workerName) !== "absent" ||
+        (await exactWorkerPresent(client, inventory.target.workerName)) ||
         (await exactD1Id(client, inventory.target.databaseName)) !== null ||
         (await exactKvId(client, inventory.target.kvNamespaceName)) !== null ||
         (await exactR2(client, inventory.target.iconsBucketName)) ||

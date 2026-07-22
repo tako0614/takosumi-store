@@ -15,11 +15,13 @@ import {
   assertStagingOnlyEnvironment,
   exactD1Id,
   exactKvId,
+  exactWorkerPresent,
   makeStagingConfig,
   planStoreStagingRecovery,
   provisionStoreStaging,
   quarantinedProgress,
   recoverExactlyOne,
+  recoverWorkerVersion,
   validateBootstrapPolicy,
   type BootstrapEnvelope,
   type BootstrapPolicy,
@@ -238,6 +240,59 @@ describe("fixed one-time Store staging bootstrap", () => {
     ).rejects.toThrow("bootstrap_kv_name_ambiguous");
   });
 
+  test("reads Worker presence and operation-owned Version directly from Cloudflare API", async () => {
+    let versions: Record<string, unknown>[] = [];
+    const versionId = "99999999-9999-4999-8999-999999999999";
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path) {
+        if (path.endsWith("/settings")) return { status: "not-found" };
+        if (path.endsWith("/versions")) {
+          return {
+            status: "ok",
+            result: { items: versions },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith(`/versions/${versionId}`)) {
+          return {
+            status: "ok",
+            result: {
+              id: versionId,
+              annotations: {
+                "workers/message": "store-staging-bootstrap-test-0001",
+                "workers/tag": "staging-bootstrap-v1",
+              },
+            },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/deployments")) {
+          return {
+            status: "ok",
+            result: { deployments: [] },
+            resultInfo: null,
+          };
+        }
+        throw new Error(`unexpected_worker_read:${path}`);
+      },
+    };
+    expect(await exactWorkerPresent(client, rawPolicy.staging.workerName)).toBe(
+      false,
+    );
+    versions = [{ id: versionId }];
+    expect(await exactWorkerPresent(client, rawPolicy.staging.workerName)).toBe(
+      true,
+    );
+    expect(
+      await recoverWorkerVersion(
+        client,
+        rawPolicy.staging.workerName,
+        "store-staging-bootstrap-test-0001",
+      ),
+    ).toMatchObject({ id: versionId });
+  });
+
   test("adoption permanently revokes cleanup and quarantine retains backing storage", () => {
     const progress: BootstrapProgress = {
       kind: "takosumi.store-staging-bootstrap-progress@v1",
@@ -302,6 +357,21 @@ describe("fixed one-time Store staging bootstrap", () => {
     const client: CloudflareReadClient = {
       accountId,
       async get(path, query) {
+        if (path.endsWith("/settings")) return { status: "not-found" };
+        if (path.endsWith("/versions")) {
+          return {
+            status: "ok",
+            result: { items: [] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/deployments")) {
+          return {
+            status: "ok",
+            result: { deployments: [] },
+            resultInfo: null,
+          };
+        }
         if (
           path.endsWith("/d1/database") ||
           path.endsWith("/storage/kv/namespaces") ||
@@ -479,6 +549,21 @@ describe("fixed one-time Store staging bootstrap", () => {
     const planClient: CloudflareReadClient = {
       accountId,
       async get(path, query) {
+        if (path.endsWith("/settings")) return { status: "not-found" };
+        if (path.endsWith("/versions")) {
+          return {
+            status: "ok",
+            result: { items: [] },
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/deployments")) {
+          return {
+            status: "ok",
+            result: { deployments: [] },
+            resultInfo: null,
+          };
+        }
         if (path.endsWith("/d1/database")) {
           return {
             status: "ok",
