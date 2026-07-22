@@ -202,7 +202,7 @@ describe("fixed one-time Store staging bootstrap", () => {
   test("fails closed when direct Cloudflare API ownership is ambiguous", async () => {
     const client: CloudflareReadClient = {
       accountId,
-      async get(path) {
+      async get(path, query) {
         if (path.endsWith("/d1/database")) {
           return {
             status: "ok",
@@ -300,7 +300,7 @@ describe("fixed one-time Store staging bootstrap", () => {
     runner.inspect = () => ({ status: "not-found", stdout: "" });
     const client: CloudflareReadClient = {
       accountId,
-      async get(path) {
+      async get(path, query) {
         if (
           path.endsWith("/d1/database") ||
           path.endsWith("/storage/kv/namespaces") ||
@@ -477,7 +477,7 @@ describe("fixed one-time Store staging bootstrap", () => {
     };
     const client: CloudflareReadClient = {
       accountId,
-      async get(path) {
+      async get(path, query) {
         if (path.endsWith("/d1/database")) {
           return {
             status: "ok",
@@ -497,6 +497,10 @@ describe("fixed one-time Store staging bootstrap", () => {
           };
         }
         if (path.endsWith("/r2/buckets")) {
+          expect(query).toEqual({
+            name_contains: rawPolicy.staging.iconsBucketName,
+            per_page: "1000",
+          });
           return {
             status: "ok",
             result: { buckets: [] },

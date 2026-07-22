@@ -450,7 +450,7 @@ async function exactR2(
 ): Promise<boolean> {
   const response = await client.get(
     `/accounts/${client.accountId}/r2/buckets`,
-    { name },
+    { name_contains: name, per_page: "1000" },
   );
   if (response.status === "not-found") return false;
   const values = Array.isArray(response.result)
