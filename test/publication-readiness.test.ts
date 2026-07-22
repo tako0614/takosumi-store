@@ -18,7 +18,7 @@ describe("public repository contract", () => {
 
     expect(packageJson).toMatchObject({
       name: "@takosjp/takosumi-store",
-      version: "0.1.1",
+      version: "0.1.2",
       private: true,
       license: "AGPL-3.0-only",
     });

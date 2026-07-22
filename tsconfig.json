@@ -19,6 +19,7 @@
     "test",
     "web/src",
     "scripts/store-release*.ts",
+    "scripts/store-staging*.ts",
     "scripts/self-host-deploy.ts"
   ]
 }

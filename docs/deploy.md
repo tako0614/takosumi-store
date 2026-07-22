@@ -72,13 +72,18 @@ publishing this Store itself as an installable app:
 
 1. Push this repo to its remote (`https://github.com/tako0614/takosumi-store.git`).
 2. Run the public CI and release verification against the exact candidate SHA.
-3. Create a signed annotated `v0.1.1` tag at that exact commit and push both the
+3. Create a signed annotated `v0.1.2` tag at that exact commit and push both the
    commit and tag. The candidate builder rejects lightweight, unsigned,
    unpushed, or differently peeled tags.
 4. Register it as a submodule from the ecosystem root once the remote exists:
    `git submodule add https://github.com/tako0614/takosumi-store.git takosumi-store`.
 5. Register the Store listing or distribution entry with the repository URL and
    module path only; do not copy release tags or commits into Store metadata.
+
+The official staging target is not provisioned with these manual commands. Its
+one-time, create-only bootstrap is a separate fixed controller flow documented
+in [release-safety.md](./release-safety.md); after `adopt`, every deployment
+uses the ordinary immutable staging/replica/production release envelope.
 
 ## Official listing icon indexing
 

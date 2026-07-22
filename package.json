@@ -1,6 +1,6 @@
 {
   "name": "@takosjp/takosumi-store",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -13,6 +13,7 @@
     "build": "bunx vite build --config web/vite.config.ts",
     "deploy:self-host": "bun scripts/self-host-deploy.ts",
     "release:candidate": "bun scripts/store-release-candidate.ts",
+    "release:staging-bootstrap": "bun scripts/store-staging-bootstrap-fixed-adapter.ts",
     "release:check": "bunx tsc --noEmit && bun test test/release-*.test.ts test/health-routes.test.ts",
     "lint": "bun run check",
     "fmt": "bunx prettier --write spec src web test scripts",
