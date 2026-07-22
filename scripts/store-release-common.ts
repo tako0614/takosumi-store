@@ -18,7 +18,7 @@ export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
 export const CANONICAL_CANARY_SOURCE_GIT =
   "https://github.com/tako0614/takos.git";
-export const VERSION = "0.1.3";
+export const VERSION = "0.1.4";
 export const TAG = `v${VERSION}`;
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
 export const ARTIFACT_MANIFEST_FILE = "takosumi-store-artifact-manifest.json";

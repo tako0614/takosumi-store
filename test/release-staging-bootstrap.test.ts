@@ -25,6 +25,7 @@ import {
   type BootstrapProgress,
 } from "../scripts/store-staging-bootstrap-adapter.ts";
 import {
+  sha256Bytes,
   validateRealizedConfig,
   type CloudflareReadClient,
   type TargetPolicy,
@@ -294,12 +295,7 @@ describe("fixed one-time Store staging bootstrap", () => {
     const policy = validateBootstrapPolicy(rawPolicy) as BootstrapPolicy;
     let firstMutationObserved = false;
     const runner = ((args: readonly string[]) => {
-      const command = args.join(" ");
-      if (command === `d1 create ${policy.staging.databaseName}`) {
-        firstMutationObserved = true;
-        throw new Error("simulated_lost_response");
-      }
-      throw new Error(`unexpected:${command}`);
+      throw new Error(`unexpected:${args.join(" ")}`);
     }) as WranglerRunner;
     runner.inspect = () => ({ status: "not-found", stdout: "" });
     const client: CloudflareReadClient = {
@@ -369,6 +365,14 @@ describe("fixed one-time Store staging bootstrap", () => {
         secretPath,
         runner,
         client,
+        mutationClient: {
+          async request(method, path) {
+            expect(method).toBe("POST");
+            expect(path).toEndWith("/d1/database");
+            firstMutationObserved = true;
+            throw new Error("simulated_lost_response");
+          },
+        },
       }),
     ).rejects.toThrow("simulated_lost_response");
     expect(firstMutationObserved).toBeTrue();
@@ -389,6 +393,165 @@ describe("fixed one-time Store staging bootstrap", () => {
       "intent-recorded",
       "intent-recorded",
       "intent-recorded",
+    ]);
+  });
+
+  test("resumes exact partial storage from a progress digest without recreating owners", async () => {
+    const root = await mkdtemp(join(tmpdir(), "store-bootstrap-resume-test-"));
+    temporary.push(root);
+    const evidence = join(root, "evidence");
+    await chmod(root, 0o700);
+    await mkdir(evidence, { mode: 0o700 });
+    const secretPath = join(root, "secret");
+    await writeFile(secretPath, "x".repeat(64), { mode: 0o600 });
+    const progress: BootstrapProgress = {
+      kind: "takosumi.store-staging-bootstrap-progress@v1",
+      operationId: "store-staging-bootstrap-test-0001",
+      status: "provisioning",
+      resources: [
+        {
+          type: "d1",
+          name: rawPolicy.staging.databaseName,
+          state: "present",
+          id: databaseId,
+        },
+        {
+          type: "kv",
+          name: rawPolicy.staging.kvNamespaceName,
+          state: "present",
+          id: kvNamespaceId,
+        },
+        {
+          type: "r2",
+          name: rawPolicy.staging.iconsBucketName,
+          state: "presence-unknown",
+        },
+        {
+          type: "worker",
+          name: rawPolicy.staging.workerName,
+          state: "intent-recorded",
+        },
+        {
+          type: "custom-domain",
+          name: rawPolicy.staging.customDomainHostname,
+          state: "intent-recorded",
+        },
+      ],
+      steps: ["all-create-intents-recorded-before-first-mutation"],
+      productionFallback: false,
+    };
+    const progressBytes = `${JSON.stringify(progress)}\n`;
+    await writeFile(
+      join(evidence, "store-staging-bootstrap-progress.json"),
+      progressBytes,
+      { mode: 0o600 },
+    );
+    const envelope: BootstrapEnvelope = {
+      kind: "takosumi.store-staging-bootstrap-envelope@v1",
+      operationId: progress.operationId,
+      surfaceId: "takosumi-store",
+      requestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      source: {
+        repository: "https://github.com/tako0614/takosumi-store.git",
+        commit: sourceCommit,
+        clean: true,
+        pushed: true,
+      },
+      controllerSource: {
+        repository: "https://github.com/tako0614/takos-ecosystem.git",
+        commit: controllerCommit,
+        clean: true,
+        pushed: true,
+      },
+      authority: {
+        adapterDigest: `sha256:${"7".repeat(64)}`,
+        operatorPolicyDigest: `sha256:${"8".repeat(64)}`,
+        recoveryProgressDigest: sha256Bytes(progressBytes),
+      },
+      evidence: {
+        directory: evidence,
+        permissions: "0700-directory/0600-files",
+      },
+      productionFallback: false,
+    };
+    const client: CloudflareReadClient = {
+      accountId,
+      async get(path) {
+        if (path.endsWith("/d1/database")) {
+          return {
+            status: "ok",
+            result: [
+              { uuid: databaseId, name: rawPolicy.staging.databaseName },
+            ],
+            resultInfo: null,
+          };
+        }
+        if (path.endsWith("/storage/kv/namespaces")) {
+          return {
+            status: "ok",
+            result: [
+              { id: kvNamespaceId, title: rawPolicy.staging.kvNamespaceName },
+            ],
+            resultInfo: { total_pages: 1 },
+          };
+        }
+        if (path.endsWith("/r2/buckets")) {
+          return {
+            status: "ok",
+            result: { buckets: [] },
+            resultInfo: null,
+          };
+        }
+        throw new Error(`unexpected_read:${path}`);
+      },
+    };
+    const runner = (() => {
+      throw new Error("runner_must_not_recreate_recovered_storage");
+    }) as WranglerRunner;
+    await expect(
+      provisionStoreStaging({
+        envelope,
+        policy: validateBootstrapPolicy(rawPolicy),
+        source: root,
+        evidence,
+        secretPath,
+        runner,
+        client,
+        mutationClient: {
+          async request(method, path, body) {
+            expect(method).toBe("POST");
+            expect(path).toEndWith("/r2/buckets");
+            expect(body).toEqual({ name: rawPolicy.staging.iconsBucketName });
+            throw new Error("simulated_r2_permission_denied");
+          },
+        },
+      }),
+    ).rejects.toThrow("simulated_r2_permission_denied");
+    const retained = JSON.parse(
+      await readFile(
+        join(evidence, "store-staging-bootstrap-progress.json"),
+        "utf8",
+      ),
+    );
+    expect(retained.resources.slice(0, 3)).toEqual([
+      {
+        type: "d1",
+        name: rawPolicy.staging.databaseName,
+        state: "present",
+        id: databaseId,
+      },
+      {
+        type: "kv",
+        name: rawPolicy.staging.kvNamespaceName,
+        state: "present",
+        id: kvNamespaceId,
+      },
+      {
+        type: "r2",
+        name: rawPolicy.staging.iconsBucketName,
+        state: "presence-unknown",
+      },
     ]);
   });
 });
