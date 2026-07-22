@@ -444,7 +444,7 @@ export function recoverExactlyOne<T>(
   return matches[0] ?? null;
 }
 
-async function exactR2(
+export async function exactR2(
   client: CloudflareReadClient,
   name: string,
 ): Promise<boolean> {
@@ -468,7 +468,7 @@ async function exactR2(
   );
 }
 
-async function exactDomain(
+export async function exactDomain(
   client: CloudflareReadClient,
   hostname: string,
   workerName?: string,
@@ -1614,7 +1614,9 @@ export async function runStoreStagingBootstrapAdapter(options: {
     const absence = recovery
       ? null
       : await assertAbsent(policyRecord.policy, client);
-    if (recovery) evidenceFile = "store-staging-bootstrap-recovery-plan.json";
+    if (recovery) {
+      evidenceFile = `store-staging-bootstrap-recovery-plan-${envelope.source.commit.slice(0, 12)}-${envelope.authority.recoveryProgressDigest!.slice(7, 19)}.json`;
+    }
     evidenceValue = {
       kind: "takosumi.store-staging-bootstrap-plan@v1",
       operationId: envelope.operationId,
