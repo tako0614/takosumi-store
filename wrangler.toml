@@ -1,0 +1,49 @@
+name = "takosumi-store"
+main = "src/backend/index.ts"
+compatibility_date = "2026-06-25"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+[vars]
+# Public self-host template only. Operators must replace every example value.
+# Realized production values belong in operator-owned deployment configuration,
+# outside this repository.
+APP_URL = "https://store.example.com"
+
+# OIDC public PKCE client. Register
+# https://store.example.com/account/callback at your issuer before enabling
+# publishing. Without valid OIDC settings the Store remains read-only.
+TAKOSUMI_ACCOUNTS_ISSUER_URL = "https://accounts.example.com"
+TAKOSUMI_ACCOUNTS_CLIENT_ID = "replace-with-public-oidc-client-id"
+
+# Secrets (set via `wrangler secret put`):
+# - SESSION_HASH_SALT (required for cookie session hashing)
+
+# D1 Database — replace database_id with your provisioned DB id.
+[[d1_databases]]
+binding = "DB"
+database_name = "takosumi-store-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# R2 Bucket — re-hosted listing icons.
+[[r2_buckets]]
+binding = "ICONS"
+bucket_name = "takosumi-store-icons"
+
+# KV Namespace — OAuth state / PKCE verifier (short TTL).
+[[kv_namespaces]]
+binding = "KV"
+id = "00000000000000000000000000000000"
+
+# Static assets (the Solid SPA). The worker runs first and falls through to
+# ASSETS for non-backend paths; unknown paths return the SPA shell.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+not_found_handling = "single-page-application"
+
+# Custom Domain template. Replace with the self-hosted canonical hostname.
+[[routes]]
+pattern = "store.example.com"
+custom_domain = true

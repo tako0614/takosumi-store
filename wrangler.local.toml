@@ -1,0 +1,28 @@
+name = "takosumi-store"
+main = "src/backend/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+[vars]
+APP_URL = "http://localhost:8787"
+
+# Local D1 (wrangler --local uses a SQLite file under .wrangler/state).
+[[d1_databases]]
+binding = "DB"
+database_name = "takosumi-store-db"
+database_id = "local"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ICONS"
+bucket_name = "takosumi-store-icons"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "local"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = true
+not_found_handling = "single-page-application"

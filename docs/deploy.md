@@ -1,0 +1,99 @@
+# Deploying Takosumi Store
+
+Two ways to run it: as a Capsule provisioned by a Takosumi control plane
+(recommended), or self-hosted directly with wrangler.
+
+## A. Install as a Capsule (via Takosumi)
+
+`outputs.tf` makes this repo a plain OpenTofu Capsule. Takosumi provisions its
+D1 (`DB`, with `migrations/`), R2 (`ICONS`), KV (`KV`), generated
+`SESSION_HASH_SALT`, route, and optional public OIDC client. Takos is the
+user-facing launcher and install experience; it does not own the control-plane
+ledger or provision these resources. Without an accounts plane the Store still
+runs read-only.
+
+Distribution or featured-app placement is a separate Takos product decision;
+this repository does not claim that the Store is preinstalled or featured.
+
+## B. Self-host with wrangler
+
+```bash
+bun install
+# provision backing resources, then copy wrangler.toml outside the repository
+# and replace every example value in that operator-owned configuration:
+export STORE_WRANGLER_CONFIG=/path/to/takosumi-store.production.toml
+bunx wrangler d1 create takosumi-store-db
+bunx wrangler kv namespace create takosumi-store-kv
+bunx wrangler r2 bucket create takosumi-store-icons
+bunx wrangler d1 migrations apply takosumi-store-db \
+  --config "$STORE_WRANGLER_CONFIG"                  # apply 0001 + 0002
+# build the SPA and deploy the worker (serves SPA + API on one origin):
+bun run build
+bunx wrangler deploy --config "$STORE_WRANGLER_CONFIG"
+# optional: enable publishing
+bunx wrangler secret put SESSION_HASH_SALT \
+  --config "$STORE_WRANGLER_CONFIG"                 # openssl rand -hex 32
+#   set TAKOSUMI_ACCOUNTS_ISSUER_URL + TAKOSUMI_ACCOUNTS_CLIENT_ID for OIDC login
+#   (register redirect_uri <origin>/account/callback with the issuer)
+```
+
+`APP_URL` should be your routed origin (used for ServerInfo.baseUrl, OIDC
+redirect, and install-link host de-dup).
+
+An official deployment can use:
+
+```text
+APP_URL=https://store.takosumi.com
+route=store.takosumi.com/*
+```
+
+Publishing remains disabled unless `SESSION_HASH_SALT`,
+`TAKOSUMI_ACCOUNTS_ISSUER_URL`, and `TAKOSUMI_ACCOUNTS_CLIENT_ID` are configured
+for the deployment.
+
+## Consuming the store
+
+The takos / takosumi clients consume the store's [read API](./SPEC.md) directly
+(CORS-open), so users browse and install Capsules from inside those apps. The
+store's own site is mainly for browsing its catalog and registering (publishing)
+listings.
+
+## Operator / release publication
+
+The Store listing advertises only the repository and module path. Takosumi's
+install/source flow owns the selected tag/commit and OpenTofu plan. Before
+publishing this Store itself as an installable app:
+
+1. Push this repo to its remote (`https://github.com/tako0614/takosumi-store.git`).
+2. Run the public CI and release verification against the exact candidate SHA.
+3. Tag the exact verified release commit as `v0.1.1`; never rebuild or overwrite
+   a release tag.
+4. Register it as a submodule from the ecosystem root once the remote exists:
+   `git submodule add https://github.com/tako0614/takosumi-store.git takosumi-store`.
+5. Register the Store listing or distribution entry with the repository URL and
+   module path only; do not copy release tags or commits into Store metadata.
+
+## Official listing icon indexing
+
+Repository presentation may name an absolute credential-free HTTPS icon or a
+repository-root-relative path in `.well-known/tcs.json`. The official loader
+resolves GitHub `HEAD` to an exact commit, reads the document and relative icon
+from that commit, validates the bounded image bytes, uploads the
+digest-addressed object to the Store `ICONS` R2 bucket, and writes only the
+Store-owned HTTPS URL to the listing row.
+
+Run the upload and SQL generation together from an authenticated operator
+checkout whose realized Wrangler configuration lives outside this repository:
+
+```bash
+TAKOSUMI_STORE_ICON_REHOST=remote \
+  bun run scripts/load-official-listings.ts > /tmp/official.sql
+bunx wrangler d1 execute takosumi-store-db \
+  --remote --config "$STORE_WRANGLER_CONFIG" --file /tmp/official.sql
+```
+
+`TAKOSUMI_STORE_ICON_BUCKET`, `TAKOSUMI_STORE_PUBLIC_ORIGIN`, and
+`TAKOSUMI_STORE_WRANGLER_CONFIG` override the deployment defaults. If commit
+resolution, metadata fetch, path validation, content validation, size limits,
+or R2 upload fails, the loader still emits the listing without `iconUrl`; it
+never publishes the remote source URL as a fallback.
