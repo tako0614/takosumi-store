@@ -50,8 +50,12 @@ Publishing remains disabled unless `SESSION_HASH_SALT`,
 for the deployment.
 
 The wrapper refuses the official `store.takosumi.com` target and any invocation
-under the ecosystem release controller. The official Store is released only
-through [the fixed release-safety flow](./release-safety.md).
+under the ecosystem release controller. It also rejects the canonical official
+custom-domain route and the public official D1, KV, and R2 names. Cloudflare's
+opaque resource IDs are not copied into this public repository; isolation for
+those IDs is fail-closed through separate official account/token custody. The
+official Store is released only through
+[the fixed release-safety flow](./release-safety.md).
 
 ## Consuming the store
 

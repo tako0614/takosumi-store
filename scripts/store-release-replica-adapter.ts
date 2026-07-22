@@ -10,16 +10,18 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   REPLICA_CHECK_NAMES,
   SURFACE_ID,
   VERSION,
+  assertIconMediaType,
   assertMigrationReadback,
   assertVersionBindings,
   candidateHealthChecks,
   canonicalJson,
+  createCloudflareReadClient,
   createWranglerRunner,
   digestJson,
   deploymentHasExactVersionAtFullTraffic,
@@ -28,14 +30,17 @@ import {
   readPolicy,
   readPrivateFile,
   readPrivateJson,
+  readRuntimeTopology,
   parseJsonOutput,
   runLiveChecks,
   sha256Bytes,
   validateEnvelope,
+  verifyActualToolchain,
   verifyArtifact,
   verifySourceAuthority,
   writePrivateJson,
   type CandidateHealthCheck,
+  type CloudflareReadClient,
   type JsonObject,
   type ReleaseEnvelope,
   type StoreArtifactManifest,
@@ -79,7 +84,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu;
 const KV = /^[0-9a-f]{32}$/u;
 const NAME = /^[a-z0-9][a-z0-9-]{2,62}$/u;
 
-interface ReplicaConfig extends JsonObject {
+export interface ReplicaConfig extends JsonObject {
   readonly kind: "takosumi.store-release-replica-config@v1";
   readonly surfaceId: typeof SURFACE_ID;
   readonly releaseId: string;
@@ -104,7 +109,7 @@ interface ReplicaConfig extends JsonObject {
   };
 }
 
-interface Progress extends JsonObject {
+export interface Progress extends JsonObject {
   readonly kind: "takosumi.store-release-replica-progress@v1";
   readonly status:
     | "provisioning"
@@ -131,11 +136,12 @@ interface Progress extends JsonObject {
       | "presence-unknown"
       | "deleted";
   }[];
+  readonly preflightAbsenceDigest: string;
   readonly completedSteps: readonly string[];
   readonly productionFallback: false;
 }
 
-interface Inventory extends JsonObject {
+export interface Inventory extends JsonObject {
   readonly kind: "takosumi.store-release-replica-inventory@v1";
   readonly status: "verified";
   readonly surfaceId: typeof SURFACE_ID;
@@ -155,12 +161,322 @@ interface Inventory extends JsonObject {
   readonly productionFallback: false;
 }
 
+function assertExactObjectKeys(
+  value: unknown,
+  expected: readonly string[],
+  label: string,
+): asserts value is JsonObject {
+  if (
+    !isRecord(value) ||
+    canonicalJson(Object.keys(value).sort()) !==
+      canonicalJson([...expected].sort())
+  ) {
+    throw new Error(`${label}_schema_invalid`);
+  }
+}
+
+function assertReplicaTargetBound(
+  target: unknown,
+  config: ReplicaConfig,
+  label: string,
+): asserts target is ReplicaConfig["target"] {
+  assertExactObjectKeys(
+    target,
+    [
+      "accountId",
+      "workerName",
+      "databaseName",
+      "kvNamespaceName",
+      "iconsBucketName",
+      "origin",
+    ],
+    label,
+  );
+  if (canonicalJson(target) !== canonicalJson(config.target)) {
+    throw new Error(`${label}_authority_mismatch`);
+  }
+  if (
+    target.workerName === config.productionTarget.workerName ||
+    target.databaseName === config.productionTarget.databaseId ||
+    target.kvNamespaceName === config.productionTarget.kvNamespaceId ||
+    target.iconsBucketName === config.productionTarget.iconsBucketName ||
+    target.origin === config.productionTarget.origin
+  ) {
+    throw new Error(`${label}_production_identity_forbidden`);
+  }
+}
+
+export function validateInventory(
+  value: unknown,
+  envelope: ReleaseEnvelope,
+  config: ReplicaConfig,
+): Inventory {
+  assertExactObjectKeys(
+    value,
+    [
+      "kind",
+      "status",
+      "surfaceId",
+      "releaseId",
+      "replicaId",
+      "accountId",
+      "target",
+      "artifactDigests",
+      "createdAt",
+      "expiresAt",
+      "checks",
+      "remoteEvidence",
+      "productionFallback",
+    ],
+    "replica_inventory",
+  );
+  const inventory = value as unknown as Inventory;
+  assertExactObjectKeys(
+    inventory.target,
+    [
+      "accountId",
+      "workerName",
+      "databaseName",
+      "kvNamespaceName",
+      "iconsBucketName",
+      "origin",
+      "databaseId",
+      "kvNamespaceId",
+      "versionId",
+    ],
+    "replica_inventory_target",
+  );
+  const baseTarget = { ...inventory.target } as JsonObject;
+  delete baseTarget.databaseId;
+  delete baseTarget.kvNamespaceId;
+  delete baseTarget.versionId;
+  assertReplicaTargetBound(baseTarget, config, "replica_inventory_target");
+  if (
+    inventory.kind !== "takosumi.store-release-replica-inventory@v1" ||
+    inventory.status !== "verified" ||
+    inventory.surfaceId !== SURFACE_ID ||
+    inventory.releaseId !== envelope.releaseId ||
+    inventory.replicaId !== config.replicaId ||
+    inventory.accountId !== config.target.accountId ||
+    inventory.createdAt !== config.createdAt ||
+    inventory.expiresAt !== config.expiresAt ||
+    canonicalJson(inventory.artifactDigests) !==
+      canonicalJson(envelope.candidate.artifactDigests) ||
+    inventory.productionFallback !== false ||
+    !UUID.test(inventory.target.databaseId) ||
+    !KV.test(inventory.target.kvNamespaceId) ||
+    !UUID.test(inventory.target.versionId) ||
+    inventory.target.databaseId === config.productionTarget.databaseId ||
+    inventory.target.kvNamespaceId === config.productionTarget.kvNamespaceId ||
+    !Array.isArray(inventory.checks) ||
+    inventory.checks.length !== REPLICA_CHECK_NAMES.length
+  ) {
+    throw new Error("replica_inventory_authority_mismatch");
+  }
+  for (const [index, check] of inventory.checks.entries()) {
+    assertExactObjectKeys(
+      check,
+      ["name", "bindingDigest"],
+      `replica_inventory_check_${index}`,
+    );
+    if (
+      check.name !== REPLICA_CHECK_NAMES[index] ||
+      typeof check.bindingDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(check.bindingDigest)
+    ) {
+      throw new Error("replica_inventory_check_mismatch");
+    }
+  }
+  assertExactObjectKeys(
+    inventory.remoteEvidence,
+    [
+      "versionDigest",
+      "deploymentDigest",
+      "migrationLineageDigest",
+      "snapshotDigest",
+      "snapshotSqlDigest",
+      "snapshotScannerDigest",
+      "iconReadbackDigest",
+      "topologyDigest",
+      "preflightAbsenceDigest",
+    ],
+    "replica_inventory_remote_evidence",
+  );
+  if (
+    Object.values(inventory.remoteEvidence).some(
+      (digest) =>
+        typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(digest),
+    )
+  ) {
+    throw new Error("replica_inventory_remote_evidence_invalid");
+  }
+  return inventory;
+}
+
+export function validateProgress(
+  value: unknown,
+  envelope: ReleaseEnvelope,
+  config: ReplicaConfig,
+): Progress {
+  assertExactObjectKeys(
+    value,
+    [
+      "kind",
+      "status",
+      "surfaceId",
+      "releaseId",
+      "replicaId",
+      "accountId",
+      "target",
+      "artifactDigests",
+      "createdAt",
+      "expiresAt",
+      "resources",
+      "preflightAbsenceDigest",
+      "completedSteps",
+      "productionFallback",
+    ],
+    "replica_progress",
+  );
+  const progress = value as unknown as Progress;
+  assertReplicaTargetBound(progress.target, config, "replica_progress_target");
+  if (
+    progress.kind !== "takosumi.store-release-replica-progress@v1" ||
+    progress.surfaceId !== SURFACE_ID ||
+    progress.releaseId !== envelope.releaseId ||
+    progress.replicaId !== config.replicaId ||
+    progress.accountId !== config.target.accountId ||
+    progress.createdAt !== config.createdAt ||
+    progress.expiresAt !== config.expiresAt ||
+    canonicalJson(progress.artifactDigests) !==
+      canonicalJson(envelope.candidate.artifactDigests) ||
+    progress.productionFallback !== false ||
+    !/^sha256:[0-9a-f]{64}$/u.test(progress.preflightAbsenceDigest) ||
+    progress.preflightAbsenceDigest !==
+      digestJson({
+        kind: "takosumi.store-replica-preflight-absence@v1",
+        target: config.target,
+        worker: true,
+        d1: true,
+        kv: true,
+        r2: true,
+      }) ||
+    ![
+      "provisioning",
+      "provisioned",
+      "destroying",
+      "destroyed",
+      "quarantining",
+      "quarantined",
+    ].includes(progress.status) ||
+    !Array.isArray(progress.completedSteps) ||
+    progress.completedSteps.some((step) => typeof step !== "string") ||
+    !Array.isArray(progress.resources) ||
+    progress.resources.length !== 4
+  ) {
+    throw new Error("replica_progress_authority_mismatch");
+  }
+  const expectedNames = new Map<Progress["resources"][number]["type"], string>([
+    ["worker", config.target.workerName],
+    ["d1", config.target.databaseName],
+    ["kv", config.target.kvNamespaceName],
+    ["r2", config.target.iconsBucketName],
+  ]);
+  const seen = new Set<string>();
+  for (const [index, resource] of progress.resources.entries()) {
+    assertExactObjectKeys(
+      resource,
+      resource.id === undefined
+        ? ["type", "name", "state"]
+        : ["type", "name", "id", "state"],
+      `replica_progress_resource_${index}`,
+    );
+    const typedResource = resource as unknown as Progress["resources"][number];
+    if (
+      !expectedNames.has(typedResource.type) ||
+      expectedNames.get(typedResource.type) !== typedResource.name ||
+      seen.has(typedResource.type) ||
+      !["intent-recorded", "present", "presence-unknown", "deleted"].includes(
+        typedResource.state,
+      )
+    ) {
+      throw new Error("replica_progress_resource_mismatch");
+    }
+    if (
+      typedResource.id !== undefined &&
+      ((typedResource.type === "kv" && !KV.test(typedResource.id)) ||
+        (typedResource.type !== "kv" &&
+          typedResource.type !== "r2" &&
+          !UUID.test(typedResource.id)) ||
+        typedResource.type === "r2")
+    ) {
+      throw new Error("replica_progress_resource_id_invalid");
+    }
+    if (
+      (typedResource.type === "d1" &&
+        typedResource.id === config.productionTarget.databaseId) ||
+      (typedResource.type === "kv" &&
+        typedResource.id === config.productionTarget.kvNamespaceId)
+    ) {
+      throw new Error("replica_progress_production_identity_forbidden");
+    }
+    seen.add(typedResource.type);
+  }
+  return progress;
+}
+
+export function assertInventoryDigest(
+  inventory: Inventory,
+  envelope: ReleaseEnvelope,
+): void {
+  if (digestJson(inventory) !== envelope.replica.targetInventoryDigest) {
+    throw new Error("replica_target_inventory_digest_mismatch");
+  }
+}
+
 function validateConfig(
   value: unknown,
   envelope: ReleaseEnvelope,
 ): ReplicaConfig {
-  if (!isRecord(value)) throw new Error("replica_config_invalid");
-  const config = value as ReplicaConfig;
+  assertExactObjectKeys(
+    value,
+    [
+      "kind",
+      "surfaceId",
+      "releaseId",
+      "replicaId",
+      "createdAt",
+      "expiresAt",
+      "productionTarget",
+      "target",
+    ],
+    "replica_config",
+  );
+  const config = value as unknown as ReplicaConfig;
+  assertExactObjectKeys(
+    config.productionTarget,
+    [
+      "accountId",
+      "workerName",
+      "databaseId",
+      "kvNamespaceId",
+      "iconsBucketName",
+      "origin",
+    ],
+    "replica_config_production_target",
+  );
+  assertExactObjectKeys(
+    config.target,
+    [
+      "accountId",
+      "workerName",
+      "databaseName",
+      "kvNamespaceName",
+      "iconsBucketName",
+      "origin",
+    ],
+    "replica_config_target",
+  );
   if (
     config.kind !== "takosumi.store-release-replica-config@v1" ||
     config.surfaceId !== SURFACE_ID ||
@@ -425,6 +741,11 @@ export function scanSanitizedSnapshot(
     if (iconBytes.byteLength === 0 || iconBytes.byteLength > 1024 * 1024) {
       throw new Error(`replica_snapshot_icon_size_invalid:${index}`);
     }
+    assertIconMediaType(
+      iconBytes,
+      String(entry.mediaType),
+      `replica_snapshot_icon_${index}`,
+    );
     const digest = sha256Bytes(iconBytes);
     if (
       digest !== entry.sha256 ||
@@ -564,6 +885,7 @@ main = "artifact/worker.mjs"
 compatibility_date = "2026-06-25"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 workers_dev = true
+preview_urls = false
 
 [vars]
 APP_URL = ${JSON.stringify(config.target.origin.replace(/\/$/u, ""))}
@@ -629,12 +951,14 @@ async function provision(options: {
   evidenceDirectory: string;
   snapshotScan: SanitizedSnapshotScan;
   readbackListingPath: string;
+  cloudflareReadClient: CloudflareReadClient;
 }): Promise<Inventory> {
   const progressPath = join(options.evidenceDirectory, PROGRESS_FILE);
   try {
-    const retained = await readPrivateJson<Progress>(
-      progressPath,
-      options.evidenceDirectory,
+    const retained = validateProgress(
+      await readPrivateJson(progressPath, options.evidenceDirectory),
+      options.envelope,
+      options.config,
     );
     if (!new Set(["destroyed", "quarantined"]).has(retained.status)) {
       throw new Error("replica_partial_progress_requires_quarantine");
@@ -648,6 +972,47 @@ async function provision(options: {
       throw error;
     }
   }
+  const preflightAbsence = {
+    worker:
+      !workerVersionPresent(
+        options.runner,
+        options.sourceCheckout,
+        options.config.target.workerName,
+      ) &&
+      !(await scriptSubdomainPresent(
+        options.cloudflareReadClient,
+        options.config.target.workerName,
+      )),
+    d1:
+      exactD1DatabaseId(
+        options.runner(["d1", "list", "--json"], {
+          cwd: options.sourceCheckout,
+        }),
+        options.config.target.databaseName,
+      ) === null,
+    kv:
+      exactKvNamespaceId(
+        options.runner(["kv", "namespace", "list"], {
+          cwd: options.sourceCheckout,
+        }),
+        options.config.target.kvNamespaceName,
+      ) === null,
+    r2:
+      (
+        await listR2Buckets(
+          options.cloudflareReadClient,
+          options.config.target.iconsBucketName,
+        )
+      ).length === 0,
+  };
+  if (Object.values(preflightAbsence).some((absent) => absent !== true)) {
+    throw new Error("replica_preflight_target_not_absent");
+  }
+  const preflightAbsenceDigest = digestJson({
+    kind: "takosumi.store-replica-preflight-absence@v1",
+    target: options.config.target,
+    ...preflightAbsence,
+  });
   let progress: Progress = {
     kind: "takosumi.store-release-replica-progress@v1",
     status: "provisioning",
@@ -681,6 +1046,7 @@ async function provision(options: {
         state: "intent-recorded",
       },
     ],
+    preflightAbsenceDigest,
     completedSteps: ["all-resource-intents-recorded-before-mutation"],
     productionFallback: false,
   };
@@ -861,6 +1227,13 @@ async function provision(options: {
         envelope: options.envelope,
         manifest: options.manifest,
         candidateChecks: checks,
+        deployTriggers: true,
+        readTopology: () =>
+          readRuntimeTopology(
+            options.cloudflareReadClient,
+            target,
+            "workers-dev",
+          ),
       });
     } catch (error) {
       progress = updateResource(progress, "worker", {
@@ -911,6 +1284,8 @@ async function provision(options: {
         snapshotSqlDigest: options.snapshotScan.sqlDigest,
         snapshotScannerDigest: options.snapshotScan.scannerDigest,
         iconReadbackDigest: digestJson(iconReadback),
+        topologyDigest: digestJson(readback.topology),
+        preflightAbsenceDigest,
       },
       productionFallback: false,
     };
@@ -927,6 +1302,7 @@ async function attestReplicaRemote(options: {
   runner: WranglerRunner;
   snapshotScan: SanitizedSnapshotScan;
   readbackListingPath: string;
+  cloudflareReadClient: CloudflareReadClient;
 }): Promise<JsonObject> {
   const releaseRoot = await mkdtemp(
     join(tmpdir(), "takosumi-store-replica-attest-"),
@@ -1076,6 +1452,11 @@ async function attestReplicaRemote(options: {
       artifactRoot: options.artifactRoot,
       candidateChecks: checks,
     });
+    const topology = await readRuntimeTopology(
+      options.cloudflareReadClient,
+      target,
+      "workers-dev",
+    );
     return {
       versionDigest: digestJson(version),
       deploymentDigest: digestJson(deployments),
@@ -1084,111 +1465,489 @@ async function attestReplicaRemote(options: {
       snapshotSqlDigest: options.snapshotScan.sqlDigest,
       snapshotScannerDigest: options.snapshotScan.scannerDigest,
       iconReadbackDigest: digestJson(iconReadback),
+      topologyDigest: digestJson(topology),
     };
   } finally {
     await rm(releaseRoot, { recursive: true, force: true });
   }
 }
 
-function exactKvNamespaceId(output: string, title: string): string | null {
+export function exactKvNamespaceId(
+  output: string,
+  title: string,
+  sealedId?: string,
+): string | null {
   const parsed = parseJsonOutput(output, "replica_kv_namespace_inventory");
-  const matches: string[] = [];
+  const matches: { title: string; id: string }[] = [];
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       value.forEach(visit);
       return;
     }
     if (!isRecord(value)) return;
-    if (value.title === title && typeof value.id === "string") {
+    if (
+      typeof value.title === "string" &&
+      typeof value.id === "string" &&
+      (value.title === title || value.id === sealedId)
+    ) {
       if (!KV.test(value.id))
         throw new Error("replica_kv_namespace_id_invalid");
-      matches.push(value.id);
+      matches.push({ title: value.title, id: value.id });
     }
     Object.values(value).forEach(visit);
   };
   visit(parsed);
-  const ids = [...new Set(matches)];
-  if (ids.length > 1)
+  const unique = [
+    ...new Map(matches.map((entry) => [entry.id, entry])).values(),
+  ];
+  if (unique.length > 1)
     throw new Error("replica_kv_namespace_inventory_ambiguous");
-  return ids[0] ?? null;
+  const match = unique[0];
+  if (
+    match &&
+    (match.title !== title || (sealedId !== undefined && match.id !== sealedId))
+  ) {
+    throw new Error("replica_kv_namespace_inventory_identity_mismatch");
+  }
+  return match?.id ?? null;
 }
 
-async function destroyExact(options: {
+export function exactD1DatabaseId(
+  output: string,
+  name: string,
+  sealedId?: string,
+): string | null {
+  const parsed = parseJsonOutput(output, "replica_d1_inventory");
+  const matches: { name: string; id: string }[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (!isRecord(value)) return;
+    if (
+      typeof value.name === "string" &&
+      typeof value.uuid === "string" &&
+      (value.name === name || value.uuid === sealedId)
+    ) {
+      if (!UUID.test(value.uuid))
+        throw new Error("replica_d1_inventory_id_invalid");
+      matches.push({ name: value.name, id: value.uuid });
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(parsed);
+  const unique = [
+    ...new Map(matches.map((entry) => [entry.id, entry])).values(),
+  ];
+  if (unique.length > 1) throw new Error("replica_d1_inventory_ambiguous");
+  const match = unique[0];
+  if (
+    match &&
+    (match.name !== name || (sealedId !== undefined && match.id !== sealedId))
+  ) {
+    throw new Error("replica_d1_inventory_identity_mismatch");
+  }
+  return match?.id ?? null;
+}
+
+function inspectRemote(
+  runner: WranglerRunner,
+  args: readonly string[],
+  cwd: string,
+): { readonly status: "ok" | "not-found"; readonly stdout: string } {
+  if (!runner.inspect) throw new Error("replica_remote_inspection_unavailable");
+  const result = runner.inspect(args, { cwd });
+  if (result.status === "failed") {
+    throw new Error("replica_remote_inspection_failed");
+  }
+  return { status: result.status, stdout: result.stdout };
+}
+
+function workerVersionPresent(
+  runner: WranglerRunner,
+  cwd: string,
+  name: string,
+  expectedVersionId?: string,
+): boolean {
+  const result = inspectRemote(
+    runner,
+    ["versions", "list", "--name", name, "--json"],
+    cwd,
+  );
+  if (result.status === "not-found") return false;
+  const parsed = parseJsonOutput(result.stdout, "replica_worker_inventory");
+  if (!Array.isArray(parsed))
+    throw new Error("replica_worker_inventory_invalid");
+  if (parsed.length === 0) return false;
+  if (
+    expectedVersionId &&
+    !parsed.some((entry) => isRecord(entry) && entry.id === expectedVersionId)
+  ) {
+    throw new Error("replica_worker_inventory_version_mismatch");
+  }
+  return true;
+}
+
+async function scriptSubdomainPresent(
+  client: CloudflareReadClient,
+  workerName: string,
+): Promise<boolean> {
+  const response = await client.get(
+    `/accounts/${encodeURIComponent(client.accountId)}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
+  );
+  if (response.status === "not-found") return false;
+  if (!isRecord(response.result) || response.result.enabled !== true) {
+    throw new Error("replica_worker_subdomain_ownership_mismatch");
+  }
+  return true;
+}
+
+async function listR2Buckets(
+  client: CloudflareReadClient,
+  name: string,
+): Promise<JsonObject[]> {
+  const response = await client.get(
+    `/accounts/${encodeURIComponent(client.accountId)}/r2/buckets`,
+    { name_contains: name, per_page: "1000" },
+  );
+  if (response.status !== "ok" || !isRecord(response.result)) {
+    throw new Error("replica_r2_bucket_inventory_missing");
+  }
+  const buckets = response.result.buckets;
+  if (!Array.isArray(buckets))
+    throw new Error("replica_r2_bucket_inventory_invalid");
+  const matches = buckets.filter(
+    (entry) => isRecord(entry) && entry.name === name,
+  ) as JsonObject[];
+  if (matches.length > 1)
+    throw new Error("replica_r2_bucket_inventory_ambiguous");
+  return matches;
+}
+
+async function listAllR2Objects(
+  client: CloudflareReadClient,
+  bucketName: string,
+): Promise<JsonObject[]> {
+  const objects: JsonObject[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const response = await client.get(
+      `/accounts/${encodeURIComponent(client.accountId)}/r2/buckets/${encodeURIComponent(bucketName)}/objects`,
+      { per_page: "1000", ...(cursor ? { cursor } : {}) },
+    );
+    if (response.status === "not-found") return [];
+    if (response.status !== "ok" || !isRecord(response.result)) {
+      throw new Error("replica_r2_object_inventory_missing");
+    }
+    const pageObjects = response.result.objects;
+    if (!Array.isArray(pageObjects)) {
+      throw new Error("replica_r2_object_inventory_invalid");
+    }
+    for (const entry of pageObjects) {
+      if (!isRecord(entry) || typeof entry.key !== "string") {
+        throw new Error("replica_r2_object_inventory_invalid");
+      }
+      objects.push(entry);
+    }
+    const next = response.result.cursor;
+    if (typeof next !== "string" || next === "") return objects;
+    cursor = next;
+  }
+  throw new Error("replica_r2_object_inventory_page_limit");
+}
+
+export async function destroyExact(options: {
   inventory: Inventory | Progress;
   runner: WranglerRunner;
   cwd: string;
   progressPath: string;
   action: "destroy" | "quarantine";
+  snapshotScan: SanitizedSnapshotScan;
+  cloudflareReadClient: CloudflareReadClient;
 }): Promise<void> {
   const target = options.inventory.target;
-  const resources =
-    "resources" in options.inventory
-      ? options.inventory.resources
-      : [
-          {
-            type: "worker",
-            name: target.workerName,
-            id: (target as Inventory["target"]).versionId,
-            state: "present",
-          },
-          {
-            type: "d1",
-            name: target.databaseName,
-            id: (target as Inventory["target"]).databaseId,
-            state: "present",
-          },
-          {
-            type: "kv",
-            name: target.kvNamespaceName,
-            id: (target as Inventory["target"]).kvNamespaceId,
-            state: "present",
-          },
-          { type: "r2", name: target.iconsBucketName, state: "present" },
-        ];
-  let progress: Progress = {
-    kind: "takosumi.store-release-replica-progress@v1",
-    status: options.action === "destroy" ? "destroying" : "quarantining",
-    surfaceId: SURFACE_ID,
-    releaseId: options.inventory.releaseId,
-    replicaId: options.inventory.replicaId,
-    accountId: options.inventory.accountId,
-    target,
-    artifactDigests: options.inventory.artifactDigests,
-    createdAt: options.inventory.createdAt,
-    expiresAt: options.inventory.expiresAt,
-    resources: resources as Progress["resources"],
-    completedSteps: ["exact-cleanup-started-from-retained-inventory"],
-    productionFallback: false,
-  };
+  const retainedProgress =
+    options.inventory.kind === "takosumi.store-release-replica-progress@v1"
+      ? (options.inventory as Progress)
+      : null;
+  const desiredStatus =
+    options.action === "destroy" ? "destroying" : "quarantining";
+  const terminalStatus =
+    options.action === "destroy" ? "destroyed" : "quarantined";
+  if (
+    retainedProgress &&
+    ((["destroying", "destroyed"].includes(retainedProgress.status) &&
+      options.action !== "destroy") ||
+      (["quarantining", "quarantined"].includes(retainedProgress.status) &&
+        options.action !== "quarantine"))
+  ) {
+    throw new Error("replica_cleanup_action_changed");
+  }
+  const resources = retainedProgress
+    ? retainedProgress.resources
+    : ([
+        {
+          type: "worker",
+          name: target.workerName,
+          id: (target as Inventory["target"]).versionId,
+          state: "present",
+        },
+        {
+          type: "d1",
+          name: target.databaseName,
+          id: (target as Inventory["target"]).databaseId,
+          state: "present",
+        },
+        {
+          type: "kv",
+          name: target.kvNamespaceName,
+          id: (target as Inventory["target"]).kvNamespaceId,
+          state: "present",
+        },
+        { type: "r2", name: target.iconsBucketName, state: "present" },
+      ] as Progress["resources"]);
+  let progress: Progress = retainedProgress
+    ? {
+        ...retainedProgress,
+        status:
+          retainedProgress.status === terminalStatus
+            ? terminalStatus
+            : desiredStatus,
+        completedSteps: retainedProgress.completedSteps.includes(
+          "exact-cleanup-started-from-retained-authority",
+        )
+          ? retainedProgress.completedSteps
+          : [
+              ...retainedProgress.completedSteps,
+              "exact-cleanup-started-from-retained-authority",
+            ],
+      }
+    : {
+        kind: "takosumi.store-release-replica-progress@v1",
+        status: desiredStatus,
+        surfaceId: SURFACE_ID,
+        releaseId: options.inventory.releaseId,
+        replicaId: options.inventory.replicaId,
+        accountId: options.inventory.accountId,
+        target,
+        artifactDigests: options.inventory.artifactDigests,
+        createdAt: options.inventory.createdAt,
+        expiresAt: options.inventory.expiresAt,
+        resources,
+        preflightAbsenceDigest: String(
+          (options.inventory as Inventory).remoteEvidence
+            .preflightAbsenceDigest,
+        ),
+        completedSteps: ["exact-cleanup-started-from-retained-authority"],
+        productionFallback: false,
+      };
   await writeProgress(options.progressPath, progress);
+  const preflightWorker = progress.resources.find(
+    (resource) => resource.type === "worker",
+  )!;
+  const preflightWorkerPresent = workerVersionPresent(
+    options.runner,
+    options.cwd,
+    preflightWorker.name,
+    preflightWorker.id,
+  );
+  if (
+    preflightWorkerPresent !==
+    (await scriptSubdomainPresent(
+      options.cloudflareReadClient,
+      preflightWorker.name,
+    ))
+  ) {
+    throw new Error("replica_worker_inventory_topology_mismatch");
+  }
+  const preflightD1 = progress.resources.find(
+    (resource) => resource.type === "d1",
+  )!;
+  const preflightD1Id = exactD1DatabaseId(
+    options.runner(["d1", "list", "--json"], { cwd: options.cwd }),
+    preflightD1.name,
+    preflightD1.id,
+  );
+  if (preflightD1Id && preflightD1.id && preflightD1Id !== preflightD1.id) {
+    throw new Error("replica_d1_inventory_id_mismatch");
+  }
+  const preflightKv = progress.resources.find(
+    (resource) => resource.type === "kv",
+  )!;
+  const preflightKvId = exactKvNamespaceId(
+    options.runner(["kv", "namespace", "list"], { cwd: options.cwd }),
+    preflightKv.name,
+    preflightKv.id,
+  );
+  if (preflightKvId && preflightKv.id && preflightKvId !== preflightKv.id) {
+    throw new Error("replica_kv_inventory_id_mismatch");
+  }
+  const preflightKvKeys = preflightKvId
+    ? parseJsonOutput(
+        options.runner(
+          ["kv", "key", "list", "--namespace-id", preflightKvId, "--remote"],
+          { cwd: options.cwd },
+        ),
+        "replica_kv_key_inventory",
+      )
+    : [];
+  if (!Array.isArray(preflightKvKeys) || preflightKvKeys.length !== 0) {
+    throw new Error("replica_kv_key_inventory_not_empty");
+  }
+  const preflightR2 = progress.resources.find(
+    (resource) => resource.type === "r2",
+  )!;
+  const preflightR2Present =
+    (await listR2Buckets(options.cloudflareReadClient, preflightR2.name))
+      .length === 1;
+  const preflightObjects = preflightR2Present
+    ? await listAllR2Objects(options.cloudflareReadClient, preflightR2.name)
+    : [];
+  const expectedObjectKeys = options.snapshotScan.icons
+    .map((icon) => icon.key)
+    .sort();
+  if (
+    preflightR2Present &&
+    canonicalJson(preflightObjects.map((entry) => String(entry.key)).sort()) !==
+      canonicalJson(expectedObjectKeys)
+  ) {
+    throw new Error("replica_r2_object_inventory_mismatch");
+  }
+  if (preflightR2Present) {
+    const readbackRoot = await mkdtemp(
+      join(tmpdir(), "takosumi-store-replica-cleanup-preflight-"),
+    );
+    await chmod(readbackRoot, 0o700);
+    try {
+      for (const [index, icon] of options.snapshotScan.icons.entries()) {
+        const path = join(readbackRoot, `${index}.readback`);
+        const result = inspectRemote(
+          options.runner,
+          [
+            "r2",
+            "object",
+            "get",
+            `${preflightR2.name}/${icon.key}`,
+            "--remote",
+            "--file",
+            path,
+          ],
+          options.cwd,
+        );
+        if (
+          result.status !== "ok" ||
+          sha256Bytes(await readFile(path)) !== icon.sha256
+        ) {
+          throw new Error("replica_r2_object_ownership_mismatch");
+        }
+      }
+    } finally {
+      await rm(readbackRoot, { recursive: true, force: true });
+    }
+  }
+  const cleanupPreflightDigest = digestJson({
+    kind: "takosumi.store-replica-cleanup-preflight@v1",
+    worker: { name: preflightWorker.name, present: preflightWorkerPresent },
+    d1: { name: preflightD1.name, id: preflightD1Id },
+    kv: {
+      name: preflightKv.name,
+      id: preflightKvId,
+      keyInventoryDigest: digestJson(preflightKvKeys),
+    },
+    r2: {
+      name: preflightR2.name,
+      present: preflightR2Present,
+      objects: preflightObjects,
+    },
+  });
+  if (
+    !progress.completedSteps.includes(
+      `cleanup-preflight:${cleanupPreflightDigest}`,
+    )
+  ) {
+    progress = {
+      ...progress,
+      completedSteps: [
+        ...progress.completedSteps,
+        `cleanup-preflight:${cleanupPreflightDigest}`,
+      ],
+    };
+    await writeProgress(options.progressPath, progress);
+  }
   const worker = progress.resources.find(
     (resource) => resource.type === "worker",
   );
-  if (worker && worker.state !== "deleted") {
-    options.runner(["delete", worker!.name, "--force"], { cwd: options.cwd });
+  if (worker) {
+    const present = workerVersionPresent(
+      options.runner,
+      options.cwd,
+      worker.name,
+      worker.id,
+    );
+    const subdomainPresent = await scriptSubdomainPresent(
+      options.cloudflareReadClient,
+      worker.name,
+    );
+    if (present !== subdomainPresent) {
+      throw new Error("replica_worker_inventory_topology_mismatch");
+    }
+    if (present) {
+      options.runner(["delete", worker.name, "--force"], { cwd: options.cwd });
+    }
+    if (workerVersionPresent(options.runner, options.cwd, worker.name)) {
+      throw new Error("replica_worker_post_delete_present");
+    }
+    if (
+      await scriptSubdomainPresent(options.cloudflareReadClient, worker.name)
+    ) {
+      throw new Error("replica_worker_subdomain_post_delete_present");
+    }
     progress = updateResource(progress, "worker", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
   }
   const d1 = progress.resources.find((resource) => resource.type === "d1");
-  if (d1 && d1.state !== "deleted") {
-    options.runner(["d1", "delete", d1!.name, "--skip-confirmation"], {
-      cwd: options.cwd,
-    });
+  if (d1) {
+    const found = exactD1DatabaseId(
+      options.runner(["d1", "list", "--json"], { cwd: options.cwd }),
+      d1.name,
+      d1.id,
+    );
+    if (found && d1.id && found !== d1.id) {
+      throw new Error("replica_d1_inventory_id_mismatch");
+    }
+    if (found) {
+      progress = updateResource(progress, "d1", {
+        id: found,
+        state: "present",
+      });
+      await writeProgress(options.progressPath, progress);
+      options.runner(["d1", "delete", d1.name, "--skip-confirmation"], {
+        cwd: options.cwd,
+      });
+    }
+    if (
+      exactD1DatabaseId(
+        options.runner(["d1", "list", "--json"], { cwd: options.cwd }),
+        d1.name,
+        d1.id,
+      )
+    ) {
+      throw new Error("replica_d1_post_delete_present");
+    }
     progress = updateResource(progress, "d1", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
   }
   const kv = progress.resources.find((resource) => resource.type === "kv");
-  if (kv && kv.state !== "deleted") {
-    const kvId =
-      kv.state === "present" && kv.id
-        ? kv.id
-        : exactKvNamespaceId(
-            options.runner(["kv", "namespace", "list"], {
-              cwd: options.cwd,
-            }),
-            kv.name,
-          );
+  if (kv) {
+    const kvId = exactKvNamespaceId(
+      options.runner(["kv", "namespace", "list"], { cwd: options.cwd }),
+      kv.name,
+      kv.id,
+    );
+    if (kvId && kv.id && kvId !== kv.id) {
+      throw new Error("replica_kv_inventory_id_mismatch");
+    }
     if (kvId) {
+      progress = updateResource(progress, "kv", { id: kvId, state: "present" });
+      await writeProgress(options.progressPath, progress);
       options.runner(
         [
           "kv",
@@ -1201,17 +1960,106 @@ async function destroyExact(options: {
         { cwd: options.cwd },
       );
     }
+    if (
+      exactKvNamespaceId(
+        options.runner(["kv", "namespace", "list"], { cwd: options.cwd }),
+        kv.name,
+        kv.id,
+      )
+    ) {
+      throw new Error("replica_kv_post_delete_present");
+    }
     progress = updateResource(progress, "kv", { state: "deleted" });
     await writeProgress(options.progressPath, progress);
   }
   const r2 = progress.resources.find((resource) => resource.type === "r2");
-  if (r2 && r2.state !== "deleted") {
-    options.runner(["r2", "bucket", "delete", r2!.name], { cwd: options.cwd });
+  if (r2) {
+    const present =
+      (await listR2Buckets(options.cloudflareReadClient, r2.name)).length === 1;
+    if (present) {
+      const objects = await listAllR2Objects(
+        options.cloudflareReadClient,
+        r2.name,
+      );
+      const expectedKeys = options.snapshotScan.icons
+        .map((icon) => icon.key)
+        .sort();
+      const actualKeys = objects.map((entry) => String(entry.key)).sort();
+      if (canonicalJson(actualKeys) !== canonicalJson(expectedKeys)) {
+        throw new Error("replica_r2_object_inventory_mismatch");
+      }
+      const readbackRoot = await mkdtemp(
+        join(tmpdir(), "takosumi-store-replica-cleanup-"),
+      );
+      await chmod(readbackRoot, 0o700);
+      try {
+        for (const [index, icon] of options.snapshotScan.icons.entries()) {
+          const before = join(readbackRoot, `${index}.before`);
+          const beforeResult = inspectRemote(
+            options.runner,
+            [
+              "r2",
+              "object",
+              "get",
+              `${r2.name}/${icon.key}`,
+              "--remote",
+              "--file",
+              before,
+            ],
+            options.cwd,
+          );
+          if (beforeResult.status === "ok") {
+            if (sha256Bytes(await readFile(before)) !== icon.sha256) {
+              throw new Error("replica_r2_object_ownership_mismatch");
+            }
+            options.runner(
+              ["r2", "object", "delete", `${r2.name}/${icon.key}`, "--remote"],
+              { cwd: options.cwd },
+            );
+          }
+          const after = join(readbackRoot, `${index}.after`);
+          if (
+            inspectRemote(
+              options.runner,
+              [
+                "r2",
+                "object",
+                "get",
+                `${r2.name}/${icon.key}`,
+                "--remote",
+                "--file",
+                after,
+              ],
+              options.cwd,
+            ).status !== "not-found"
+          ) {
+            throw new Error("replica_r2_object_post_delete_present");
+          }
+        }
+        if (
+          (await listAllR2Objects(options.cloudflareReadClient, r2.name))
+            .length !== 0
+        ) {
+          throw new Error("replica_r2_object_inventory_post_delete_present");
+        }
+      } finally {
+        await rm(readbackRoot, { recursive: true, force: true });
+      }
+      options.runner(["r2", "bucket", "delete", r2.name], {
+        cwd: options.cwd,
+      });
+    }
+    if (
+      (await listR2Buckets(options.cloudflareReadClient, r2.name)).length !== 0
+    ) {
+      throw new Error("replica_r2_post_delete_present");
+    }
     progress = updateResource(progress, "r2", { state: "deleted" });
+    await writeProgress(options.progressPath, progress);
   }
   progress = {
     ...progress,
-    status: options.action === "destroy" ? "destroyed" : "quarantined",
+    status: terminalStatus,
   };
   await writeProgress(options.progressPath, progress);
 }
@@ -1279,6 +2127,16 @@ export async function runStoreReplicaAdapter(options: {
   ) {
     throw new Error("replica_migration_plan_digest_mismatch");
   }
+  if (
+    digestJson(artifact.manifest.toolchain) !==
+    envelope.candidate.toolchainDigest
+  ) {
+    throw new Error("replica_toolchain_digest_mismatch");
+  }
+  const toolchain = await verifyActualToolchain(
+    parent.sourceCheckout,
+    artifact.manifest,
+  );
   const plan = {
     kind: "takosumi.store-release-replica-plan@v1",
     surfaceId: SURFACE_ID,
@@ -1307,12 +2165,8 @@ export async function runStoreReplicaAdapter(options: {
     "TAKOSUMI_RELEASE_REPLICA_API_TOKEN_FILE",
     config.target.accountId,
   );
-  const wranglerEntrypoint = await realpath(
-    resolve(
-      parent.sourceCheckout,
-      "node_modules/wrangler/wrangler-dist/cli.js",
-    ),
-  );
+  const cloudflareReadClient = createCloudflareReadClient(credentials);
+  const wranglerEntrypoint = toolchain.wranglerEntrypoint;
   const runner =
     options.runner ??
     createWranglerRunner({
@@ -1331,6 +2185,7 @@ export async function runStoreReplicaAdapter(options: {
       evidenceDirectory,
       snapshotScan,
       readbackListingPath: policy.policy.production.readbackListingPath,
+      cloudflareReadClient,
     });
     const bytes = await writePrivateJson(
       join(evidenceDirectory, EVIDENCE_FILES.provision),
@@ -1341,10 +2196,12 @@ export async function runStoreReplicaAdapter(options: {
   const inventoryPath = join(evidenceDirectory, EVIDENCE_FILES.provision);
   const progressPath = join(evidenceDirectory, PROGRESS_FILE);
   if (action === "cleanup-plan") {
-    const inventory = await readPrivateJson<Inventory>(
-      inventoryPath,
-      evidenceDirectory,
+    const inventory = validateInventory(
+      await readPrivateJson(inventoryPath, evidenceDirectory),
+      envelope,
+      config,
     );
+    assertInventoryDigest(inventory, envelope);
     const cleanup = {
       kind: "takosumi.store-release-replica-cleanup-plan@v1",
       surfaceId: SURFACE_ID,
@@ -1367,10 +2224,12 @@ export async function runStoreReplicaAdapter(options: {
     return actionResult(action, envelope, bytes, digestJson(inventory));
   }
   if (action === "attest") {
-    const inventory = await readPrivateJson<Inventory>(
-      inventoryPath,
-      evidenceDirectory,
+    const inventory = validateInventory(
+      await readPrivateJson(inventoryPath, evidenceDirectory),
+      envelope,
+      config,
     );
+    assertInventoryDigest(inventory, envelope);
     const liveRemoteEvidence = await attestReplicaRemote({
       envelope,
       inventory,
@@ -1379,6 +2238,7 @@ export async function runStoreReplicaAdapter(options: {
       runner,
       snapshotScan,
       readbackListingPath: policy.policy.production.readbackListingPath,
+      cloudflareReadClient,
     });
     if (
       canonicalJson(liveRemoteEvidence) !==
@@ -1387,9 +2247,6 @@ export async function runStoreReplicaAdapter(options: {
       throw new Error("replica_remote_inventory_readback_mismatch");
     }
     const targetInventoryDigest = digestJson(inventory);
-    if (targetInventoryDigest !== envelope.replica.targetInventoryDigest) {
-      throw new Error("replica_target_inventory_digest_mismatch");
-    }
     const attestation = {
       kind: "takos.release-safety-replica-attestation@v1",
       status: "verified",
@@ -1430,24 +2287,43 @@ export async function runStoreReplicaAdapter(options: {
     }
     return actionResult(action, envelope, bytes, targetInventoryDigest);
   }
-  let recoverable: Inventory | Progress;
+  let inventory: Inventory | null = null;
   try {
-    recoverable = await readPrivateJson<Inventory>(
-      inventoryPath,
-      evidenceDirectory,
+    inventory = validateInventory(
+      await readPrivateJson(inventoryPath, evidenceDirectory),
+      envelope,
+      config,
     );
-  } catch {
-    recoverable = await readPrivateJson<Progress>(
-      progressPath,
-      evidenceDirectory,
-    );
+    assertInventoryDigest(inventory, envelope);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT")) {
+      throw error;
+    }
   }
+  let progress: Progress | null = null;
+  try {
+    progress = validateProgress(
+      await readPrivateJson(progressPath, evidenceDirectory),
+      envelope,
+      config,
+    );
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT")) {
+      throw error;
+    }
+  }
+  if (!inventory && !progress) {
+    throw new Error("replica_cleanup_authority_missing");
+  }
+  const recoverable = progress ?? inventory!;
   await destroyExact({
     inventory: recoverable,
     runner,
     cwd: parent.sourceCheckout,
     progressPath,
     action,
+    snapshotScan,
+    cloudflareReadClient,
   });
   const terminal = {
     kind: `takosumi.store-release-replica-${action}@v1`,
@@ -1459,11 +2335,39 @@ export async function runStoreReplicaAdapter(options: {
     exactTarget: recoverable.target,
     productionFallback: false,
   };
-  const bytes = await writePrivateJson(
-    join(evidenceDirectory, EVIDENCE_FILES[action]),
-    terminal,
+  const terminalPath = join(evidenceDirectory, EVIDENCE_FILES[action]);
+  let bytes: Uint8Array;
+  try {
+    bytes = await writePrivateJson(terminalPath, terminal);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("EEXIST")) {
+      throw error;
+    }
+    const retained = await readPrivateFile(terminalPath, {
+      expectedDirectory: evidenceDirectory,
+    });
+    const retainedValue = JSON.parse(retained.toString("utf8"));
+    if (
+      !isRecord(retainedValue) ||
+      retainedValue.kind !== terminal.kind ||
+      retainedValue.surfaceId !== SURFACE_ID ||
+      retainedValue.releaseId !== envelope.releaseId ||
+      retainedValue.replicaId !== config.replicaId ||
+      retainedValue.status !== terminal.status ||
+      canonicalJson(retainedValue.exactTarget) !==
+        canonicalJson(recoverable.target) ||
+      retainedValue.productionFallback !== false
+    ) {
+      throw new Error("replica_cleanup_terminal_immutable_conflict");
+    }
+    bytes = retained;
+  }
+  return actionResult(
+    action,
+    envelope,
+    bytes,
+    digestJson(JSON.parse(Buffer.from(bytes).toString("utf8"))),
   );
-  return actionResult(action, envelope, bytes, digestJson(terminal));
 }
 
 export async function mainReplicaAdapter(wrapperPath: string): Promise<void> {

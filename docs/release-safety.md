@@ -58,6 +58,12 @@ an external `0700` directory. The promotion digest order is Worker, assets,
 migrations. Staging, replica, and production use those same bytes; only the
 environment config digest and target fingerprint differ.
 
+Before any remote mutation, adapters recompute the complete artifact filesystem
+inventory, all file and component-set digests, SBOM/provenance digests, and the
+aggregate artifact digest. They also verify the actual Bun executable/version,
+`bun.lock`, Wrangler bundled entrypoint, package metadata, and version against
+the candidate; manifest text alone is never toolchain evidence.
+
 ## Fixed staging and production
 
 The release controller invokes only these owner-local entrypoints:
@@ -82,10 +88,12 @@ Staging and production then:
 5. re-read and fence the deployment head before promoting only the new Version
    at 100%;
 6. read back the exact Version and deployment;
-7. prove health, readiness, TCS ServerInfo, canonical listing, same-origin
+7. read the Cloudflare custom-domain association before and after promotion and
+   prove the exact hostname remains owned by the exact Worker service;
+8. prove health, readiness, TCS ServerInfo, canonical listing, same-origin
    digest-addressed `/icons/<sha256>` bytes, exact read and preflight CORS,
    hashed SPA asset, SPA fallback, and JSON API 404 fallback;
-8. retain a create-only attestation tied to the operation journal.
+9. retain a create-only attestation tied to the operation journal.
 
 The operation journal advances atomically through `intent-recorded`,
 `schema-applied`, `version-uploaded`, `deployed`, and `verified`. A failure
@@ -115,15 +123,22 @@ production, and `productionFallback` is always false. The snapshot bundle
 contains digest-bound SQL plus the bounded icon bytes referenced by its
 canonical listing. It is scanned for production target identities and
 credential-like literals, email/IP/JWT/cookie-like values, and any mutation
-outside the public `listings` table; it never fetches production D1/R2 data.
+outside the public `listings` table. Icon declarations must match PNG, JPEG, or
+WebP signatures or a fail-closed safe-SVG profile. It never fetches production
+D1/R2 data.
 
 Provisioning restores only that local sanitized bundle, uploads the same sealed
 Worker/assets, and proves the controller's four fixed replica checks. The
 attestation binds the exact inventory, scanner proof, failure rehearsal, and
 data evidence. A lost create response is retained as `presence-unknown`, and a
 non-terminal progress record blocks re-provisioning until quarantine. Cleanup
-uses the unique replica-bound names; KV is discovered by exact title and only
-a single exact namespace ID can be deleted. Every terminal step is retained.
+uses the unique replica-bound names and exact retained IDs; KV is discovered by
+exact title and only a single exact namespace ID can be deleted. Before
+provisioning, Worker, D1, KV, and R2 absence is digest-bound. The replica enables
+only its exact derived `workers.dev` origin with preview URLs disabled. Cleanup
+requires the exact sanitized R2 object set and bytes, removes objects before the
+bucket, resumes retained progress monotonically, and proves post-delete absence
+for every resource before terminal evidence. Every terminal step is retained.
 
 Catalog seeding is intentionally absent. `scripts/load-official-listings.ts`
 resolves mutable source metadata and is a separate content-authority concern,

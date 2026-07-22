@@ -13,7 +13,7 @@
     "build": "bunx vite build --config web/vite.config.ts",
     "deploy:self-host": "bun scripts/self-host-deploy.ts",
     "release:candidate": "bun scripts/store-release-candidate.ts",
-    "release:check": "bunx tsc --noEmit && bun test test/release-system.test.ts test/health-routes.test.ts",
+    "release:check": "bunx tsc --noEmit && bun test test/release-*.test.ts test/health-routes.test.ts",
     "lint": "bun run check",
     "fmt": "bunx prettier --write spec src web test scripts",
     "fmt:check": "bunx prettier --check spec src web test scripts",

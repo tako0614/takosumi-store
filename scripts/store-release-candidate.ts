@@ -202,7 +202,10 @@ async function makeArtifact(options: {
   build: { workerPath: string; assetsPath: string };
   source: { commit: string; builtAt: string; treeDigest: string };
   bunVersion: string;
+  bunExecutableDigest: string;
   wranglerVersion: string;
+  wranglerEntrypointDigest: string;
+  wranglerPackageJsonDigest: string;
 }): Promise<StoreArtifactManifest> {
   await mkdir(join(options.destination, "worker"), {
     recursive: true,
@@ -369,7 +372,10 @@ async function makeArtifact(options: {
     digests,
     toolchain: {
       bun: options.bunVersion,
+      bunExecutableDigest: options.bunExecutableDigest,
       wrangler: options.wranglerVersion,
+      wranglerEntrypointDigest: options.wranglerEntrypointDigest,
+      wranglerPackageJsonDigest: options.wranglerPackageJsonDigest,
       lockfileDigest,
     },
   };
@@ -437,6 +443,7 @@ export async function buildStoreReleaseCandidate(options: {
     const second = await buildOnce(root, secondRoot);
     await assertReproducibleBuild(root, first, second);
     const bunVersion = run(process.execPath, ["--version"], root);
+    const bunExecutableDigest = sha256Bytes(await readFile(process.execPath));
     const wranglerEntrypoint = resolve(
       root,
       "node_modules/wrangler/wrangler-dist/cli.js",
@@ -446,6 +453,12 @@ export async function buildStoreReleaseCandidate(options: {
       [wranglerEntrypoint, "--version"],
       root,
     );
+    const wranglerEntrypointDigest = sha256Bytes(
+      await readFile(wranglerEntrypoint),
+    );
+    const wranglerPackageJsonDigest = sha256Bytes(
+      await readFile(join(root, "node_modules/wrangler/package.json")),
+    );
     const artifactRoot = join(evidenceDirectory, ARTIFACT_DIRECTORY);
     await mkdir(artifactRoot, { mode: 0o700 });
     const manifest = await makeArtifact({
@@ -454,7 +467,10 @@ export async function buildStoreReleaseCandidate(options: {
       build: first,
       source,
       bunVersion,
+      bunExecutableDigest,
       wranglerVersion,
+      wranglerEntrypointDigest,
+      wranglerPackageJsonDigest,
     });
     await hardenArtifactTree(artifactRoot);
     const artifactManifestPath = join(artifactRoot, ARTIFACT_MANIFEST_FILE);

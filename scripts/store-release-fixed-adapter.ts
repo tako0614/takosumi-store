@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   PRODUCTION_ATTESTATION_FILE,
@@ -27,13 +27,16 @@ import {
   parseJsonOutput,
   parseVersionId,
   readCredentialFiles,
+  createCloudflareReadClient,
   readPolicy,
+  readRuntimeTopology,
   runLiveChecks,
   secureResolveInside,
   sha256Bytes,
   targetFingerprint,
   validateEnvelope,
   validateRealizedConfig,
+  verifyActualToolchain,
   verifyArtifact,
   verifySourceAuthority,
   writePrivateJson,
@@ -62,6 +65,20 @@ interface DeploymentReadback {
   readonly migrations: string;
   readonly migrationLineage: unknown;
   readonly healthChecks: readonly HealthCheck[];
+  readonly topology: JsonObject;
+}
+
+const OPERATION_PHASES = [
+  "intent-recorded",
+  "schema-applied",
+  "version-uploaded",
+  "deployed",
+  "verified",
+] as const;
+type OperationPhase = (typeof OPERATION_PHASES)[number];
+
+function operationPhaseRank(value: string): number {
+  return OPERATION_PHASES.indexOf(value as OperationPhase);
 }
 
 export interface AdapterOptions {
@@ -300,6 +317,8 @@ export async function deploySealedStore(options: {
   readonly envelope: ReleaseEnvelope;
   readonly manifest: StoreArtifactManifest;
   readonly candidateChecks: ReleaseEnvelope["candidate"]["healthChecks"];
+  readonly deployTriggers?: boolean;
+  readonly readTopology: () => Promise<JsonObject>;
   readonly journal?: {
     readonly path: string;
     readonly environment: string;
@@ -307,6 +326,9 @@ export async function deploySealedStore(options: {
   };
 }): Promise<DeploymentReadback> {
   const config = "wrangler.toml";
+  const preTopology = options.deployTriggers
+    ? null
+    : await options.readTopology();
   const deploymentStatusArgs = [
     "deployments",
     "status",
@@ -376,18 +398,18 @@ export async function deploySealedStore(options: {
       ) {
         throw new Error("release_operation_journal_authority_mismatch");
       }
-      if (
-        ![
-          "intent-recorded",
-          "schema-applied",
-          "version-uploaded",
-          "deployed",
-          "verified",
-        ].includes(String(journal.phase))
-      ) {
+      if (operationPhaseRank(String(journal.phase)) < 0) {
         throw new Error("release_operation_journal_phase_invalid");
       }
       const phase = String(journal.phase);
+      const versionRequired = operationPhaseRank(phase) >= 2;
+      if (
+        versionRequired !== (typeof journal.versionId === "string") ||
+        (versionRequired &&
+          !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(String(journal.versionId)))
+      ) {
+        throw new Error("release_operation_journal_version_invalid");
+      }
       if (
         ["intent-recorded", "schema-applied", "version-uploaded"].includes(
           phase,
@@ -421,10 +443,34 @@ export async function deploySealedStore(options: {
     }
   }
   const retainPhase = async (
-    phase: string,
+    phase: OperationPhase,
     versionId: string | null,
   ): Promise<void> => {
     if (!options.journal || !journalAuthority) return;
+    const currentPhase = String(journal?.phase ?? "");
+    const currentRank = operationPhaseRank(currentPhase);
+    const requestedRank = operationPhaseRank(phase);
+    if (currentRank < 0 || requestedRank < 0) {
+      throw new Error("release_operation_journal_phase_invalid");
+    }
+    const currentVersion =
+      typeof journal?.versionId === "string" ? journal.versionId : null;
+    if (currentVersion && versionId && currentVersion !== versionId) {
+      throw new Error("release_operation_journal_version_changed");
+    }
+    if (requestedRank < currentRank) return;
+    if (requestedRank === currentRank) {
+      if (requestedRank >= 2 && currentVersion !== versionId) {
+        throw new Error("release_operation_journal_version_mismatch");
+      }
+      return;
+    }
+    if (requestedRank !== currentRank + 1) {
+      throw new Error("release_operation_journal_phase_skip");
+    }
+    if (requestedRank >= 2 !== (typeof versionId === "string")) {
+      throw new Error("release_operation_journal_version_invalid");
+    }
     journal = {
       ...journalAuthority,
       phase,
@@ -562,6 +608,26 @@ export async function deploySealedStore(options: {
   if (!deploymentHasExactVersionAtFullTraffic(deployments, versionId)) {
     throw new Error("worker_deployment_readback_mismatch");
   }
+  if (options.deployTriggers) {
+    options.runner(
+      [
+        "triggers",
+        "deploy",
+        "--name",
+        options.target.workerName,
+        "--config",
+        config,
+      ],
+      { cwd: options.cwd },
+    );
+  }
+  const postTopology = await options.readTopology();
+  if (
+    preTopology &&
+    canonicalJson(preTopology) !== canonicalJson(postTopology)
+  ) {
+    throw new Error("runtime_topology_changed_during_release");
+  }
   const healthChecks = await runLiveChecks({
     target: options.target,
     manifest: options.manifest,
@@ -576,6 +642,7 @@ export async function deploySealedStore(options: {
     migrations,
     migrationLineage,
     healthChecks,
+    topology: postTopology,
   };
 }
 
@@ -632,6 +699,10 @@ export async function runStoreReleaseAdapter(
   ) {
     throw new Error("release_toolchain_digest_mismatch");
   }
+  const toolchain = await verifyActualToolchain(
+    sourceCheckout,
+    artifact.manifest,
+  );
   const credentials =
     options.environment === "production"
       ? await readCredentialFiles(
@@ -644,9 +715,8 @@ export async function runStoreReleaseAdapter(
           "TAKOSUMI_RELEASE_STAGING_API_TOKEN_FILE",
           target.accountId,
         );
-  const wranglerEntrypoint = await realpath(
-    resolve(sourceCheckout, "node_modules/wrangler/wrangler-dist/cli.js"),
-  );
+  const cloudflareReadClient = createCloudflareReadClient(credentials);
+  const wranglerEntrypoint = toolchain.wranglerEntrypoint;
   const releaseRoot = await mkdtemp(
     join(tmpdir(), `takosumi-store-${options.environment}-release-`),
   );
@@ -682,6 +752,8 @@ export async function runStoreReleaseAdapter(
       envelope,
       manifest: artifact.manifest,
       candidateChecks,
+      readTopology: () =>
+        readRuntimeTopology(cloudflareReadClient, target, "custom-domain"),
       journal: {
         path: operationJournalPath,
         environment: options.environment,
@@ -729,6 +801,7 @@ export async function runStoreReleaseAdapter(
         deploymentDigest: digestJson(readback.deployments),
         migrationReadbackDigest: sha256Bytes(readback.migrations),
         migrationLineageDigest: digestJson(readback.migrationLineage),
+        topologyDigest: digestJson(readback.topology),
         operationJournalDigest: sha256Bytes(
           await readPrivateFile(operationJournalPath, {
             expectedDirectory: dirname(operationJournalPath),

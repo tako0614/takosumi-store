@@ -15,6 +15,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const SURFACE_ID = "takosumi-store";
 export const REPOSITORY = "https://github.com/tako0614/takosumi-store.git";
+export const CANONICAL_CANARY_SOURCE_GIT =
+  "https://github.com/tako0614/takos.git";
 export const VERSION = "0.1.1";
 export const TAG = `v${VERSION}`;
 export const ARTIFACT_DIRECTORY = "takosumi-store-artifact";
@@ -122,7 +124,10 @@ export interface StoreArtifactManifest {
   };
   readonly toolchain: {
     readonly bun: string;
+    readonly bunExecutableDigest: string;
     readonly wrangler: string;
+    readonly wranglerEntrypointDigest: string;
+    readonly wranglerPackageJsonDigest: string;
     readonly lockfileDigest: string;
   };
 }
@@ -192,10 +197,117 @@ export interface ReleaseEnvelope extends JsonObject {
 
 export interface WranglerRunner {
   (args: readonly string[], options: { cwd: string }): string;
+  inspect?: (
+    args: readonly string[],
+    options: { cwd: string },
+  ) => {
+    readonly status: "ok" | "not-found" | "failed";
+    readonly stdout: string;
+  };
+}
+
+export interface CloudflareReadClient {
+  readonly accountId: string;
+  get(
+    path: string,
+    query?: Readonly<Record<string, string>>,
+  ): Promise<
+    | {
+        readonly status: "ok";
+        readonly result: unknown;
+        readonly resultInfo: unknown;
+      }
+    | { readonly status: "not-found" }
+  >;
 }
 
 export function sha256Bytes(bytes: Uint8Array | string): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+const SVG_UNSAFE_MARKUP =
+  /(?:<!|<\?|<!--[\s\S]*?-->|<(?:[A-Za-z][\w.-]*:)?(?:script|foreignObject|iframe|object|embed|style|link|image|use|audio|video|animate|set|discard|handler|listener)\b|\b(?:on[a-z]+|href|src|style)\s*=|\b(?:javascript|data):|&)/iu;
+
+/**
+ * Fail-closed verification for icon bytes carried by replica bundles and live
+ * canonical canary readback. The declared media type is authority only after
+ * the bytes independently match it. SVG remains supported for the existing
+ * catalog, but only as inert, self-contained markup with no links, CSS,
+ * scripting, animation, entities, or embedded resources.
+ */
+export function assertIconMediaType(
+  bytes: Uint8Array,
+  mediaType: string,
+  label: string,
+): void {
+  const normalizedMediaType = mediaType.split(";", 1)[0]?.trim().toLowerCase();
+  if (normalizedMediaType === "image/png") {
+    const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (
+      bytes.byteLength < signature.length ||
+      signature.some((value, index) => bytes[index] !== value)
+    ) {
+      throw new Error(`${label}_media_type_mismatch`);
+    }
+    return;
+  }
+  if (normalizedMediaType === "image/jpeg") {
+    if (
+      bytes.byteLength < 5 ||
+      bytes[0] !== 0xff ||
+      bytes[1] !== 0xd8 ||
+      bytes[2] !== 0xff ||
+      bytes[bytes.byteLength - 2] !== 0xff ||
+      bytes[bytes.byteLength - 1] !== 0xd9
+    ) {
+      throw new Error(`${label}_media_type_mismatch`);
+    }
+    return;
+  }
+  if (normalizedMediaType === "image/webp") {
+    const riff = Buffer.from(bytes.subarray(0, 4)).toString("ascii");
+    const webp = Buffer.from(bytes.subarray(8, 12)).toString("ascii");
+    const declaredSize =
+      bytes.byteLength >= 8
+        ? new DataView(
+            bytes.buffer,
+            bytes.byteOffset,
+            bytes.byteLength,
+          ).getUint32(4, true)
+        : -1;
+    if (
+      bytes.byteLength < 12 ||
+      riff !== "RIFF" ||
+      webp !== "WEBP" ||
+      declaredSize !== bytes.byteLength - 8
+    ) {
+      throw new Error(`${label}_media_type_mismatch`);
+    }
+    return;
+  }
+  if (normalizedMediaType === "image/svg+xml") {
+    let markup: string;
+    try {
+      markup = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(`${label}_media_type_mismatch`);
+    }
+    const trimmed = markup.trim();
+    const paintReferences = trimmed.match(/\burl\s*\([^)]*\)/giu) ?? [];
+    if (
+      !/^<svg(?:\s|>)/u.test(trimmed) ||
+      !/<\/svg>$/u.test(trimmed) ||
+      SVG_UNSAFE_MARKUP.test(trimmed) ||
+      paintReferences.some(
+        (reference) => !/^url\s*\(\s*#[A-Za-z][\w.-]*\s*\)$/iu.test(reference),
+      ) ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(trimmed)
+    ) {
+      throw new Error(`${label}_unsafe_svg`);
+    }
+    return;
+  }
+  throw new Error(`${label}_media_type_unsupported`);
 }
 
 export function canonicalJson(value: unknown): string {
@@ -487,8 +599,27 @@ export function validateRealizedConfig(
   const config = Bun.TOML.parse(
     Buffer.from(bytes).toString("utf8"),
   ) as JsonObject;
+  exactKeys(
+    config,
+    [
+      "name",
+      "main",
+      "compatibility_date",
+      "compatibility_flags",
+      "vars",
+      "d1_databases",
+      "r2_buckets",
+      "kv_namespaces",
+      "assets",
+      "routes",
+    ],
+    "config",
+  );
   if (config.name !== target.workerName)
     throw new Error("config_worker_name_mismatch");
+  if (config.main !== "src/backend/index.ts") {
+    throw new Error("config_worker_entrypoint_mismatch");
+  }
   if (
     config.compatibility_date !== target.compatibilityDate ||
     canonicalJson(config.compatibility_flags ?? []) !==
@@ -503,10 +634,18 @@ export function validateRealizedConfig(
   ) {
     throw new Error("config_var_name_set_mismatch");
   }
+  if (Object.values(vars).some((value) => typeof value !== "string")) {
+    throw new Error("config_var_value_invalid");
+  }
   if (vars.APP_URL !== target.origin.replace(/\/$/u, "")) {
     throw new Error("config_app_url_mismatch");
   }
   const db = tomlTable(config, "d1_databases")[0]!;
+  exactKeys(
+    db,
+    ["binding", "database_name", "database_id", "migrations_dir"],
+    "config_d1_binding",
+  );
   if (
     db.binding !== "DB" ||
     db.database_name !== target.databaseName ||
@@ -516,14 +655,21 @@ export function validateRealizedConfig(
     throw new Error("config_d1_binding_mismatch");
   }
   const kv = tomlTable(config, "kv_namespaces")[0]!;
+  exactKeys(kv, ["binding", "id"], "config_kv_binding");
   if (kv.binding !== "KV" || kv.id !== target.kvNamespaceId) {
     throw new Error("config_kv_binding_mismatch");
   }
   const r2 = tomlTable(config, "r2_buckets")[0]!;
+  exactKeys(r2, ["binding", "bucket_name"], "config_icons_binding");
   if (r2.binding !== "ICONS" || r2.bucket_name !== target.iconsBucketName) {
     throw new Error("config_icons_binding_mismatch");
   }
   const assets = isRecord(config.assets) ? config.assets : {};
+  exactKeys(
+    assets,
+    ["directory", "binding", "run_worker_first", "not_found_handling"],
+    "config_assets",
+  );
   if (
     assets.binding !== "ASSETS" ||
     assets.run_worker_first !== true ||
@@ -531,18 +677,17 @@ export function validateRealizedConfig(
   ) {
     throw new Error("config_assets_binding_mismatch");
   }
-  if (typeof assets.directory !== "string" || isAbsolute(assets.directory)) {
+  if (assets.directory !== "./dist") {
     throw new Error("config_assets_directory_invalid");
   }
   const routes = config.routes;
   if (!Array.isArray(routes) || routes.length !== 1 || !isRecord(routes[0])) {
     throw new Error("config_custom_domain_route_missing");
   }
+  exactKeys(routes[0], ["pattern", "custom_domain"], "config_route");
   if (
     routes[0].custom_domain !== true ||
-    ![target.customDomainHostname, `${target.customDomainHostname}/*`].includes(
-      String(routes[0].pattern ?? ""),
-    )
+    routes[0].pattern !== target.customDomainHostname
   ) {
     throw new Error("config_custom_domain_route_mismatch");
   }
@@ -755,7 +900,26 @@ export function artifactSetDigest(files: readonly StoreArtifactFile[]): string {
 export function validateArtifactManifest(
   value: unknown,
 ): StoreArtifactManifest {
-  if (!isRecord(value)) throw new Error("artifact_manifest_invalid");
+  exactKeys(
+    value,
+    [
+      "kind",
+      "surfaceId",
+      "repository",
+      "sourceCommit",
+      "version",
+      "tag",
+      "builtAt",
+      "worker",
+      "assets",
+      "migrations",
+      "sbom",
+      "provenance",
+      "digests",
+      "toolchain",
+    ],
+    "artifact_manifest",
+  );
   const manifest = value as unknown as StoreArtifactManifest;
   if (
     manifest.kind !== "takosumi.store-release-artifact@v1" ||
@@ -771,9 +935,96 @@ export function validateArtifactManifest(
   ) {
     throw new Error("artifact_manifest_authority_invalid");
   }
-  for (const digest of Object.values(manifest.digests ?? {})) {
+  const validateFile = (entry: unknown, label: string): StoreArtifactFile => {
+    exactKeys(entry, ["path", "size", "sha256"], label);
+    const record = entry as unknown as StoreArtifactFile;
+    if (
+      typeof record.path !== "string" ||
+      isAbsolute(record.path) ||
+      record.path.includes("\\") ||
+      record.path
+        .split("/")
+        .some((part) => !part || part === "." || part === "..") ||
+      !Number.isSafeInteger(record.size) ||
+      record.size < 0 ||
+      !SHA256.test(record.sha256)
+    ) {
+      throw new Error(`${label}_invalid`);
+    }
+    return record;
+  };
+  validateFile(manifest.worker, "artifact_worker");
+  validateFile(manifest.sbom, "artifact_sbom");
+  validateFile(manifest.provenance, "artifact_provenance");
+  manifest.assets.forEach((entry, index) =>
+    validateFile(entry, `artifact_asset_${index}`),
+  );
+  manifest.migrations.forEach((entry, index) =>
+    validateFile(entry, `artifact_migration_${index}`),
+  );
+  if (
+    manifest.worker.path !== "worker/worker.mjs" ||
+    manifest.sbom.path !== "sbom.cdx.json" ||
+    manifest.provenance.path !== "provenance.intoto.jsonl" ||
+    manifest.assets.some((entry) => !entry.path.startsWith("assets/")) ||
+    canonicalJson(manifest.assets.map((entry) => entry.path)) !==
+      canonicalJson(manifest.assets.map((entry) => entry.path).sort()) ||
+    canonicalJson(manifest.migrations.map((entry) => entry.path)) !==
+      canonicalJson([
+        "migrations/0001_init.sql",
+        "migrations/0002_accounts.sql",
+        "migrations/0003_scope_slug.sql",
+        "migrations/0004_tags.sql",
+        "migrations/0005_install_experience.sql",
+        "migrations/0006_source_identity.sql",
+      ])
+  ) {
+    throw new Error("artifact_manifest_inventory_invalid");
+  }
+  const allPaths = [
+    manifest.worker.path,
+    ...manifest.assets.map((entry) => entry.path),
+    ...manifest.migrations.map((entry) => entry.path),
+    manifest.sbom.path,
+    manifest.provenance.path,
+  ];
+  if (new Set(allPaths).size !== allPaths.length) {
+    throw new Error("artifact_manifest_duplicate_path");
+  }
+  exactKeys(
+    manifest.digests,
+    ["worker", "assets", "migrations", "sbom", "provenance", "artifact"],
+    "artifact_manifest_digests",
+  );
+  for (const digest of Object.values(manifest.digests)) {
     if (!SHA256.test(digest))
       throw new Error("artifact_manifest_digest_invalid");
+  }
+  exactKeys(
+    manifest.toolchain,
+    [
+      "bun",
+      "bunExecutableDigest",
+      "wrangler",
+      "wranglerEntrypointDigest",
+      "wranglerPackageJsonDigest",
+      "lockfileDigest",
+    ],
+    "artifact_manifest_toolchain",
+  );
+  if (
+    !/^\d+[.]\d+[.]\d+(?:[-+][A-Za-z0-9.-]+)?$/u.test(manifest.toolchain.bun) ||
+    !/^\d+[.]\d+[.]\d+(?:[-+][A-Za-z0-9.-]+)?$/u.test(
+      manifest.toolchain.wrangler,
+    ) ||
+    [
+      manifest.toolchain.bunExecutableDigest,
+      manifest.toolchain.wranglerEntrypointDigest,
+      manifest.toolchain.wranglerPackageJsonDigest,
+      manifest.toolchain.lockfileDigest,
+    ].some((digest) => !SHA256.test(digest))
+  ) {
+    throw new Error("artifact_manifest_toolchain_invalid");
   }
   return manifest;
 }
@@ -806,7 +1057,9 @@ export async function verifyArtifact(
   }
   const root = await secureResolveInside(evidenceDirectory, ARTIFACT_DIRECTORY);
   const manifestPath = await secureResolveInside(root, ARTIFACT_MANIFEST_FILE);
-  const bytes = await readFile(manifestPath);
+  const bytes = await readPrivateFile(manifestPath, {
+    expectedDirectory: root,
+  });
   const manifestDigest = sha256Bytes(bytes);
   const manifest = validateArtifactManifest(JSON.parse(bytes.toString("utf8")));
   if (
@@ -823,21 +1076,112 @@ export async function verifyArtifact(
   ) {
     throw new Error("artifact_manifest_envelope_mismatch");
   }
-  const records = [
-    manifest.worker,
-    ...manifest.assets,
-    ...manifest.migrations,
-    manifest.sbom,
-    manifest.provenance,
+  const records = {
+    worker: manifest.worker,
+    assets: manifest.assets,
+    migrations: manifest.migrations,
+    sbom: manifest.sbom,
+    provenance: manifest.provenance,
+  };
+  const flattened = [
+    records.worker,
+    ...records.assets,
+    ...records.migrations,
+    records.sbom,
+    records.provenance,
   ];
-  for (const record of records) {
+  const expectedInventory = [
+    ARTIFACT_MANIFEST_FILE,
+    ...flattened.map((record) => record.path),
+  ].sort();
+  const actualInventory = (await walkFiles(root)).map((record) => record.path);
+  if (canonicalJson(actualInventory) !== canonicalJson(expectedInventory)) {
+    throw new Error("artifact_filesystem_inventory_mismatch");
+  }
+  const actualRecords = new Map<string, StoreArtifactFile>();
+  for (const record of flattened) {
     const path = await secureResolveInside(root, record.path);
     const actual = await digestFile(path, record.path);
     if (actual.size !== record.size || actual.sha256 !== record.sha256) {
       throw new Error(`artifact_file_digest_mismatch:${record.path}`);
     }
+    actualRecords.set(record.path, actual);
+  }
+  const computed = {
+    worker: actualRecords.get(manifest.worker.path)!,
+    assets: manifest.assets.map((entry) => actualRecords.get(entry.path)!),
+    migrations: manifest.migrations.map(
+      (entry) => actualRecords.get(entry.path)!,
+    ),
+    sbom: actualRecords.get(manifest.sbom.path)!,
+    provenance: actualRecords.get(manifest.provenance.path)!,
+  };
+  const computedDigests = {
+    worker: computed.worker.sha256,
+    assets: artifactSetDigest(computed.assets),
+    migrations: artifactSetDigest(computed.migrations),
+    sbom: computed.sbom.sha256,
+    provenance: computed.provenance.sha256,
+    artifact: digestJson(computed),
+  };
+  if (canonicalJson(computedDigests) !== canonicalJson(manifest.digests)) {
+    throw new Error("artifact_component_digest_mismatch");
   }
   return { root, manifest, manifestDigest };
+}
+
+export async function verifyActualToolchain(
+  sourceCheckout: string,
+  manifest: StoreArtifactManifest,
+): Promise<{ readonly wranglerEntrypoint: string }> {
+  const source = await realpath(sourceCheckout);
+  const bunVersion = spawnSync(process.execPath, ["--version"], {
+    cwd: source,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (
+    bunVersion.status !== 0 ||
+    bunVersion.stdout.trim() !== manifest.toolchain.bun ||
+    sha256Bytes(await readFile(process.execPath)) !==
+      manifest.toolchain.bunExecutableDigest ||
+    sha256Bytes(await readFile(join(source, "bun.lock"))) !==
+      manifest.toolchain.lockfileDigest
+  ) {
+    throw new Error("release_bun_toolchain_mismatch");
+  }
+  const wranglerEntrypoint = await realpath(
+    join(source, "node_modules/wrangler/wrangler-dist/cli.js"),
+  );
+  const wranglerPackageJson = await realpath(
+    join(source, "node_modules/wrangler/package.json"),
+  );
+  const wranglerVersion = spawnSync(
+    process.execPath,
+    [wranglerEntrypoint, "--version"],
+    {
+      cwd: source,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (
+    wranglerVersion.status !== 0 ||
+    wranglerVersion.stdout.trim() !== manifest.toolchain.wrangler ||
+    sha256Bytes(await readFile(wranglerEntrypoint)) !==
+      manifest.toolchain.wranglerEntrypointDigest ||
+    sha256Bytes(await readFile(wranglerPackageJson)) !==
+      manifest.toolchain.wranglerPackageJsonDigest
+  ) {
+    throw new Error("release_wrangler_toolchain_mismatch");
+  }
+  const packageValue = JSON.parse(
+    await readFile(wranglerPackageJson, "utf8"),
+  ) as { version?: unknown };
+  if (packageValue.version !== manifest.toolchain.wrangler) {
+    throw new Error("release_wrangler_package_version_mismatch");
+  }
+  return { wranglerEntrypoint };
 }
 
 export async function readCredentialFiles(
@@ -873,29 +1217,165 @@ export function createWranglerRunner(options: {
   readonly accountId: string;
   readonly apiToken: string;
 }): WranglerRunner {
-  return (args, invocation) => {
-    const result = spawnSync(
-      process.execPath,
-      [options.wranglerEntrypoint, ...args],
-      {
-        cwd: invocation.cwd,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        maxBuffer: 32 * 1024 * 1024,
-        env: {
-          HOME: process.env.HOME ?? "/nonexistent",
-          PATH: "/usr/local/bin:/usr/bin:/bin",
-          LANG: "C.UTF-8",
-          LC_ALL: "C.UTF-8",
-          CI: "true",
-          CLOUDFLARE_ACCOUNT_ID: options.accountId,
-          CLOUDFLARE_API_TOKEN: options.apiToken,
-          WRANGLER_SEND_METRICS: "false",
-        },
+  const execute = (args: readonly string[], invocation: { cwd: string }) =>
+    spawnSync(process.execPath, [options.wranglerEntrypoint, ...args], {
+      cwd: invocation.cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 32 * 1024 * 1024,
+      env: {
+        HOME: process.env.HOME ?? "/nonexistent",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        CI: "true",
+        CLOUDFLARE_ACCOUNT_ID: options.accountId,
+        CLOUDFLARE_API_TOKEN: options.apiToken,
+        WRANGLER_SEND_METRICS: "false",
       },
-    );
+    });
+  const runner: WranglerRunner = (args, invocation) => {
+    const result = execute(args, invocation);
     if (result.status !== 0) throw new Error("wrangler_operation_failed");
     return result.stdout;
+  };
+  runner.inspect = (args, invocation) => {
+    const result = execute(args, invocation);
+    if (result.status === 0) return { status: "ok", stdout: result.stdout };
+    const diagnostic = `${result.stdout}\n${result.stderr}`;
+    if (
+      /(?:\b404\b|not[ -]?found|does not exist|no deployments|no such)/iu.test(
+        diagnostic,
+      )
+    ) {
+      return { status: "not-found", stdout: "" };
+    }
+    return { status: "failed", stdout: "" };
+  };
+  return runner;
+}
+
+export function createCloudflareReadClient(options: {
+  readonly accountId: string;
+  readonly apiToken: string;
+}): CloudflareReadClient {
+  return {
+    accountId: options.accountId,
+    async get(path, query = {}) {
+      if (!path.startsWith("/") || path.includes("..")) {
+        throw new Error("cloudflare_read_path_invalid");
+      }
+      const url = new URL(`https://api.cloudflare.com/client/v4${path}`);
+      for (const [name, value] of Object.entries(query)) {
+        url.searchParams.set(name, value);
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          redirect: "error",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${options.apiToken}`,
+          },
+        });
+        if (response.status === 404) return { status: "not-found" as const };
+        if (response.status !== 200) {
+          throw new Error(`cloudflare_read_http_${response.status}`);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength > 4 * 1024 * 1024) {
+          throw new Error("cloudflare_read_response_too_large");
+        }
+        const value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+        if (
+          !isRecord(value) ||
+          value.success !== true ||
+          !("result" in value)
+        ) {
+          throw new Error("cloudflare_read_response_invalid");
+        }
+        return {
+          status: "ok" as const,
+          result: value.result,
+          resultInfo: value.result_info ?? null,
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+  };
+}
+
+export async function readRuntimeTopology(
+  client: CloudflareReadClient,
+  target: TargetPolicy,
+  mode: "custom-domain" | "workers-dev",
+): Promise<JsonObject> {
+  const account = encodeURIComponent(target.accountId);
+  if (client.accountId !== target.accountId) {
+    throw new Error("runtime_topology_account_mismatch");
+  }
+  if (mode === "custom-domain") {
+    const response = await client.get(`/accounts/${account}/workers/domains`, {
+      hostname: target.customDomainHostname,
+    });
+    if (response.status !== "ok" || !Array.isArray(response.result)) {
+      throw new Error("runtime_custom_domain_readback_missing");
+    }
+    const matches = response.result.filter(
+      (entry) =>
+        isRecord(entry) && entry.hostname === target.customDomainHostname,
+    );
+    if (matches.length !== 1 || !isRecord(matches[0])) {
+      throw new Error("runtime_custom_domain_readback_ambiguous");
+    }
+    const domain = matches[0];
+    if (
+      domain.service !== target.workerName ||
+      (domain.environment !== undefined && domain.environment !== "production")
+    ) {
+      throw new Error("runtime_custom_domain_owner_mismatch");
+    }
+    return {
+      mode,
+      hostname: target.customDomainHostname,
+      workerName: target.workerName,
+      domainId: String(domain.id ?? ""),
+      zoneId: String(domain.zone_id ?? ""),
+      environment: String(domain.environment ?? "production"),
+    };
+  }
+  const accountSubdomain = await client.get(
+    `/accounts/${account}/workers/subdomain`,
+  );
+  const scriptSubdomain = await client.get(
+    `/accounts/${account}/workers/scripts/${encodeURIComponent(target.workerName)}/subdomain`,
+  );
+  if (
+    accountSubdomain.status !== "ok" ||
+    !isRecord(accountSubdomain.result) ||
+    typeof accountSubdomain.result.subdomain !== "string" ||
+    scriptSubdomain.status !== "ok" ||
+    !isRecord(scriptSubdomain.result) ||
+    scriptSubdomain.result.enabled !== true ||
+    scriptSubdomain.result.previews_enabled !== false
+  ) {
+    throw new Error("runtime_workers_dev_readback_mismatch");
+  }
+  const hostname = `${target.workerName}.${accountSubdomain.result.subdomain}.workers.dev`;
+  if (target.origin !== `https://${hostname}`) {
+    throw new Error("runtime_workers_dev_origin_mismatch");
+  }
+  return {
+    mode,
+    hostname,
+    workerName: target.workerName,
+    enabled: true,
+    previewsEnabled: false,
   };
 }
 
@@ -927,37 +1407,15 @@ export function parseVersionId(output: string): string {
   return match[1]!.toLowerCase();
 }
 
-function jsonContainsExactString(value: unknown, expected: string): boolean {
-  if (value === expected) return true;
-  if (Array.isArray(value))
-    return value.some((entry) => jsonContainsExactString(entry, expected));
-  if (isRecord(value))
-    return Object.values(value).some((entry) =>
-      jsonContainsExactString(entry, expected),
-    );
-  return false;
-}
-
 export function assertVersionBindings(
   version: unknown,
   versionId: string,
   target: TargetPolicy,
 ): void {
-  for (const expected of [
-    versionId,
-    "DB",
-    target.databaseId,
-    "KV",
-    target.kvNamespaceId,
-    "ICONS",
-    target.iconsBucketName,
-    "ASSETS",
-  ]) {
-    if (!jsonContainsExactString(version, expected)) {
-      throw new Error(`worker_version_binding_mismatch:${expected}`);
-    }
-  }
   const versionRecord = isRecord(version) ? version : {};
+  if (versionRecord.id !== versionId) {
+    throw new Error(`worker_version_binding_mismatch:${versionId}`);
+  }
   const resources = isRecord(versionRecord.resources)
     ? versionRecord.resources
     : {};
@@ -989,6 +1447,31 @@ export function assertVersionBindings(
     if (!types?.has(raw.type) || seen.has(raw.name)) {
       throw new Error(`worker_version_binding_set_mismatch:${raw.name}`);
     }
+    if (raw.name === "DB") {
+      const ids = [raw.database_id, raw.id].filter(
+        (value): value is string => typeof value === "string",
+      );
+      if (
+        ids.length === 0 ||
+        ids.some((id) => id !== target.databaseId) ||
+        (raw.database_name !== undefined &&
+          raw.database_name !== target.databaseName)
+      ) {
+        throw new Error("worker_version_binding_identity_mismatch:DB");
+      }
+    } else if (raw.name === "KV") {
+      const ids = [raw.namespace_id, raw.id].filter(
+        (value): value is string => typeof value === "string",
+      );
+      if (ids.length === 0 || ids.some((id) => id !== target.kvNamespaceId)) {
+        throw new Error("worker_version_binding_identity_mismatch:KV");
+      }
+    } else if (
+      raw.name === "ICONS" &&
+      raw.bucket_name !== target.iconsBucketName
+    ) {
+      throw new Error("worker_version_binding_identity_mismatch:ICONS");
+    }
     seen.add(raw.name);
   }
   if (
@@ -1003,21 +1486,15 @@ export function deploymentHasExactVersionAtFullTraffic(
   value: unknown,
   versionId: string,
 ): boolean {
-  if (Array.isArray(value)) {
-    return value.some((entry) =>
-      deploymentHasExactVersionAtFullTraffic(entry, versionId),
-    );
-  }
   if (!isRecord(value)) return false;
-  const id = value.version_id ?? value.versionId ?? value.id;
-  const percentage = value.percentage ?? value.traffic ?? value.weight;
-  if (
-    id === versionId &&
-    (percentage === 100 || percentage === 1 || percentage === "100")
-  )
-    return true;
-  return Object.values(value).some((entry) =>
-    deploymentHasExactVersionAtFullTraffic(entry, versionId),
+  if (!Array.isArray(value.versions) || value.versions.length !== 1) {
+    return false;
+  }
+  const current = value.versions[0];
+  return (
+    isRecord(current) &&
+    current.version_id === versionId &&
+    current.percentage === 100
   );
 }
 
@@ -1149,7 +1626,7 @@ export async function runLiveChecks(options: {
     listing.scope !== listingIdentity.split("/")[0] ||
     listing.slug !== listingIdentity.split("/")[1] ||
     !isRecord(listing.source) ||
-    typeof listing.source.git !== "string"
+    listing.source.git !== CANONICAL_CANARY_SOURCE_GIT
   ) {
     throw new Error("canonical_listing_semantics_mismatch");
   }
@@ -1175,16 +1652,20 @@ export async function runLiveChecks(options: {
     throw new Error("canonical_listing_icon_url_invalid");
   }
   const icon = await fetchBytes(iconUrl.href);
+  const iconMediaType = icon.response.headers.get("content-type") ?? "";
+  const expectedIconDigest = `sha256:${iconUrl.pathname.slice("/icons/".length)}`;
   if (
     icon.bytes.byteLength === 0 ||
     icon.bytes.byteLength > 1024 * 1024 ||
-    !icon.response.headers
-      .get("content-type")
-      ?.toLowerCase()
-      .startsWith("image/")
+    sha256Bytes(icon.bytes) !== expectedIconDigest
   ) {
     throw new Error("canonical_listing_icon_readback_invalid");
   }
+  assertIconMediaType(
+    icon.bytes,
+    iconMediaType,
+    "canonical_listing_icon_readback",
+  );
   const apiFallback = await fetchExpectedStatus(
     `${origin}/tcs/v1/release-safety-not-found`,
     404,

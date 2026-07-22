@@ -247,6 +247,7 @@ describe("release mutation safety", () => {
         envelope,
         manifest,
         candidateChecks: [],
+        readTopology: async () => ({ mode: "test" }),
         journal: {
           path: journalPath,
           environment: "production",
@@ -310,7 +311,9 @@ describe("fresh replica evidence", () => {
 
   test("rejects snapshots containing production identity or credential literals", () => {
     const production = target();
-    const icon = Buffer.from("sanitized-icon-bytes");
+    const icon = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+    ]);
     const iconDigest = sha256Bytes(icon);
     const bundle = (
       sql: string,
