@@ -31,6 +31,7 @@ import { listings } from "../src/backend/db/schema.ts";
 import { rehostListingIcon } from "../src/backend/lib/icon-rehost.ts";
 import { validatePublishInput } from "../src/backend/lib/listing-validate.ts";
 import type { Listing, LocalizedText } from "../spec/listing.ts";
+import { officialListingSource } from "./official-listing-source.ts";
 
 const t = (ja: string, en: string): LocalizedText => ({ ja, en });
 const NOW = "2026-07-07T00:00:00.000Z";
@@ -334,7 +335,6 @@ async function officialIconUrl(
 
 async function officialListing(source: OfficialSource): Promise<Listing> {
   const meta = await repoMetadata(source);
-  const modulePath = text(meta.modulePath) ?? source.path;
   const rehostedIconUrl = await officialIconUrl(source);
   const validated = validatePublishInput({
     ...source.display,
@@ -353,10 +353,7 @@ async function officialListing(source: OfficialSource): Promise<Listing> {
     ...(Object.keys(record(meta.badge)).length > 0
       ? { badge: meta.badge }
       : {}),
-    source: {
-      git: source.git,
-      path: modulePath,
-    },
+    source: officialListingSource({ git: source.git, path: source.path }, meta),
     ...(rehostedIconUrl ? { iconUrl: rehostedIconUrl } : {}),
   });
   if (!validated.ok) {
@@ -370,7 +367,7 @@ async function officialListing(source: OfficialSource): Promise<Listing> {
     scope: source.scope,
     slug: source.slug,
     source: {
-      git: source.git,
+      git: display.source.git,
       path: display.source.path,
     },
     kind: display.kind,

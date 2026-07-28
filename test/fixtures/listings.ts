@@ -60,7 +60,7 @@ export const TEST_LISTINGS: readonly Listing[] = [
   app("yurucommu", 50, {
     source: {
       git: "https://github.com/tako0614/yurucommu.git",
-      path: "",
+      path: ".",
     },
     category: "social",
     tags: ["social", "activitypub"],
@@ -74,7 +74,7 @@ export const TEST_LISTINGS: readonly Listing[] = [
   app("takos-office", 40, {
     source: {
       git: "https://github.com/tako0614/takos-office.git",
-      path: "",
+      path: ".",
     },
     category: "productivity",
     tags: ["productivity", "office"],
@@ -88,7 +88,7 @@ export const TEST_LISTINGS: readonly Listing[] = [
   app("takos-computer", 30, {
     source: {
       git: "https://github.com/tako0614/takos-computer.git",
-      path: "",
+      path: ".",
     },
     category: "tools",
     tags: ["tools"],

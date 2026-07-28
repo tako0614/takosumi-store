@@ -5,7 +5,7 @@ describe("listingIdentity", () => {
   test("normalizes host case, trailing .git and slashes", () => {
     const a = listingIdentity({
       git: "https://GitHub.com/tako0614/yurucommu.git/",
-      path: "/sub/",
+      path: "./sub/",
     });
     const b = listingIdentity({
       git: "https://github.com/tako0614/yurucommu",

@@ -20,7 +20,7 @@ function L(
     slug: id,
     source: {
       git: `https://github.com/o/${id}.git`,
-      path: "",
+      path: ".",
       ...source,
     },
     kind: "worker",

@@ -1,7 +1,7 @@
 /**
  * "Sign in with Takosumi Accounts" — OIDC authorization-code + PKCE (public
- * client). issuer + client_id are injected by the outputs.tf `identity.oidc`
- * consume (or set manually); the client may be public (PKCE-only, no secret).
+ * client). issuer + client_id are configured explicitly by the operator; the
+ * client may be public (PKCE-only, no secret).
  */
 import type { Env } from "../types.ts";
 import { verifyOidcIdToken } from "./oidc-id-token.ts";

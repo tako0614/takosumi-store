@@ -93,7 +93,7 @@ describe("listings store", () => {
 
   test("getListingById round-trips a full listing; unknown → null", async () => {
     const got = await getListingById(db, "takos/yurucommu");
-    expect(got?.source.git).toBe("https://github.com/tako0614/yurucommu.git");
+    expect(got?.source.git).toBe("https://github.com/tako0614/yurucommu");
     expect(got?.publisher?.handle).toBe("takos");
     expect(await getListingById(db, "nope")).toBeNull();
   });

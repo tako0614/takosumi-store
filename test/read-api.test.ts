@@ -85,9 +85,7 @@ describe("read api", () => {
     const res = await get("/tcs/v1/listings/takos/yurucommu");
     expect(res.status).toBe(200);
     const listing = await res.json();
-    expect(listing.source.git).toBe(
-      "https://github.com/tako0614/yurucommu.git",
-    );
+    expect(listing.source.git).toBe("https://github.com/tako0614/yurucommu");
     expect(listing.name.ja).toBe("Yurucommu");
   });
 

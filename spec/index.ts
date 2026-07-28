@@ -8,6 +8,7 @@
 export * from "./version.ts";
 export * from "./errors.ts";
 export * from "./pagination.ts";
+export * from "./listing-source.ts";
 export * from "./listing.ts";
 export * from "./server-info.ts";
 export * from "./api.ts";

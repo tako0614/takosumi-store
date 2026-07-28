@@ -13,7 +13,7 @@ import {
 } from "../lib/listing-validate.ts";
 import { isRehostedIconKey, rehostListingIcon } from "../lib/icon-rehost.ts";
 import {
-  countListingsInScope,
+  countListingIconReferences,
   createListing,
   getListingRow,
   hardDeleteListing,
@@ -61,13 +61,36 @@ function hasExplicitIcon(body: unknown): boolean {
   );
 }
 
+async function cleanupUnreferencedManagedIcon(
+  env: Env,
+  origin: string,
+  db: StoreDb,
+  iconUrl: string | null | undefined,
+): Promise<void> {
+  if (!env.ICONS || !iconUrl) return;
+  try {
+    const icon = new URL(iconUrl);
+    if (
+      icon.origin !== new URL(origin).origin ||
+      !/^\/icons\/[a-f0-9]{64}$/u.test(icon.pathname) ||
+      (await countListingIconReferences(db, iconUrl)) !== 0
+    ) {
+      return;
+    }
+    await env.ICONS.delete(icon.pathname.slice(1));
+  } catch {
+    // The listing mutation is authoritative. A content-addressed orphan is
+    // safer than turning an already-committed mutation into a false failure.
+  }
+}
+
 async function withRehostedIcon(
   env: Env,
   origin: string,
   body: unknown,
   core: ValidatedListing,
   rehostIcon: IconRehoster,
-) {
+): Promise<ValidatedListing> {
   const explicit = hasExplicitIcon(body);
   const iconUrl = await rehostIcon({
     bucket: env.ICONS,
@@ -138,14 +161,6 @@ export function createPublishRoutes(
       );
     }
     const max = maxListingsPerScope(c.env);
-    if ((await countListingsInScope(db, scope)) >= max) {
-      return jsonError(
-        c,
-        429,
-        "resource_exhausted",
-        `listing quota reached for ${scope} (max ${max})`,
-      );
-    }
 
     const explicitSlug =
       body && typeof (body as { slug?: unknown }).slug === "string"
@@ -198,8 +213,23 @@ export function createPublishRoutes(
       core,
       publisher: auth.publisher,
       now: new Date(),
+      maxListingsInScope: max,
     });
     if (!created.ok) {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
+      if (created.reason === "quota") {
+        return jsonError(
+          c,
+          429,
+          "resource_exhausted",
+          `listing quota reached for ${scope} (max ${max})`,
+        );
+      }
       return jsonError(
         c,
         409,
@@ -245,6 +275,12 @@ export function createPublishRoutes(
         now: new Date(),
       });
     } catch {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
       return jsonError(
         c,
         409,
@@ -253,6 +289,9 @@ export function createPublishRoutes(
       );
     }
     const updated = await getListingRow(db, id);
+    if (row.iconUrl !== updated?.iconUrl) {
+      await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
+    }
     return c.json({ listing: updated ? rowToListing(updated) : null });
   });
 
@@ -268,6 +307,7 @@ export function createPublishRoutes(
     }
     if (c.req.query("hard") === "true") {
       await hardDeleteListing(db, id);
+      await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
     } else {
       await setListingStatus(db, id, "hidden");
     }

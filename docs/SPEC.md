@@ -80,8 +80,8 @@ setup schema, or output projection contract.
 {
   "id": "string", // server-local stable id
   "source": {
-    "git": "https://…", // https, no embedded credentials
-    "path": "string", // "" or "." for repo root
+    "git": "https://…", // canonical https; no credentials/query/fragment/.git suffix
+    "path": "string", // canonical repo-relative path; "." for repo root
   },
   "kind": "worker | storage | site",
   "surface": "service | building_block | example",

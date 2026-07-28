@@ -1,7 +1,11 @@
 import { and, asc, desc, eq, gt, lt, or, sql, type SQL } from "drizzle-orm";
 import type { StoreDb } from "./client.ts";
 import { listings, type ListingInsert, type ListingRow } from "./schema.ts";
-import type { ValidatedListing } from "../lib/listing-validate.ts";
+import {
+  canonicalGitUrl,
+  canonicalModulePath,
+  type ValidatedListing,
+} from "../lib/listing-validate.ts";
 import type { Publisher } from "./publishers-store.ts";
 import { decodeCursor, encodeCursor } from "../lib/cursor.ts";
 import type { Listing } from "../../../spec/listing.ts";
@@ -20,6 +24,10 @@ import {
 // Row <-> wire mapping
 // ---------------------------------------------------------------------------
 
+function storedModulePath(path: string): string {
+  return path === "." ? "" : path;
+}
+
 function parseJsonArray<T>(value: string | null): readonly T[] {
   if (!value) return [];
   try {
@@ -31,14 +39,19 @@ function parseJsonArray<T>(value: string | null): readonly T[] {
 }
 
 export function rowToListing(row: ListingRow): Listing {
+  const git = canonicalGitUrl(row.git);
+  const path = canonicalModulePath(row.path);
+  if (!git || path === undefined) {
+    throw new Error("stored listing source is not canonicalizable");
+  }
   const badges = parseJsonArray<string>(row.badges);
   return {
     id: row.id,
     scope: row.scope,
     slug: row.slug,
     source: {
-      git: row.git,
-      path: row.path,
+      git,
+      path,
     },
     kind: row.kind as Listing["kind"],
     surface: row.surface as Listing["surface"],
@@ -68,14 +81,17 @@ export function rowToListing(row: ListingRow): Listing {
 
 /** Build an insert row from a Listing (used by seed and publish). */
 export function listingToInsert(listing: Listing): ListingInsert {
+  const git = canonicalGitUrl(listing.source.git);
+  const path = canonicalModulePath(listing.source.path ?? "");
+  if (!git || path === undefined) {
+    throw new Error("listing source is not canonicalizable");
+  }
   return {
     id: listing.id,
     scope: listing.scope,
     slug: listing.slug,
-    git: listing.source.git,
-    ref: "",
-    resolvedCommit: null,
-    path: listing.source.path ?? "",
+    git,
+    path: storedModulePath(path),
     kind: listing.kind,
     surface: listing.surface,
     provider: listing.provider,
@@ -89,9 +105,6 @@ export function listingToInsert(listing: Listing): ListingInsert {
     badgeJa: listing.badge.ja,
     badgeEn: listing.badge.en,
     iconUrl: listing.iconUrl ?? null,
-    inputs: "[]",
-    installExperience: null,
-    outputAllowlist: "[]",
     publisherId: null,
     publisherHandle: listing.publisher?.handle ?? null,
     publisherDisplayName: listing.publisher?.displayName ?? null,
@@ -284,7 +297,7 @@ export async function slugTakenInScope(
   return rows.length > 0;
 }
 
-/** Count a scope's visible listings (for quota enforcement). */
+/** Count every row in a scope. Hidden rows still consume ownership quota. */
 export async function countListingsInScope(
   db: StoreDb,
   scope: string,
@@ -292,7 +305,7 @@ export async function countListingsInScope(
   const rows = (await db
     .select({ c: sql<number>`count(*)` })
     .from(listings)
-    .where(and(eq(listings.scope, scope), eq(listings.status, "visible")))) as {
+    .where(eq(listings.scope, scope))) as {
     c: number;
   }[];
   return Number(rows[0]?.c ?? 0);
@@ -380,7 +393,10 @@ async function findBySource(
   path: string,
   excludeId?: string,
 ): Promise<ListingRow | null> {
-  const conditions = [eq(listings.git, git), eq(listings.path, path)];
+  const conditions = [
+    eq(listings.git, git),
+    eq(listings.path, storedModulePath(path)),
+  ];
   if (excludeId) conditions.push(sql`${listings.id} != ${excludeId}`);
   const rows = (await db
     .select()
@@ -403,9 +419,7 @@ function coreToInsert(
     scope,
     slug,
     git: core.source.git,
-    ref: "",
-    resolvedCommit: null,
-    path: core.source.path,
+    path: storedModulePath(core.source.path),
     kind: core.kind,
     surface: core.surface,
     provider: core.provider,
@@ -419,9 +433,6 @@ function coreToInsert(
     badgeJa: core.badge.ja,
     badgeEn: core.badge.en,
     iconUrl: core.iconUrl ?? null,
-    inputs: "[]",
-    installExperience: null,
-    outputAllowlist: "[]",
     publisherId: publisher.id,
     publisherHandle: publisher.handle,
     publisherDisplayName: publisher.displayName,
@@ -441,12 +452,11 @@ export async function createListing(
     core: ValidatedListing;
     publisher: Publisher;
     now: Date;
+    maxListingsInScope: number;
   },
-): Promise<{ ok: true; listing: Listing } | { ok: false; reason: "conflict" }> {
-  const { git, path } = input.core.source;
-  if (await findBySource(db, git, path)) {
-    return { ok: false, reason: "conflict" };
-  }
+): Promise<
+  { ok: true; listing: Listing } | { ok: false; reason: "conflict" | "quota" }
+> {
   const row = coreToInsert(
     input.id,
     input.scope,
@@ -455,9 +465,38 @@ export async function createListing(
     input.publisher,
     input.now.toISOString(),
   );
-  await db.insert(listings).values(row);
+  const max = Math.max(1, Math.floor(input.maxListingsInScope));
+  const inserted = await db.all<{ id: string }>(sql`
+    INSERT INTO listings (
+      id, scope, slug, git, path, kind, surface, provider, category, tags,
+      suggested_name, name_ja, name_en, description_ja, description_en,
+      badge_ja, badge_en, icon_url, publisher_id, publisher_handle,
+      publisher_display_name, badges, status, created_at, updated_at
+    )
+    SELECT
+      ${row.id}, ${row.scope}, ${row.slug}, ${row.git}, ${row.path},
+      ${row.kind}, ${row.surface}, ${row.provider}, ${row.category}, ${row.tags},
+      ${row.suggestedName}, ${row.nameJa}, ${row.nameEn}, ${row.descriptionJa},
+      ${row.descriptionEn}, ${row.badgeJa}, ${row.badgeEn}, ${row.iconUrl},
+      ${row.publisherId}, ${row.publisherHandle}, ${row.publisherDisplayName},
+      ${row.badges}, ${row.status}, ${row.createdAt}, ${row.updatedAt}
+    WHERE (
+      SELECT count(*) FROM listings WHERE scope = ${input.scope}
+    ) < ${max}
+    ON CONFLICT DO NOTHING
+    RETURNING id
+  `);
+  if (inserted.length !== 1) {
+    return {
+      ok: false,
+      reason:
+        (await countListingsInScope(db, input.scope)) >= max
+          ? "quota"
+          : "conflict",
+    };
+  }
   const created = await getListingRow(db, input.id);
-  if (!created) throw new Error("failed to create listing");
+  if (!created) throw new Error("created listing disappeared");
   return { ok: true, listing: rowToListing(created) };
 }
 
@@ -477,9 +516,7 @@ export async function updateListingCore(
     .update(listings)
     .set({
       git: core.source.git,
-      ref: "",
-      resolvedCommit: null,
-      path: core.source.path,
+      path: storedModulePath(core.source.path),
       kind: core.kind,
       surface: core.surface,
       provider: core.provider,
@@ -493,9 +530,6 @@ export async function updateListingCore(
       badgeJa: core.badge.ja,
       badgeEn: core.badge.en,
       iconUrl: core.iconUrl ?? null,
-      inputs: "[]",
-      installExperience: null,
-      outputAllowlist: "[]",
       updatedAt: input.now.toISOString(),
     })
     .where(eq(listings.id, input.id));
@@ -525,6 +559,18 @@ export async function hardDeleteListing(
   id: string,
 ): Promise<void> {
   await db.delete(listings).where(eq(listings.id, id));
+}
+
+/** Count all live references before deleting a shared digest-addressed icon. */
+export async function countListingIconReferences(
+  db: StoreDb,
+  iconUrl: string,
+): Promise<number> {
+  const rows = (await db
+    .select({ c: sql<number>`count(*)` })
+    .from(listings)
+    .where(eq(listings.iconUrl, iconUrl))) as { c: number }[];
+  return Number(rows[0]?.c ?? 0);
 }
 
 /** A publisher's own listing carries its (owner-only) visibility status. */

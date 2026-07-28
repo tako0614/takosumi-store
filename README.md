@@ -1,7 +1,7 @@
 # Takosumi Store
 
-A self-hostable store for **Takos Capsules** (installable apps / OpenTofu
-modules), served by Takosumi. It exposes a **simple open HTTP/JSON read API**
+A self-hostable catalog for **Takos Capsules** (installable apps / OpenTofu
+modules). It exposes a **simple open HTTP/JSON read API**
 (`spec/`, "TCS") that the takos / takosumi clients consume — users browse and
 install Capsules from inside those apps rather than visiting the store site
 directly. The store's own site is mainly for browsing its catalog and
@@ -45,13 +45,23 @@ bun run dev       # wrangler dev (local D1)
 - [x] M2 site UI + client-side aggregation
 - [x] M3 accounts + publish + moderation
 - [x] M4 install handoff
-- [x] M5 package-as-Capsule (`outputs.tf`) + distribution seed
+- [x] M5 guarded self-host and official deploy path
 
-The next public source release is `v0.1.13`. Release tags are immutable: changed
-bytes require a new version.
+Takosumi Store has its own semver stream. Release tags and published artifacts
+are immutable: changed bytes require a new version. The official target is
+deployed by this repository's own entrypoint:
 
-Docs: the open read spec is in [`docs/SPEC.md`](docs/SPEC.md); deploying (Capsule
-or wrangler self-host) is in [`docs/deploy.md`](docs/deploy.md).
+```bash
+bun run deploy
+```
+
+Docs: the open read spec is in [`docs/SPEC.md`](docs/SPEC.md); self-hosting is
+in [`docs/deploy.md`](docs/deploy.md).
+
+This repository does not currently ship a deployable OpenTofu module. It must
+therefore not be listed as an installable Capsule. The supported deployment
+surface is the guarded Worker flow documented below; a future Capsule requires
+real resource and artifact provisioning before an OpenTofu output is added.
 
 Official read deployment:
 

@@ -11,18 +11,17 @@
  * cross-server trust assertions.
  */
 
+import {
+  tcsListingSourceIdentity,
+  type ListingSource,
+} from "./listing-source.ts";
+
+export type { ListingSource } from "./listing-source.ts";
+
 /** Bilingual display text (mirrors Takosumi `InstallConfigCatalogText`). */
 export interface LocalizedText {
   readonly ja: string;
   readonly en: string;
-}
-
-/** Capsule source pointer (mirrors Takosumi `InstallConfigCatalogSource`). */
-export interface ListingSource {
-  /** https git url, no embedded credentials. */
-  readonly git: string;
-  /** Module path inside the repo; "" or "." for the repo root. */
-  readonly path: string;
 }
 
 /** Service archetype (mirrors Takosumi `InstallConfigCatalogKind`). */
@@ -74,21 +73,8 @@ export interface Listing {
 
 /** Normalized identity tuple used for cross-server de-duplication. */
 export function listingIdentity(source: ListingSource): string {
-  let host = "";
-  let rest = "";
-  try {
-    const url = new URL(source.git);
-    host = url.host.toLowerCase();
-    // Strip trailing slashes BEFORE `.git` so ".../repo.git/" normalizes too.
-    rest = url.pathname.replace(/\/+$/, "").replace(/\.git$/i, "");
-  } catch {
-    // Fall back to the raw string when the url is unparsable.
-    host = source.git.trim().toLowerCase();
-    rest = "";
-  }
-  const path = source.path
-    .trim()
-    .replace(/^\.?\/+/, "")
-    .replace(/\/+$/, "");
-  return `${host}${rest}#${path === "." ? "" : path}`;
+  return (
+    tcsListingSourceIdentity(source) ??
+    `${source.git.trim()}#${source.path.trim()}`
+  );
 }

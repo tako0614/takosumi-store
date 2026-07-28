@@ -1,13 +1,18 @@
 import { sql } from "drizzle-orm";
-import { index, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 /**
- * Listings table — one row per published Capsule pointer. Listing wire fields
- * (spec/listing.ts) are flattened. Legacy `inputs`, `install_experience`, and
- * `output_allowlist` columns may exist in deployed DBs, but the public Store
- * wire no longer uses them; setup metadata belongs in repo `.well-known/tcs.json`.
- * `badges` is stored as JSON text. `publisherId` is nullable until accounts
- * land (M3).
+ * Listings table — one row per published Capsule pointer. Only discovery and
+ * presentation fields from spec/listing.ts are stored. Version selection,
+ * input forms, and output projection remain repository/installer authority.
+ * `badges` is stored as JSON text. `publisherId` is nullable for seeded rows.
  *
  * Schema changes are authored as hand-written SQL under ../../../migrations and
  * mirrored here for drizzle query typing; drizzle-kit must never mutate the
@@ -20,8 +25,6 @@ export const listings = sqliteTable(
     scope: text("scope").notNull().default(""),
     slug: text("slug").notNull().default(""),
     git: text("git").notNull(),
-    ref: text("ref").notNull(),
-    resolvedCommit: text("resolved_commit"),
     path: text("path").notNull().default(""),
     kind: text("kind").notNull(),
     surface: text("surface").notNull(),
@@ -36,9 +39,6 @@ export const listings = sqliteTable(
     badgeJa: text("badge_ja").notNull().default(""),
     badgeEn: text("badge_en").notNull().default(""),
     iconUrl: text("icon_url"),
-    inputs: text("inputs").notNull().default("[]"),
-    installExperience: text("install_experience"),
-    outputAllowlist: text("output_allowlist").notNull().default("[]"),
     publisherId: text("publisher_id"),
     publisherHandle: text("publisher_handle"),
     publisherDisplayName: text("publisher_display_name"),
@@ -104,7 +104,8 @@ export const reports = sqliteTable(
   {
     id: text("id").primaryKey(),
     listingId: text("listing_id").notNull(),
-    reporterSub: text("reporter_sub"),
+    reporterKey: text("reporter_key").notNull(),
+    reasonDigest: text("reason_digest").notNull().default(""),
     reason: text("reason").notNull(),
     status: text("status").notNull().default("open"),
     createdAt: text("created_at").notNull(),
@@ -112,6 +113,22 @@ export const reports = sqliteTable(
   (t) => ({
     listingIdx: index("reports_listing_idx").on(t.listingId),
     statusIdx: index("reports_status_idx").on(t.status),
+  }),
+);
+
+/** Atomic fixed-window counters for anonymous/authenticated report abuse. */
+export const reportRateLimits = sqliteTable(
+  "report_rate_limits",
+  {
+    reporterKey: text("reporter_key").notNull(),
+    bucketStart: text("bucket_start").notNull(),
+    count: integer("count").notNull(),
+  },
+  (t) => ({
+    primary: primaryKey({
+      columns: [t.reporterKey, t.bucketStart],
+      name: "report_rate_limits_pk",
+    }),
   }),
 );
 

@@ -19,7 +19,7 @@ export interface EnvVars {
   readonly SESSION_HASH_SALT?: string;
   /** Comma-separated OIDC subjects granted the moderator role. */
   readonly TCS_MODERATOR_SUBS?: string;
-  /** Max visible listings per scope (publisher). Default 10. */
+  /** Max listings per scope across every visibility state. Default 10. */
   readonly TCS_MAX_LISTINGS_PER_SCOPE?: string;
 }
 

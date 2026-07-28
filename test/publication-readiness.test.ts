@@ -5,7 +5,7 @@ const read = (path: string): Promise<string> =>
   Bun.file(`${root}/${path}`).text();
 
 describe("public repository contract", () => {
-  test("keeps package, runtime, and Capsule versions aligned", async () => {
+  test("keeps package and runtime versions aligned without claiming a fake Capsule", async () => {
     const packageJson = JSON.parse(await read("package.json")) as {
       name: string;
       version: string;
@@ -13,19 +13,18 @@ describe("public repository contract", () => {
       license: string;
     };
     const runtimeVersion = await read("src/backend/version.ts");
-    const outputs = await read("outputs.tf");
     const lockfile = await read("bun.lock");
 
     expect(packageJson).toMatchObject({
       name: "@takosjp/takosumi-store",
-      version: "0.1.13",
+      version: "0.1.14",
       private: true,
       license: "AGPL-3.0-only",
     });
     expect(runtimeVersion).toContain(
       `STORE_VERSION = "${packageJson.version}"`,
     );
-    expect(outputs).toContain(`version = "${packageJson.version}"`);
+    expect(await Bun.file(`${root}/outputs.tf`).exists()).toBe(false);
     expect(lockfile).toContain(`"name": "${packageJson.name}"`);
   });
 
@@ -55,10 +54,34 @@ describe("public repository contract", () => {
 
   test("documents TCS listings as presentation, not install authority", async () => {
     const readme = await read("README.md");
+    const deploy = await read("docs/deploy.md");
 
     expect(readme).toContain("server-selection trust");
     expect(readme).toContain("`{ git, path }`");
+    expect(readme).not.toContain("package-as-Capsule");
+    expect(deploy).not.toContain("Install as a Capsule");
     expect(readme).not.toContain("commit-pin only");
     expect(readme).not.toContain("declared output allowlist");
+  });
+
+  test("removes retired install authority columns through a forward migration", async () => {
+    const schema = await read("src/backend/db/schema.ts");
+    const migration = await read(
+      "migrations/0007_listing_authority_boundary.sql",
+    );
+
+    for (const retired of [
+      "resolvedCommit",
+      "installExperience",
+      "outputAllowlist",
+      'text("inputs")',
+      'text("ref")',
+    ]) {
+      expect(schema).not.toContain(retired);
+    }
+    expect(migration).toContain("ALTER TABLE listings_v2 RENAME TO listings");
+    expect(migration).not.toContain("resolved_commit");
+    expect(migration).not.toContain("output_allowlist");
+    expect(migration).not.toContain("install_experience");
   });
 });

@@ -26,6 +26,31 @@ describe("validatePublishInput", () => {
     }
   });
 
+  test("canonicalizes every root spelling to dot and preserves path case", () => {
+    for (const path of ["", ".", "./"]) {
+      const result = validatePublishInput(
+        validBody({
+          source: { git: "https://github.com/o/r.git", path },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.source.path).toBe(".");
+    }
+
+    const nested = validatePublishInput(
+      validBody({
+        source: {
+          git: "https://github.com/o/r.git",
+          path: "./Modules/OpenTofu/",
+        },
+      }),
+    );
+    expect(nested.ok).toBe(true);
+    if (nested.ok) {
+      expect(nested.value.source.path).toBe("Modules/OpenTofu");
+    }
+  });
+
   test("rejects source version fields", () => {
     const r = validatePublishInput(
       validBody({
@@ -55,6 +80,19 @@ describe("validatePublishInput", () => {
     ]) {
       const r = validatePublishInput(validBody({ source: { git, path: "" } }));
       expect(r.ok).toBe(false);
+    }
+  });
+
+  test("rejects Git URL query, fragment, and control characters", () => {
+    for (const git of [
+      "https://github.com/o/r.git?token=secret",
+      "https://github.com/o/r.git#main",
+      "https://github.com/o/\nr.git",
+    ]) {
+      const result = validatePublishInput(
+        validBody({ source: { git, path: "." } }),
+      );
+      expect(result.ok).toBe(false);
     }
   });
 
@@ -136,6 +174,22 @@ describe("validatePublishInput", () => {
       expect(r.errors.join("\n")).toContain(
         "outputAllowlist belongs in the repository .well-known/tcs.json",
       );
+    }
+  });
+
+  test("rejects traversal and encoded traversal in module paths", () => {
+    for (const path of [
+      "../secret",
+      "a/../secret",
+      "a/%2e%2e/secret",
+      "a\\b",
+    ]) {
+      const result = validatePublishInput(
+        validBody({
+          source: { git: "https://github.com/o/r.git", path },
+        }),
+      );
+      expect(result.ok).toBe(false);
     }
   });
 });

@@ -3,6 +3,7 @@ import { createTestDb } from "./helpers/test-db.ts";
 import { jreq } from "./helpers/http.ts";
 import { login } from "./helpers/login.ts";
 import type { StoreDb } from "../src/backend/db/client.ts";
+import type { Env } from "../src/backend/types.ts";
 import { createPublishRoutes } from "../src/backend/routes/publish.ts";
 import { createReadRoutes } from "../src/backend/routes/spec-read.ts";
 
@@ -52,7 +53,7 @@ describe("publish routes", () => {
     const created = await res.json();
     expect(created.listing.publisher.handle).toBe("alice");
     expect(created.listing.source).toEqual({
-      git: "https://github.com/o/r.git",
+      git: "https://github.com/o/r",
       path: "mod",
     });
 
@@ -83,7 +84,7 @@ describe("publish routes", () => {
       {
         bucket: undefined,
         origin: "https://store.test",
-        source: { git: "https://github.com/o/r.git", path: "mod" },
+        source: { git: "https://github.com/o/r", path: "mod" },
         reference: "assets/icon.png",
         discoverWhenMissing: false,
       },
@@ -106,6 +107,62 @@ describe("publish routes", () => {
     expect(response.warnings).toEqual([
       "iconUrl was unsafe and will be omitted",
     ]);
+  });
+
+  test("deletes a managed icon only after its final listing reference is removed", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const digest = "a".repeat(64);
+    pub = createPublishRoutes(
+      () => db,
+      async () => `https://store.test/icons/${digest}`,
+    );
+    const deleted: string[] = [];
+    const env = {
+      ICONS: {
+        delete: async (key: string) => {
+          deleted.push(key);
+        },
+      },
+    } as unknown as Partial<Env>;
+    const first = await (
+      await jreq(pub, "/publish/listings", {
+        cookie,
+        body: body({ iconUrl: "icon.png" }),
+        env,
+      })
+    ).json();
+    const second = await (
+      await jreq(pub, "/publish/listings", {
+        cookie,
+        body: body({
+          iconUrl: "icon.png",
+          source: { git: "https://github.com/o/r2.git", path: "" },
+          suggestedName: "second",
+        }),
+        env,
+      })
+    ).json();
+
+    expect(
+      (
+        await jreq(pub, `/publish/listings/${first.listing.id}?hard=true`, {
+          method: "DELETE",
+          cookie,
+          env,
+        })
+      ).status,
+    ).toBe(200);
+    expect(deleted).toEqual([]);
+    expect(
+      (
+        await jreq(pub, `/publish/listings/${second.listing.id}?hard=true`, {
+          method: "DELETE",
+          cookie,
+          env,
+        })
+      ).status,
+    ).toBe(200);
+    expect(deleted).toEqual([`icons/${digest}`]);
   });
 
   test("duplicate (git,path) → 409", async () => {
@@ -249,6 +306,118 @@ describe("publish routes", () => {
     });
     expect(over.status).toBe(429);
     expect((await over.json()).error.code).toBe("resource_exhausted");
+  });
+
+  test("hidden listings still consume quota", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const env = { TCS_MAX_LISTINGS_PER_SCOPE: "1" };
+    const first = await (
+      await jreq(pub, "/publish/listings", { cookie, body: body(), env })
+    ).json();
+    expect(
+      (
+        await jreq(pub, `/publish/listings/${first.listing.id}/status`, {
+          cookie,
+          body: { status: "hidden" },
+          env,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await jreq(pub, "/publish/listings", {
+          cookie,
+          body: body({
+            source: { git: "https://github.com/o/r2.git", path: "" },
+          }),
+          env,
+        })
+      ).status,
+    ).toBe(429);
+  });
+
+  test("quota check and insert are one atomic statement", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const env = { TCS_MAX_LISTINGS_PER_SCOPE: "1" };
+    const responses = await Promise.all([
+      jreq(pub, "/publish/listings", {
+        cookie,
+        body: body({
+          source: { git: "https://github.com/o/one.git", path: "" },
+          suggestedName: "one",
+        }),
+        env,
+      }),
+      jreq(pub, "/publish/listings", {
+        cookie,
+        body: body({
+          source: { git: "https://github.com/o/two.git", path: "" },
+          suggestedName: "two",
+        }),
+        env,
+      }),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([
+      201, 429,
+    ]);
+  });
+
+  test("persists one canonical git and module path tuple", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const first = await jreq(pub, "/publish/listings", {
+      cookie,
+      body: body({
+        source: {
+          git: "https://GitHub.com/o/r.git/",
+          path: "./modules/app/",
+        },
+      }),
+    });
+    expect(first.status).toBe(201);
+    expect((await first.json()).listing.source).toEqual({
+      git: "https://github.com/o/r",
+      path: "modules/app",
+    });
+
+    const duplicate = await jreq(pub, "/publish/listings", {
+      cookie,
+      body: body({
+        source: {
+          git: "https://github.com/o/r",
+          path: "modules/app",
+        },
+      }),
+    });
+    expect(duplicate.status).toBe(409);
+  });
+
+  test("emits dot for a canonical root module while retaining source uniqueness", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const first = await jreq(pub, "/publish/listings", {
+      cookie,
+      body: body({
+        source: {
+          git: "https://github.com/o/root.git",
+          path: "",
+        },
+      }),
+    });
+    expect(first.status).toBe(201);
+    expect((await first.json()).listing.source).toEqual({
+      git: "https://github.com/o/root",
+      path: ".",
+    });
+
+    const duplicate = await jreq(pub, "/publish/listings", {
+      cookie,
+      body: body({
+        source: {
+          git: "https://github.com/o/root",
+          path: ".",
+        },
+      }),
+    });
+    expect(duplicate.status).toBe(409);
   });
 
   test("status toggle unpublishes (hidden) and republishes (visible)", async () => {

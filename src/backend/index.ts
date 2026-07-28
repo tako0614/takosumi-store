@@ -27,10 +27,9 @@ export function buildApp(): StoreApp {
   });
 
   // Uncaught errors → internal_error envelope (never leak stack/HTML).
-  app.onError((err, c) => {
+  app.onError((_err, c) => {
     const requestId = (c as TcsContext).get("requestId") ?? newRequestId();
-    const message = err instanceof Error ? err.message : "internal error";
-    return tcsErrorResponse("internal_error", message, requestId);
+    return tcsErrorResponse("internal_error", "internal error", requestId);
   });
 
   app.get("/healthz", (c) =>
@@ -41,16 +40,32 @@ export function buildApp(): StoreApp {
     }),
   );
 
-  // /readyz: DB binding is the only hard precondition for the read surface.
-  // OIDC (publish/login) is optional and reported but does not fail readiness.
-  app.get("/readyz", (c) => {
+  // /readyz proves every read-surface binding is usable. OIDC remains an
+  // optional capability, but it is advertised only with its session salt.
+  app.get("/readyz", async (c) => {
     const missing: string[] = [];
     if (!c.env.DB) missing.push("DB");
+    if (!c.env.ICONS) missing.push("ICONS");
+    if (!c.env.KV) missing.push("KV");
     const oidcConfigured = Boolean(
-      c.env.TAKOSUMI_ACCOUNTS_ISSUER_URL && c.env.TAKOSUMI_ACCOUNTS_CLIENT_ID,
+      c.env.TAKOSUMI_ACCOUNTS_ISSUER_URL &&
+      c.env.TAKOSUMI_ACCOUNTS_CLIENT_ID &&
+      c.env.SESSION_HASH_SALT,
     );
     if (missing.length > 0) {
       return c.json({ status: "unready", missing }, 503);
+    }
+    const probes = await Promise.allSettled([
+      c.env.DB.prepare("SELECT count(*) AS count FROM listings").first(),
+      c.env.ICONS.head("__takosumi_store_readiness__"),
+      c.env.KV.get("__takosumi_store_readiness__"),
+    ]);
+    const names = ["DB_SCHEMA", "ICONS", "KV"] as const;
+    const failed = probes.flatMap((probe, index) =>
+      probe.status === "rejected" ? [names[index]!] : [],
+    );
+    if (failed.length > 0) {
+      return c.json({ status: "unready", failed }, 503);
     }
     return c.json({
       status: "ready",

@@ -25,8 +25,7 @@ export async function currentPublisher(
 }
 
 export type RequireResult =
-  | { ok: true; publisher: Publisher }
-  | { ok: false; response: Response };
+  { ok: true; publisher: Publisher } | { ok: false; response: Response };
 
 /** Gate a handler on a logged-in publisher (401 otherwise). */
 export async function requirePublisher(

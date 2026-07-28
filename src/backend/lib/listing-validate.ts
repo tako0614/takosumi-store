@@ -8,6 +8,10 @@ import type {
   ListingSource,
   LocalizedText,
 } from "../../../spec/listing.ts";
+import {
+  canonicalTcsGitUrl,
+  canonicalTcsModulePath,
+} from "../../../spec/listing-source.ts";
 
 const SLUG = /^[a-z0-9][a-z0-9._-]*$/i;
 
@@ -36,14 +40,13 @@ function asRecord(v: unknown): Record<string, unknown> {
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
-function isHttpsSafe(url: string): boolean {
-  if (!isSafeRemoteUrl(url)) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" && !parsed.username && !parsed.password;
-  } catch {
-    return false;
-  }
+export function canonicalGitUrl(raw: string): string | undefined {
+  const canonical = canonicalTcsGitUrl(raw);
+  return canonical && isSafeRemoteUrl(canonical) ? canonical : undefined;
+}
+
+export function canonicalModulePath(raw: string): string | undefined {
+  return canonicalTcsModulePath(raw);
 }
 function localized(v: unknown): LocalizedText {
   const r = asRecord(v);
@@ -57,15 +60,21 @@ export function validatePublishInput(input: unknown): ValidationResult {
 
   // --- source ---
   const source = asRecord(body.source);
-  const git = str(source.git).trim();
-  if (!git) errors.push("source.git is required");
-  else if (!isHttpsSafe(git)) {
+  const rawGit = str(source.git);
+  const git = canonicalGitUrl(rawGit);
+  if (!rawGit.trim()) errors.push("source.git is required");
+  else if (!git) {
     errors.push(
       "source.git must be an https url with no embedded credentials and a public host",
     );
   }
-  const path = str(source.path).trim();
-  if (path.length > 500) errors.push("source.path too long");
+  const rawPath = str(source.path);
+  const path = canonicalModulePath(rawPath);
+  if (path === undefined) {
+    errors.push("source.path must be a canonical repository-relative path");
+  } else if (path.length > 500) {
+    errors.push("source.path too long");
+  }
   for (const field of ["ref", "resolvedCommit", "commit"]) {
     if (source[field] !== undefined) {
       errors.push(
@@ -136,7 +145,7 @@ export function validatePublishInput(input: unknown): ValidationResult {
     ok: true,
     warnings,
     value: {
-      source: { git, path },
+      source: { git: git!, path: path! },
       kind: kind as Listing["kind"],
       surface: surface as Listing["surface"],
       provider,
