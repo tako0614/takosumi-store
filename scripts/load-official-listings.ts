@@ -68,11 +68,11 @@ const OFFICIAL_SOURCES: readonly OfficialSource[] = [
     scope: "tako",
     slug: "yurucommu",
     git: "https://github.com/tako0614/yurucommu.git",
-    path: ".",
+    path: "deploy/takoform",
     display: {
       kind: "worker",
       surface: "service",
-      provider: "cloudflare",
+      provider: "takoform",
       category: "social",
       tags: ["social", "activitypub", "community"],
       suggestedName: "yurucommu",

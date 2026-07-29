@@ -58,7 +58,15 @@ describe("listings store", () => {
     expect(workers.page.items.length).toBe(TEST_LISTINGS.length);
 
     const cf = await queryListings(db, { provider: "cloudflare", limit: 100 });
-    expect(cf.page.items.length).toBe(TEST_LISTINGS.length);
+    expect(cf.page.items.length).toBe(TEST_LISTINGS.length - 1);
+
+    const takoform = await queryListings(db, {
+      provider: "takoform",
+      limit: 100,
+    });
+    expect(takoform.page.items.map((item) => item.id)).toEqual([
+      "takos/yurucommu",
+    ]);
 
     const social = await queryListings(db, { category: "social", limit: 100 });
     expect(social.page.items.map((i) => i.id)).toEqual(["takos/yurucommu"]);
@@ -94,6 +102,8 @@ describe("listings store", () => {
   test("getListingById round-trips a full listing; unknown → null", async () => {
     const got = await getListingById(db, "takos/yurucommu");
     expect(got?.source.git).toBe("https://github.com/tako0614/yurucommu");
+    expect(got?.source.path).toBe("deploy/takoform");
+    expect(got?.provider).toBe("takoform");
     expect(got?.publisher?.handle).toBe("takos");
     expect(await getListingById(db, "nope")).toBeNull();
   });

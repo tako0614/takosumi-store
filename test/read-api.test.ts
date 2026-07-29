@@ -56,7 +56,7 @@ describe("read api", () => {
 
   test("filters compose", async () => {
     const res = await get(
-      "/tcs/v1/listings?provider=cloudflare&category=social&limit=100",
+      "/tcs/v1/listings?provider=takoform&category=social&limit=100",
     );
     const page = await res.json();
     expect(page.items.map((i: { id: string }) => i.id)).toEqual([
@@ -86,6 +86,8 @@ describe("read api", () => {
     expect(res.status).toBe(200);
     const listing = await res.json();
     expect(listing.source.git).toBe("https://github.com/tako0614/yurucommu");
+    expect(listing.source.path).toBe("deploy/takoform");
+    expect(listing.provider).toBe("takoform");
     expect(listing.name.ja).toBe("Yurucommu");
   });
 

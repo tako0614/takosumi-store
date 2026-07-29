@@ -29,6 +29,7 @@ function app(
     | "createdAt"
     | "updatedAt"
   >,
+  provider = "cloudflare",
 ): Listing {
   return {
     id: `takos/${slug}`,
@@ -36,7 +37,7 @@ function app(
     slug,
     kind: "worker",
     surface: "service",
-    provider: "cloudflare",
+    provider,
     suggestedName: slug,
     publisher,
     createdAt: ts(offset),
@@ -57,20 +58,25 @@ export const TEST_LISTINGS: readonly Listing[] = [
     description: t("自分専用の AI ワークスペース。", "Your own AI workspace."),
     badge: t("ワークスペース", "Workspace"),
   }),
-  app("yurucommu", 50, {
-    source: {
-      git: "https://github.com/tako0614/yurucommu.git",
-      path: ".",
+  app(
+    "yurucommu",
+    50,
+    {
+      source: {
+        git: "https://github.com/tako0614/yurucommu.git",
+        path: "deploy/takoform",
+      },
+      category: "social",
+      tags: ["social", "activitypub"],
+      name: t("Yurucommu", "Yurucommu"),
+      description: t(
+        "ActivityPub でつながるコミュニティSNS。",
+        "A community SNS connected over ActivityPub.",
+      ),
+      badge: t("SNS", "Social"),
     },
-    category: "social",
-    tags: ["social", "activitypub"],
-    name: t("Yurucommu", "Yurucommu"),
-    description: t(
-      "ActivityPub でつながるコミュニティSNS。",
-      "A community SNS connected over ActivityPub.",
-    ),
-    badge: t("SNS", "Social"),
-  }),
+    "takoform",
+  ),
   app("takos-office", 40, {
     source: {
       git: "https://github.com/tako0614/takos-office.git",
