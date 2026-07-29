@@ -115,8 +115,8 @@ install. There are no publisher signatures in v1. `publisher` and `badges` are
 presentation/curation — a client must NOT treat a third-party node's
 self-declared `official` badge as a trust assertion. Trust flows from **which
 servers you choose to query** and from the installer reviewing the Git source,
-selected ref/tag/commit, OpenTofu plan, policy checks, and repository-owned
-metadata.
+selected ref/tag/commit, OpenTofu plan, policy checks, and any installer-owned
+metadata captured from that exact source snapshot.
 
 ## Install handoff
 
@@ -126,8 +126,21 @@ The link only pre-fills the visitor's own Takos add flow — nothing installs fr
 a URL. The target ref/tag/commit is selected in the Takosumi install/source flow,
 not by the Store.
 
-Install setup metadata, output projection, artifacts, screenshots, and
-OpenTofu-specific UX belong to the repository and installer, not this Store
-read API. Servers SHOULD reject top-level fields such as `inputs`,
+`.well-known/tcs.json` is optional Store indexing input for browse
+presentation. A Store may use bounded display metadata or a
+repository-relative icon from it, but it MUST NOT treat the document as setup,
+install, execution, output, version, or trust authority.
+
+An app repository may separately provide an optional
+`.well-known/takosumi.json` document for a Takosumi installer. That file is not
+part of TCS. A Store MUST NOT read, validate, proxy, persist, return, merge, or
+override it. The installer may observe it from the same selected immutable
+source snapshot as the module and decide whether to accept its proposal under
+the installer's compatibility, policy, Plan, and Run rules. Switching Store
+nodes therefore cannot change effective install configuration.
+
+Store servers SHOULD reject top-level fields such as `inputs`,
 `installExperience`, `outputAllowlist`, `variables`, `installConfigId`,
-`commit`, `source.ref`, and `source.resolvedCommit`.
+`commit`, `source.ref`, and `source.resolvedCommit`. The source-coordinate
+handoff contains no setup values, projection declarations, environment values,
+provider bindings, or credentials.

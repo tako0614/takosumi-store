@@ -3,8 +3,10 @@
  *
  * Store rows are repository discovery pointers plus browse presentation. They
  * must not become install authority: setup inputs, installExperience, and
- * output allowlist hints live in the app repository's optional
- * `.well-known/tcs.json` and are read by installers from Git.
+ * output policy are not read from `.well-known/tcs.json`. An app may separately
+ * propose Takosumi install UX in `.well-known/takosumi.json`, but only the
+ * installer reads that optional file from its selected source snapshot; this
+ * Store loader never reads, returns, or overrides it.
  *
  * It emits idempotent `INSERT ... ON CONFLICT(id) DO UPDATE` SQL to stdout.
  * Retired official aliases are deleted first so the source-identity unique

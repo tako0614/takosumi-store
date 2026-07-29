@@ -132,12 +132,17 @@ export function validatePublishInput(input: unknown): ValidationResult {
     else iconUrl = safe;
   }
 
-  for (const field of ["inputs", "installExperience", "outputAllowlist"]) {
+  for (const field of ["inputs", "installExperience"]) {
     if (body[field] !== undefined) {
       errors.push(
-        `${field} belongs in the repository .well-known/tcs.json, not in the store listing`,
+        `${field} may only be proposed to Takosumi through the installer-owned .well-known/takosumi.json; the Store listing cannot supply it`,
       );
     }
+  }
+  if (body.outputAllowlist !== undefined) {
+    errors.push(
+      "outputAllowlist is installer policy and cannot be supplied by Store listings or repository metadata",
+    );
   }
 
   if (errors.length > 0) return { ok: false, errors };

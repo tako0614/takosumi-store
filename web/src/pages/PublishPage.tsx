@@ -60,7 +60,8 @@ export const PublishPage: Component = () => {
   const [busy, setBusy] = createSignal(false);
 
   // Edit mode: load the existing discovery listing and prefill editable fields.
-  // Setup metadata remains in the repository's `.well-known/tcs.json`.
+  // Install UX remains outside Store. A repository may propose it to Takosumi
+  // through `.well-known/takosumi.json`, which Store never reads or edits.
   const [editListing] = createResource(
     () => editId() || null,
     async (id: string): Promise<Listing | null> => {
@@ -130,7 +131,7 @@ export const PublishPage: Component = () => {
     const existing = editListing();
 
     // In edit mode, start from the existing discovery listing, then overlay the
-    // editable display/source fields. Setup metadata stays in Git.
+    // editable display/source fields. Installer-owned UX is not a listing field.
     const base: PublishBody = existing
       ? bodyFromListing(existing)
       : {

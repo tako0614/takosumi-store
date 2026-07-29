@@ -166,13 +166,13 @@ describe("validatePublishInput", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.errors.join("\n")).toContain(
-        "inputs belongs in the repository .well-known/tcs.json",
+        "inputs may only be proposed to Takosumi through the installer-owned .well-known/takosumi.json",
       );
       expect(r.errors.join("\n")).toContain(
-        "installExperience belongs in the repository .well-known/tcs.json",
+        "installExperience may only be proposed to Takosumi through the installer-owned .well-known/takosumi.json",
       );
       expect(r.errors.join("\n")).toContain(
-        "outputAllowlist belongs in the repository .well-known/tcs.json",
+        "outputAllowlist is installer policy and cannot be supplied by Store listings or repository metadata",
       );
     }
   });

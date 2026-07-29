@@ -23,6 +23,16 @@ metadata and browse facets. It is deliberately not an install manifest, input
 schema, output projection, or version lock. The wire schema is owned and
 re-declared here; the Store does not import `takosumi-contract`.
 
+Repository metadata has two separate boundaries:
+
+- `.well-known/tcs.json` is optional Store indexing input for browse
+  presentation such as a repository-relative icon. It cannot declare setup or
+  execution behavior.
+- `.well-known/takosumi.json` is an optional, installer-owned Takosumi install
+  UX proposal. The Store does not read, validate, persist, return, merge, or
+  override it. Takosumi may consume it from the selected immutable source
+  snapshot after the Store hands off only `{ git, path }` and a suggested name.
+
 ## Stack
 
 Cloudflare Worker + Hono backend + Solid/Vite SPA + Drizzle/D1, bun tooling.

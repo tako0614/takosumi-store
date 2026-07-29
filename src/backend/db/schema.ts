@@ -11,7 +11,9 @@ import {
 /**
  * Listings table — one row per published Capsule pointer. Only discovery and
  * presentation fields from spec/listing.ts are stored. Version selection,
- * input forms, and output projection remain repository/installer authority.
+ * input forms, and output projection remain installer authority. The optional
+ * repository-owned `.well-known/takosumi.json` install UX proposal is never a
+ * Store listing column or read-API field.
  * `badges` is stored as JSON text. `publisherId` is nullable for seeded rows.
  *
  * Schema changes are authored as hand-written SQL under ../../../migrations and

@@ -55,9 +55,22 @@ describe("public repository contract", () => {
   test("documents TCS listings as presentation, not install authority", async () => {
     const readme = await read("README.md");
     const deploy = await read("docs/deploy.md");
+    const spec = await read("docs/SPEC.md");
 
     expect(readme).toContain("server-selection trust");
     expect(readme).toContain("`{ git, path }`");
+    expect(readme).toContain("`.well-known/tcs.json`");
+    expect(readme).toContain("`.well-known/takosumi.json`");
+    expect(readme).toContain(
+      "The Store does not read, validate, persist, return, merge, or",
+    );
+    expect(spec).toContain("That file is not\npart of TCS");
+    expect(spec).toContain(
+      "A Store MUST NOT read, validate, proxy, persist, return, merge, or",
+    );
+    expect(spec).toContain(
+      "Switching Store\nnodes therefore cannot change effective install configuration",
+    );
     expect(readme).not.toContain("package-as-Capsule");
     expect(deploy).not.toContain("Install as a Capsule");
     expect(readme).not.toContain("commit-pin only");

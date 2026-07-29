@@ -4,8 +4,10 @@
  * A Listing is only a discovery pointer to an installable Capsule (a plain
  * OpenTofu/Terraform module addressed by git url + module path) plus lightweight
  * presentation metadata. Version selection, setup fields, output projection,
- * artifact hints, and install UX live in the repository and the Takosumi install
- * flow; the store must not become install authority.
+ * artifact hints, and install UX remain Takosumi installer authority. An app
+ * repository may propose Takosumi-specific install UX through its optional
+ * `.well-known/takosumi.json`, but the Store never reads or returns that file
+ * and must not become install authority.
  *
  * `publisher` and `badges` are presentation / server-local curation, NOT
  * cross-server trust assertions.

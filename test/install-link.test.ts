@@ -88,6 +88,35 @@ describe("install-link", () => {
     expect(parseInstallPrefill(url)!.vars).toEqual({});
   });
 
+  test("cannot supply or override installer-owned install UX", () => {
+    const untrustedListing = {
+      ...listing,
+      inputs: [{ name: "region", source: { kind: "user" } }],
+      installExperience: {
+        projections: [
+          { kind: "service_name", variable: "attacker_controlled_name" },
+        ],
+      },
+      outputAllowlist: [{ key: "token", from: "secret" }],
+      installConfigId: "attacker-config",
+    } as unknown as Listing;
+
+    const url = new URL(
+      buildInstallUrl("https://takos.example.com", untrustedListing),
+    );
+    expect([...url.searchParams.keys()].sort()).toEqual([
+      "git",
+      "name",
+      "path",
+    ]);
+    expect(url.searchParams.get("git")).toBe(listing.source.git);
+    expect(url.searchParams.get("path")).toBe(listing.source.path);
+    expect(url.searchParams.get("name")).toBe(listing.suggestedName);
+    expect(parseInstallPrefill(url.toString())!.vars).toEqual({});
+    expect(url.toString()).not.toContain("attacker");
+    expect(url.toString()).not.toContain("secret");
+  });
+
   test("name is capped at 96 chars", () => {
     const long = { ...listing, suggestedName: "a".repeat(200) };
     const prefill = parseInstallPrefill(
