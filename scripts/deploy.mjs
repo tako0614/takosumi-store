@@ -219,20 +219,31 @@ process.stdout.write(
 // reversal: 戻し先の version を先に読む。読めなければ publish しない。
 let previous = null;
 try {
-  const listed = run("wrangler", [
-    "versions",
-    "list",
-    "--name",
-    W.worker,
-    "--config",
-    configPath,
-  ]);
-  previous =
-    listed.match(
-      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/u,
-    )?.[1] ?? null;
+  const deployment = JSON.parse(
+    run("wrangler", [
+      "deployments",
+      "status",
+      "--json",
+      "--name",
+      W.worker,
+      "--config",
+      configPath,
+    ]),
+  );
+  if (
+    !deployment ||
+    !Array.isArray(deployment.versions) ||
+    deployment.versions.length !== 1 ||
+    deployment.versions[0]?.percentage !== 100 ||
+    typeof deployment.versions[0]?.version_id !== "string"
+  ) {
+    throw new Error(
+      "production is not serving one authoritative Worker Version at 100 percent",
+    );
+  }
+  previous = deployment.versions[0].version_id;
 } catch (error) {
-  die(`cannot read the current version list: ${error.message}`);
+  die(`cannot read the active production deployment: ${error.message}`);
 }
 if (!previous)
   die("no current version was readable, so there is no revert point");
