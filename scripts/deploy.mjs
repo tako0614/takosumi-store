@@ -148,6 +148,13 @@ const configSource = readFileSync(
     : configPath,
   "utf8",
 );
+const workerEntry = join(repo, "src/backend/index.ts");
+const assetsDirectory = join(repo, "dist");
+if (!existsSync(workerEntry) || !existsSync(assetsDirectory)) {
+  die(
+    "the repository-owned Worker entrypoint and built assets must exist before bundling",
+  );
+}
 // Only values count. The word "replace" appears in the explanatory comments of a
 // self-host template, and matching it there blocked a config that was fine.
 const configValues = configSource
@@ -189,6 +196,9 @@ process.stdout.write(`\n==> wrangler deploy --dry-run --outdir ${outDir}\n`);
 try {
   run("wrangler", [
     "deploy",
+    workerEntry,
+    "--assets",
+    assetsDirectory,
     "--dry-run",
     "--outdir",
     outDir,
@@ -231,7 +241,14 @@ process.stdout.write(`previous version ${previous}\n`);
 process.stdout.write(`\n==> publishing ${W.worker}\n`);
 let output;
 try {
-  output = run("wrangler", ["deploy", "--config", configPath]);
+  output = run("wrangler", [
+    "deploy",
+    workerEntry,
+    "--assets",
+    assetsDirectory,
+    "--config",
+    configPath,
+  ]);
 } catch (error) {
   process.stderr.write(`${error.stdout ?? ""}${error.stderr ?? ""}\n`);
   die(
