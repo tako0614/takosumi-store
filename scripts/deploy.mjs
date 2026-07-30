@@ -30,6 +30,9 @@ const W = {
   worker: "takosumi-store",
   config: "wrangler.toml",
 };
+const L = {
+  surface: "takosumi-store-official-listings",
+};
 
 const CONTRACT = {
   kind: "takos.deploy-contract@v2",
@@ -54,6 +57,36 @@ const CONTRACT = {
           "prints the provider's own stdout and stderr, names whether the failure was before or after publication, and on a failed post-condition exits non-zero naming the previous version instead of retrying",
       },
     },
+    {
+      surface: L.surface,
+      target: "cloudflare-d1:takosumi-store-db:official-listings",
+      covers: [
+        "scripts/load-official-listings.ts",
+        "scripts/official-listing-source.ts",
+      ],
+      requiresScripts: ["check"],
+      requiresTools: ["git", "bun", "wrangler"],
+      requiresEnv: [
+        "TAKOSUMI_STORE_WRANGLER_CONFIG",
+        "TAKOSUMI_STORE_OFFICIAL_DATABASE_ID",
+        "TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_COMMIT",
+        "TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_SHA256",
+        "TAKOSUMI_STORE_RELEASE_STATE_DIR",
+      ],
+      triggers: ["authority"],
+      obligations: {
+        provenance:
+          "requires a clean main exactly equal to origin/main, runs bun run check, renders the manifest-only SQL twice, and requires its exact SHA-256 to match an independently reviewed digest",
+        "post-conditions":
+          "reads every official listing through https://store.takosumi.com and compares the public projection with the reviewed manifest",
+        reversal:
+          "captures the exact pre-mutation official rows and writes mode-0600 rollback SQL before changing D1",
+        "failure-handling":
+          "refuses target or digest drift before mutation; after mutation starts, it never retries or auto-rolls back and prints the exact snapshot and rollback paths for reconciliation",
+        "independent-review":
+          "the exact Git commit and candidate SQL SHA-256 must be supplied after a reviewer inspects the source, generated SQL, and public expectations",
+      },
+    },
   ],
   otherProviderScripts: [
     {
@@ -69,9 +102,18 @@ if (process.argv.includes("--contract")) {
 }
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-if (requested.length !== 1 || requested[0] !== W.surface) {
-  process.stderr.write(`usage: bun run deploy -- ${W.surface}\n`);
+if (requested.length !== 1 || ![W.surface, L.surface].includes(requested[0])) {
+  process.stderr.write(
+    `usage: bun run deploy -- <${W.surface}|${L.surface}>\n`,
+  );
   process.exit(1);
+}
+if (requested[0] === L.surface) {
+  execFileSync("bun", ["scripts/deploy-official-listings.ts"], {
+    cwd: repo,
+    stdio: "inherit",
+  });
+  process.exit(0);
 }
 
 function die(message, detail = []) {

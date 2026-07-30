@@ -7,7 +7,8 @@ authorities.
 
 ## Public operator interface
 
-Run official release operations from the sibling `takos-control` checkout:
+Run official Worker, assets, and schema release operations from the sibling
+`takos-control` checkout:
 
 ```bash
 bun run deploy
@@ -15,10 +16,15 @@ bun run deploy
 
 `prepare` is credentialless and does not mutate staging or production.
 `status` is always read-only. Authenticated `promote` is the only supported
-production-mutation entrypoint. Do not invoke Store adapters, provider
-mutation commands, an operator-authored envelope, or a generic `--execute`
-path directly. If the fixed adapter is unavailable, the surface fails closed;
-there is no direct-provider fallback.
+production-mutation entrypoint for that database-coupled application release.
+Do not invoke its Store adapters, provider mutation commands, an
+operator-authored envelope, or a generic `--execute` path directly. If the
+fixed adapter is unavailable, the surface fails closed; there is no
+direct-provider fallback.
+
+Official first-party listing synchronization is a separate, repository-owned
+content deploy surface. Its only supported entrypoint is documented under
+“Separate boundaries” below.
 
 ## Candidate and target authority
 
@@ -110,8 +116,12 @@ match that rehearsal. A terminal replica identity is never reused.
 - Self-host deployment is documented in [`deploy.md`](deploy.md). It uses
   operator-owned non-official resources and is not an official Store release.
 - Catalog listing registration and icon rehosting are mutable content
-  operations, not part of the immutable Worker release. They require their own
-  authenticated content authority and evidence.
+  operations, not part of the immutable Worker release. Official first-party
+  listing synchronization uses the repository-owned
+  `bun run deploy -- takosumi-store-official-listings` surface. It requires an
+  independently reviewed source commit and SQL digest, snapshots the exact
+  prior rows before mutation, and verifies every resulting listing through the
+  public API.
 - The Store is not an installable Capsule until it owns a real OpenTofu module
   that provisions and deploys the actual Worker artifact.
 

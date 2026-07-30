@@ -33,7 +33,10 @@ import { listings } from "../src/backend/db/schema.ts";
 import { rehostListingIcon } from "../src/backend/lib/icon-rehost.ts";
 import { validatePublishInput } from "../src/backend/lib/listing-validate.ts";
 import type { Listing, LocalizedText } from "../spec/listing.ts";
-import { officialListingSource } from "./official-listing-source.ts";
+import {
+  officialListingMetadataOverrides,
+  officialListingSource,
+} from "./official-listing-source.ts";
 
 const t = (ja: string, en: string): LocalizedText => ({ ja, en });
 const NOW = "2026-07-07T00:00:00.000Z";
@@ -255,6 +258,9 @@ function record(value: unknown): Record<string, unknown> {
 async function repoMetadata(
   source: OfficialSource,
 ): Promise<Record<string, unknown>> {
+  if (process.env.TAKOSUMI_STORE_OFFICIAL_METADATA_MODE === "manifest-only") {
+    return {};
+  }
   const local = localRepoMetadata(source);
   if (local) return local;
   const res = await fetch(rawGithubUrl(source, ".well-known/tcs.json"), {
@@ -337,23 +343,29 @@ async function officialIconUrl(
 
 async function officialListing(source: OfficialSource): Promise<Listing> {
   const meta = await repoMetadata(source);
+  const overrides = officialListingMetadataOverrides(
+    { git: source.git, path: source.path },
+    meta,
+  );
   const rehostedIconUrl = await officialIconUrl(source);
   const validated = validatePublishInput({
     ...source.display,
-    ...(text(meta.kind) ? { kind: text(meta.kind) } : {}),
-    ...(text(meta.surface) ? { surface: text(meta.surface) } : {}),
-    ...(text(meta.provider) ? { provider: text(meta.provider) } : {}),
-    ...(text(meta.category) ? { category: text(meta.category) } : {}),
-    ...(Array.isArray(meta.tags) ? { tags: meta.tags } : {}),
-    ...(text(meta.suggestedName)
-      ? { suggestedName: text(meta.suggestedName) }
+    ...(text(overrides.kind) ? { kind: text(overrides.kind) } : {}),
+    ...(text(overrides.surface) ? { surface: text(overrides.surface) } : {}),
+    ...(text(overrides.provider) ? { provider: text(overrides.provider) } : {}),
+    ...(text(overrides.category) ? { category: text(overrides.category) } : {}),
+    ...(Array.isArray(overrides.tags) ? { tags: overrides.tags } : {}),
+    ...(text(overrides.suggestedName)
+      ? { suggestedName: text(overrides.suggestedName) }
       : {}),
-    ...(Object.keys(record(meta.name)).length > 0 ? { name: meta.name } : {}),
-    ...(Object.keys(record(meta.description)).length > 0
-      ? { description: meta.description }
+    ...(Object.keys(record(overrides.name)).length > 0
+      ? { name: overrides.name }
       : {}),
-    ...(Object.keys(record(meta.badge)).length > 0
-      ? { badge: meta.badge }
+    ...(Object.keys(record(overrides.description)).length > 0
+      ? { description: overrides.description }
+      : {}),
+    ...(Object.keys(record(overrides.badge)).length > 0
+      ? { badge: overrides.badge }
       : {}),
     source: officialListingSource({ git: source.git, path: source.path }, meta),
     ...(rehostedIconUrl ? { iconUrl: rehostedIconUrl } : {}),
@@ -402,6 +414,10 @@ const sqlColOf = (field: string): string => {
 };
 
 const official = await Promise.all(OFFICIAL_SOURCES.map(officialListing));
+if (process.argv.includes("--expected-json")) {
+  process.stdout.write(`${JSON.stringify(official)}\n`);
+  process.exit(0);
+}
 const out: string[] = [];
 if (RETIRED_OFFICIAL_IDS.length > 0) {
   out.push(
@@ -420,6 +436,11 @@ for (const listing of official) {
     "publisherId",
     "publisherHandle",
     "publisherDisplayName",
+    "badges",
+    "status",
+    // A manifest-only release is deliberately credentialless and cannot
+    // re-host icons. Keep the last validated public icon instead of erasing it.
+    ...(listing.iconUrl ? [] : ["iconUrl"]),
   ]);
   const updates = fields
     .filter((f) => !preserve.has(f))
