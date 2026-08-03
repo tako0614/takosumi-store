@@ -17,8 +17,6 @@ export STORE_WRANGLER_CONFIG=/path/to/takosumi-store.production.toml
 bunx wrangler d1 create my-store-db
 bunx wrangler kv namespace create my-store-kv
 bunx wrangler r2 bucket create my-store-icons
-bunx wrangler d1 migrations apply my-store-db \
-  --config "$STORE_WRANGLER_CONFIG"                  # apply every migration in migrations/
 # Build and deploy through the guarded self-host wrapper. The realized config
 # must use a Worker name other than `takosumi-store` and a non-official origin.
 bun run deploy:self-host -- \
@@ -58,17 +56,64 @@ listings.
 ## Operator release
 
 Do not register this repository as an installable Store listing until it owns a
-real OpenTofu module. Official releases run only from the sibling control
-checkout:
+real OpenTofu module. Official releases run from this owning repository:
 
 ```bash
-bun run deploy
+export TAKOSUMI_STORE_WRANGLER_CONFIG=/path/to/operator-realized-wrangler.toml
+export TAKOSUMI_STORE_PUBLIC_ORIGIN=https://store-staging.example.net
+export TAKOSUMI_STORE_WORKER_CONFIG_SHA256=<sha256-of-realized-wrangler-config>
+export TAKOSUMI_STORE_EXPECTED_WORKER=<exact-realized-worker-name>
+export TAKOSUMI_STORE_EXPECTED_DATABASE_ID=<exact-realized-database-id>
+bun run deploy -- takosumi-store-worker
 ```
 
-The fixed adapter owns staging/rehearsal setup, immutable artifact reuse,
-target fencing, promotion, readback, and recovery. See
-[release-safety.md](./release-safety.md). Do not invoke a Store release adapter
-or Wrangler command for the official target directly.
+The entrypoint derives the Worker target from the realized Wrangler config; it
+does not accept a second `--name` target. The three target-fence variables must
+match the realized config digest, Worker name, and D1 database ID exactly.
+`TAKOSUMI_STORE_PUBLIC_ORIGIN` must be an HTTPS origin and must equal
+`[vars].APP_URL` in that config. After publication it probes
+`/tcs/v2/server-info` and `/tcs/v2/listings?limit=1`, requiring JSON, TCS 2.0,
+and an exact `server.baseUrl` match. A failed readback is indeterminate: do not
+retry blindly; inspect the recorded previous version.
+
+### Applying the TCS 2.0 schema migration
+
+The checked-in forward migration suffix (currently including
+`0009_v2_git_identity.sql`) is an irreversible D1 state transition. It has one
+owning command and no raw Wrangler fallback:
+
+```bash
+export TAKOSUMI_STORE_SCHEMA_DATABASE_ID=<exact-realized-database-id>
+export TAKOSUMI_STORE_SCHEMA_DATABASE_NAME=<exact-realized-database-name>
+export TAKOSUMI_STORE_SCHEMA_REVIEW_COMMIT=<reviewed-git-commit>
+export TAKOSUMI_STORE_SCHEMA_REVIEWER=<independent-reviewer-identity>
+export TAKOSUMI_STORE_SCHEMA_REVIEW_SHA256=<sha256-of-canonical-pending-manifest>
+export TAKOSUMI_STORE_SCHEMA_CONFIG_SHA256=<sha256-of-realized-wrangler-config>
+export TAKOSUMI_STORE_RELEASE_STATE_DIR=/private/path/outside/all-repositories
+bun run deploy -- takosumi-store-schema-current
+```
+
+Before mutation this surface runs `bun run check`, verifies the exact reviewed
+commit/config/database identity, performs a read-only canonical URL collision
+audit, and writes a mode-0600 schema/data snapshot outside every repository.
+The surface reads the remote `d1_migrations` ledger and requires it to be an
+exact prefix of this repository's sorted migration files. It derives the
+non-empty pending suffix, hashes each pending filename/byte length/SHA-256 into
+the reviewed manifest, and applies only that suffix from a private migration
+tree. This also works when the realized config lives outside the repository.
+After the forward migrations it verifies the complete ledger, v2
+column/indexes, populated `git_identity`, and full listings/reports readback.
+If `report_rate_limits` already exists, its rows are reread and compared exactly.
+The subsequent Worker surface owns health and public v2 endpoint readback. It
+never retries blindly and never down-migrates; an interrupted operation is
+reconciled forward from the private snapshot.
+
+Run `takosumi-store-schema-current` to completion before
+`takosumi-store-worker`. The Worker preflight rereads the remote D1 migration
+ledger and refuses to publish until it contains every checked-in migration. In
+staging this deliberately permits a short schema-first cutover gap where the
+old Worker remains served while the schema becomes current; publishing the new
+Worker before that readback would let it query an unready schema.
 
 ## Official listing icon indexing
 
