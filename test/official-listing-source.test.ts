@@ -23,6 +23,26 @@ describe("official listing source authority", () => {
     });
   });
 
+  test("leaves release selection to the installer instead of pinning an unpublished tag", () => {
+    expect(
+      officialListingSource(
+        {
+          git: "https://github.com/tako0614/takos-computer.git",
+          path: ".",
+        },
+        {
+          schemaVersion: "tcs.repo/v1",
+          modulePath: ".",
+          ref: "v2.1.4",
+          releaseTag: "v2.1.4",
+        },
+      ),
+    ).toEqual({
+      git: "https://github.com/tako0614/takos-computer.git",
+      path: ".",
+    });
+  });
+
   test("does not apply root deployment semantics to an alternate module", () => {
     expect(
       officialListingMetadataOverrides(
