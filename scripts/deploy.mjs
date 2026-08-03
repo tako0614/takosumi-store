@@ -797,7 +797,6 @@ async function migrateSchema() {
         "--remote",
         "--config",
         migrationConfigPath,
-        "--yes",
       ],
       { stdio: "inherit" },
     );
