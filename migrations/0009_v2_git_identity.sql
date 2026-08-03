@@ -8,7 +8,9 @@
 -- malformed or collides after canonicalization, this statement fails and no
 -- git_identity column has been added yet.
 DROP TABLE IF EXISTS listings_v2_git_identity_audit;
-CREATE TEMP TABLE listings_v2_git_identity_audit (
+-- D1 rejects TEMP schema writes on the remote service. Use a deliberately
+-- named ordinary scratch table; the migration transaction removes it below.
+CREATE TABLE listings_v2_git_identity_audit (
   id           TEXT PRIMARY KEY,
   git_identity TEXT NOT NULL CHECK (git_identity <> ''),
   UNIQUE (git_identity)

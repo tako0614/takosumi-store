@@ -38,6 +38,16 @@ async function applyPreV2(client: ReturnType<typeof createClient>) {
 }
 
 describe("forward authority-boundary migrations", () => {
+  test("v2 audit avoids D1-incompatible temporary schema writes", async () => {
+    const text = await readFile(
+      `${migrations}/0009_v2_git_identity.sql`,
+      "utf8",
+    );
+    expect(text).not.toMatch(/\bCREATE\s+(?:TEMP|TEMPORARY)\s+TABLE\b/iu);
+    expect(text).toContain("CREATE TABLE listings_v2_git_identity_audit");
+    expect(text).toContain("DROP TABLE listings_v2_git_identity_audit");
+  });
+
   test("preserve rows, canonicalize source identity, and remove retired columns", async () => {
     const client = createClient({ url: ":memory:" });
     for (const name of [
