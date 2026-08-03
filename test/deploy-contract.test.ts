@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
@@ -61,6 +70,67 @@ pattern = "staging-a.takosumi.example.net"
       source.indexOf("function assertReviewIdentity"),
     );
     expect(workerImplementation).not.toContain("store.takosumi.com");
+  });
+
+  test("replays Wrangler's executable outdir bundle without rebundling", () => {
+    const wrangler = join(repo, "node_modules/.bin/wrangler");
+    expect(existsSync(wrangler)).toBe(true);
+    const fixture = mkdtempSync(
+      join(tmpdir(), "takosumi-store-wrangler-test-"),
+    );
+    const assets = join(fixture, "assets");
+    const firstOutdir = join(fixture, "first");
+    const secondOutdir = join(fixture, "second");
+    mkdirSync(assets, { mode: 0o700 });
+    mkdirSync(firstOutdir, { mode: 0o700 });
+    mkdirSync(secondOutdir, { mode: 0o700 });
+    writeFileSync(
+      join(fixture, "index.js"),
+      'export default { fetch() { return new Response("ok"); } };\n',
+    );
+    writeFileSync(join(assets, "index.html"), "<!doctype html>fixture\n");
+    try {
+      const common = [
+        "--assets",
+        assets,
+        "--dry-run",
+        "--config",
+        join(repo, "wrangler.toml"),
+      ];
+      execFileSync(
+        wrangler,
+        [
+          "deploy",
+          join(fixture, "index.js"),
+          ...common,
+          "--outdir",
+          firstOutdir,
+        ],
+        { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const bundles = readdirSync(firstOutdir).filter(
+        (name) => name === "index.js",
+      );
+      expect(bundles).toEqual(["index.js"]);
+      const firstBundle = join(firstOutdir, "index.js");
+      execFileSync(
+        wrangler,
+        [
+          "deploy",
+          firstBundle,
+          "--no-bundle",
+          ...common,
+          "--outdir",
+          secondOutdir,
+        ],
+        { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      expect(readFileSync(firstBundle)).toEqual(
+        readFileSync(join(secondOutdir, "index.js")),
+      );
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   test("collision preflight is read-only and blocks canonical duplicates", () => {

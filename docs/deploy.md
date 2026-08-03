@@ -76,6 +76,10 @@ match the realized config digest, Worker name, and D1 database ID exactly.
 and an exact `server.baseUrl` match. A failed readback is indeterminate: do not
 retry blindly; inspect the recorded previous version.
 
+The dry run writes one executable `index.js` under a private output directory;
+publication replays those exact bytes with Wrangler `--no-bundle` and rechecks
+the bundle and static-asset-tree digests immediately before and after publish.
+
 ### Applying the TCS 2.0 schema migration
 
 The checked-in forward migration suffix (currently including

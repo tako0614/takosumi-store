@@ -33,11 +33,12 @@ respond with JSON:
 - `GET <origin>/tcs/v2/listings?limit=1` returns an `items` array.
 
 The entrypoint gates publication on a complete remote D1 migration ledger and
-records the source commit, exact dry-run bundle digest, deterministic `dist`
-asset-tree digest, and previous Worker Version. A post-publication readback
-failure is indeterminate. Do not rerun or roll back from guessed state; inspect
-the authoritative deployment list and use the recorded version with the same
-realized config.
+records the source commit, exact dry-run executable `index.js` bundle digest,
+deterministic `dist` asset-tree digest, and previous Worker Version. The
+publication command replays that bundle with `--no-bundle`; a post-publication
+readback failure is indeterminate. Do not rerun or roll back from guessed
+state; inspect the authoritative deployment list and use the recorded version
+with the same realized config.
 
 ## Schema transition 0009
 

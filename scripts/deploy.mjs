@@ -63,7 +63,7 @@ const CONTRACT = {
       ],
       triggers: [],
       obligations: {
-        provenance: `refuses a dirty worktree, requires exact TAKOSUMI_STORE_WORKER_CONFIG_SHA256, TAKOSUMI_STORE_EXPECTED_WORKER, and TAKOSUMI_STORE_EXPECTED_DATABASE_ID fences, requires the remote D1 ledger to equal every checked-in migration before publication, runs ${OWNER_GATE}, and builds the exact candidate through Wrangler's dry-run bundler; the Worker name and public origin come from the operator's ${CONFIG_ENV} and TAKOSUMI_STORE_PUBLIC_ORIGIN, and template values are rejected`,
+        provenance: `refuses a dirty worktree, requires exact TAKOSUMI_STORE_WORKER_CONFIG_SHA256, TAKOSUMI_STORE_EXPECTED_WORKER, and TAKOSUMI_STORE_EXPECTED_DATABASE_ID fences, requires the remote D1 ledger to equal every checked-in migration before publication, runs ${OWNER_GATE}, and builds exactly one executable index.js through Wrangler's dry-run bundler for --no-bundle replay; the Worker name and public origin come from the operator's ${CONFIG_ENV} and TAKOSUMI_STORE_PUBLIC_ORIGIN, and template values are rejected`,
         "post-conditions":
           "reads the exact v2 server-info and v2 listings routes at the HTTPS TAKOSUMI_STORE_PUBLIC_ORIGIN, requiring JSON, spec 2.0, and server.baseUrl equal to that origin",
         reversal:
@@ -301,6 +301,25 @@ function writePrivate(path, contents) {
     die(`${path} was not created with mode 0600`);
 }
 
+function selectWorkerBundle(outDir) {
+  const candidates = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name === "index.js")
+        candidates.push(path);
+    }
+  };
+  visit(outDir);
+  if (candidates.length !== 1) {
+    throw new Error(
+      `Wrangler dry-run must produce exactly one executable index.js; found ${candidates.length}`,
+    );
+  }
+  return candidates[0];
+}
+
 async function probeV2(origin) {
   async function get(path) {
     const url = `${origin}${path}`;
@@ -425,11 +444,8 @@ async function deployWorker() {
 
   const outDir = mkdtempSync(join(tmpdir(), "takosumi-store-deploy-"));
   chmodSync(outDir, 0o700);
-  const bundlePath = join(outDir, "worker.js");
   const assetsDigest = assetTreeDigest(assetsDirectory);
-  process.stdout.write(
-    `\n==> wrangler deploy --dry-run --outfile ${bundlePath}\n`,
-  );
+  process.stdout.write(`\n==> wrangler deploy --dry-run --outdir ${outDir}\n`);
   let dryRun;
   try {
     dryRun = run(
@@ -440,8 +456,8 @@ async function deployWorker() {
         "--assets",
         assetsDirectory,
         "--dry-run",
-        "--outfile",
-        bundlePath,
+        "--outdir",
+        outDir,
         "--config",
         configPath,
       ],
@@ -452,8 +468,12 @@ async function deployWorker() {
     die("the candidate bundle could not be built; target is untouched");
   }
   void dryRun;
-  if (!existsSync(bundlePath))
-    die(`Wrangler produced no bundle at ${bundlePath}`);
+  let bundlePath;
+  try {
+    bundlePath = selectWorkerBundle(outDir);
+  } catch (error) {
+    die(error.message);
+  }
   const bundleDigest = sha256(readFileSync(bundlePath));
   process.stdout.write(
     `candidate ${bundlePath} sha256 ${bundleDigest.slice(0, 16)}\nassets sha256 ${assetsDigest.slice(0, 16)}\n`,
