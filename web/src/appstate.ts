@@ -54,14 +54,11 @@ export function setLocale(value: Locale): void {
 }
 
 let reqToken = 0;
-export async function rebuild(
-  opts: { sort?: ListSort; q?: string } = {},
-): Promise<void> {
+export async function rebuild(opts: { sort?: ListSort } = {}): Promise<void> {
   const token = ++reqToken;
   const base = initState(getServers(), {
     sort: opts.sort ?? agg().sort,
     locale: localeSig(),
-    ...(opts.q ? { q: opts.q } : {}),
   });
   setAgg({ ...base, loading: true });
   const next = await aggLoadMore(base);
@@ -79,7 +76,7 @@ export async function loadAccount(): Promise<void> {
   setMe(who);
 }
 
-/** First server that failed with a real (non "search unsupported") error. */
+/** First server that failed with a real (non-capability) error. */
 export function loadError(): string | null {
   const bad = agg().status.find((s) => !s.ok && s.error);
   return bad?.error ?? null;

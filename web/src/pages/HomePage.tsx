@@ -1,18 +1,14 @@
 import {
-  createEffect,
   createMemo,
   createSignal,
   For,
-  on,
+  onMount,
   Show,
-  untrack,
   type Component,
 } from "solid-js";
-import { useSearchParams } from "@solidjs/router";
 import { agg, loadError, loadMoreItems, locale, rebuild } from "../appstate.ts";
 import type { ListSort } from "../../../spec/api.ts";
-import type { ListingKind } from "../../../spec/listing.ts";
-import { kindLabel, tagLabel, t } from "../lib/i18n.ts";
+import { tagLabel, t } from "../lib/i18n.ts";
 import { AppCard } from "../components/AppCard.tsx";
 import { CategoryShelf } from "../components/CategoryShelf.tsx";
 import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
@@ -20,64 +16,31 @@ import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
 const SHELF_MIN_TOTAL = 12;
 
 export const HomePage: Component = () => {
-  const [params] = useSearchParams();
-  const q = () => (typeof params.q === "string" ? params.q.trim() : "");
-
   const [fTag, setFTag] = createSignal("");
-  const [fKind, setFKind] = createSignal("");
 
-  // The active query (URL ?q=) drives the server fetch; filters are client-side.
-  // `on(q, …)` pins the dependency to q ONLY (runs on mount + when q changes),
-  // so applying fetched results never re-triggers the fetch.
-  createEffect(
-    on(q, (query) => {
-      const current = untrack(agg);
-      if ((current.q ?? "") === query && current.items.length > 0) return;
-      setFTag("");
-      setFKind("");
-      void rebuild(query ? { q: query } : {});
-    }),
-  );
+  onMount(() => void rebuild());
 
   const facetTags = createMemo(() => {
     const set = new Set<string>();
-    for (const it of agg().items) for (const tg of it.tags) set.add(tg);
+    for (const it of agg().items) for (const tg of it.tags ?? []) set.add(tg);
     return [...set].sort();
   });
-  const facetKinds = createMemo(() => {
-    const set = new Set<ListingKind>();
-    for (const it of agg().items) set.add(it.kind);
-    return [...set].sort();
-  });
-
   const displayed = createMemo(() =>
-    agg().items.filter(
-      (l) =>
-        (!fTag() || l.tags.includes(fTag())) &&
-        (!fKind() || l.kind === fKind()),
-    ),
+    agg().items.filter((l) => !fTag() || (l.tags ?? []).includes(fTag())),
   );
 
-  const filtersActive = () => Boolean(q() || fTag() || fKind());
+  const filtersActive = () => Boolean(fTag());
   const showShelf = () =>
     !filtersActive() && agg().items.length >= SHELF_MIN_TOTAL;
   const recent = createMemo(() => agg().items.slice(0, 12));
 
-  const onSort = (value: ListSort) =>
-    void rebuild({ sort: value, ...(q() ? { q: q() } : {}) });
+  const onSort = (value: ListSort) => void rebuild({ sort: value });
 
   const firstLoad = () => agg().loading && agg().items.length === 0;
 
   return (
     <main class="page home">
       <div class="container">
-        <Show when={q()}>
-          <p class="results-head">
-            <span class="results-q">“{q()}”</span> {t("resultsFor", locale())}{" "}
-            <span class="results-count">({displayed().length})</span>
-          </p>
-        </Show>
-
         <Show when={agg().items.length > 0 || !firstLoad()}>
           <div class="filterbar">
             <div class="chips" role="tablist" aria-label="Tags">
@@ -103,20 +66,6 @@ export const HomePage: Component = () => {
               </For>
             </div>
             <div class="filterbar-right">
-              <div class="chips chips-kind">
-                <For each={facetKinds()}>
-                  {(kind) => (
-                    <button
-                      type="button"
-                      class="chip chip-outline"
-                      classList={{ active: fKind() === kind }}
-                      onClick={() => setFKind(fKind() === kind ? "" : kind)}
-                    >
-                      {kindLabel(kind, locale())}
-                    </button>
-                  )}
-                </For>
-              </div>
               <select
                 class="sort"
                 value={agg().sort}
@@ -124,7 +73,6 @@ export const HomePage: Component = () => {
                 aria-label={t("sortUpdated", locale())}
               >
                 <option value="updated">{t("sortUpdated", locale())}</option>
-                <option value="name">{t("sortName", locale())}</option>
               </select>
             </div>
           </div>
@@ -139,7 +87,7 @@ export const HomePage: Component = () => {
             title={t("errorTitle", locale())}
             message={t("errorHint", locale())}
             retryLabel={t("retry", locale())}
-            onRetry={() => void rebuild(q() ? { q: q() } : {})}
+            onRetry={() => void rebuild()}
           />
         </Show>
 

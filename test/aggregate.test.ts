@@ -93,13 +93,13 @@ describe("aggregate", () => {
     expect(b.error).toBeDefined();
   });
 
-  test("search-unsupported (501) server is marked and skipped, not fatal", async () => {
+  test("an unsupported server (501) is marked and skipped, not fatal", async () => {
     stubFetch((url) => {
       if (url.host === "a.test") return json({ items: [L("x")] });
       return json({ error: { code: "not_implemented" } }, 501);
     });
     const s = await loadMore(
-      initState(SERVERS, { sort: "updated", locale: "en", q: "foo" }),
+      initState(SERVERS, { sort: "updated", locale: "en" }),
     );
     expect(s.items.map((i) => i.id)).toEqual(["x"]);
     const b = s.status.find((st) => st.base === "https://b.test")!;

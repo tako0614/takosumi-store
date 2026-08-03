@@ -6,17 +6,23 @@
  * runs the compatibility check, and clicks install. There is no server call:
  * this is a plain cross-site link the user opens against their own Takos origin.
  *
- * The query fields mirror the parser exactly: git / path / name. The Store
- * intentionally does not choose a ref/tag/commit; Takosumi's install flow and
- * the repository source contract own version selection.
+ * v2 handoff fields are deliberately git / name only. The legacy v1 overload
+ * still emits `path` for old callers; the Store UI and all v2 links use the
+ * URL-only branch below.
  */
 import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
-export function buildInstallUrl(takosOrigin: string, listing: Listing): string {
+export function buildInstallUrl(
+  takosOrigin: string,
+  listing: Listing | ListingV2,
+): string {
   const base = takosOrigin.replace(/\/+$/, "");
   const url = new URL(`${base}/install`);
   url.searchParams.set("git", listing.source.git);
-  if (listing.source.path) url.searchParams.set("path", listing.source.path);
+  if ("path" in listing.source && listing.source.path) {
+    url.searchParams.set("path", listing.source.path);
+  }
   // name is capped at 96 chars by the parser.
   url.searchParams.set("name", listing.suggestedName.slice(0, 96));
   return url.toString();

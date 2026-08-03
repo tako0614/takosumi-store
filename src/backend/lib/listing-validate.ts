@@ -30,6 +30,18 @@ export interface ValidatedListing {
   readonly iconUrl?: string;
 }
 
+/** Publisher input accepted by the URL-only v2 mutation surface. */
+export interface ValidatedListingV2 {
+  readonly source: { readonly git: string };
+  readonly category: string;
+  readonly tags: readonly string[];
+  readonly suggestedName: string;
+  readonly name: LocalizedText;
+  readonly description: LocalizedText;
+  readonly badge: LocalizedText;
+  readonly iconUrl?: string;
+}
+
 export type ValidationResult =
   | { ok: true; value: ValidatedListing; warnings: string[] }
   | { ok: false; errors: string[] };
@@ -161,6 +173,59 @@ export function validatePublishInput(input: unknown): ValidationResult {
       description,
       badge,
       ...(iconUrl ? { iconUrl } : {}),
+    },
+  };
+}
+
+export type ValidationV2Result =
+  | { ok: true; value: ValidatedListingV2; warnings: string[] }
+  | { ok: false; errors: string[] };
+
+/**
+ * Validate a v2 publisher payload without turning presentation facets into
+ * execution authority. Legacy implementation columns are populated by the
+ * route with fixed defaults and never appear in the v2 request/response.
+ */
+export function validatePublishInputV2(input: unknown): ValidationV2Result {
+  const body = asRecord(input);
+  const source = asRecord(body.source);
+  const errors: string[] = [];
+  for (const field of ["path", "ref", "resolvedCommit", "commit"]) {
+    if (source[field] !== undefined) {
+      errors.push(
+        `source.${field} is not part of the TCS 2.0 URL-only listing`,
+      );
+    }
+  }
+  for (const field of ["kind", "surface", "provider"]) {
+    if (body[field] !== undefined) {
+      errors.push(`${field} is a v1 compatibility facet, not a TCS 2.0 field`);
+    }
+  }
+  if (errors.length > 0) return { ok: false, errors };
+
+  const result = validatePublishInput({
+    ...body,
+    source: { git: source.git, path: "" },
+    // These values are legacy storage defaults only. They are not returned by
+    // rowToListingV2 and cannot influence install behavior.
+    kind: "worker",
+    surface: "service",
+    provider: "catalog",
+  });
+  if (!result.ok) return result;
+  return {
+    ok: true,
+    warnings: result.warnings,
+    value: {
+      source: { git: result.value.source.git },
+      category: result.value.category,
+      tags: result.value.tags,
+      suggestedName: result.value.suggestedName,
+      name: result.value.name,
+      description: result.value.description,
+      badge: result.value.badge,
+      ...(result.value.iconUrl ? { iconUrl: result.value.iconUrl } : {}),
     },
   };
 }

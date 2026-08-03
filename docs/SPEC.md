@@ -1,4 +1,8 @@
-# Takosumi Capsule Store (TCS) — open read API v1.0
+# Takosumi Capsule Store (TCS) — open read API v1.0 (compatibility)
+
+> TCS 2.0 is the canonical URL-only Store contract. See
+> [SPEC-v2.md](./SPEC-v2.md). This document remains normative only for the
+> explicit `/tcs/v1` compatibility adapter.
 
 TCS is a small HTTP/JSON contract: the read API the takos / takosumi clients
 consume to browse and install Capsules from the Takosumi store. A client points

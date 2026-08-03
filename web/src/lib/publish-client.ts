@@ -1,12 +1,9 @@
-import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 export interface PublishBody {
-  source: { git: string; path: string };
+  source: { git: string };
   /** Optional explicit slug; defaults to one derived from suggestedName. */
   slug?: string;
-  kind: string;
-  surface: string;
-  provider: string;
   /** Free-form browse tags; the server derives `category` from tags[0]. */
   tags?: string[];
   /** Legacy single facet; optional now that `tags` is the publisher taxonomy. */
@@ -19,19 +16,13 @@ export interface PublishBody {
 }
 
 /** A publisher's own listing as returned by GET /publish/listings. */
-export type OwnedListing = Listing & { status: "visible" | "hidden" };
+export type OwnedListing = ListingV2 & { status: "visible" | "hidden" };
 
 /** Rebuild the publish body from a listing (for PATCH; setup lives in Git). */
-export function bodyFromListing(l: Listing): PublishBody {
+export function bodyFromListing(l: ListingV2): PublishBody {
   return {
-    source: {
-      git: l.source.git,
-      path: l.source.path ?? "",
-    },
-    kind: l.kind,
-    surface: l.surface,
-    provider: l.provider,
-    tags: [...l.tags],
+    source: { git: l.source.git },
+    ...(l.tags ? { tags: [...l.tags] } : {}),
     ...(l.category ? { category: l.category } : {}),
     suggestedName: l.suggestedName,
     name: { ...l.name },
@@ -42,11 +33,11 @@ export function bodyFromListing(l: Listing): PublishBody {
 }
 
 export type PublishResult =
-  | { ok: true; listing: Listing; warnings: string[] }
+  | { ok: true; listing: ListingV2; warnings: string[] }
   | { ok: false; status: number; message: string; errors?: string[] };
 
 export async function createListing(body: PublishBody): Promise<PublishResult> {
-  const res = await fetch("/publish/listings", {
+  const res = await fetch("/publish/v2/listings", {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
@@ -54,7 +45,7 @@ export async function createListing(body: PublishBody): Promise<PublishResult> {
   });
   if (res.status === 201) {
     const data = (await res.json()) as {
-      listing: Listing;
+      listing: ListingV2;
       warnings?: string[];
     };
     return { ok: true, listing: data.listing, warnings: data.warnings ?? [] };
@@ -72,7 +63,9 @@ export async function createListing(body: PublishBody): Promise<PublishResult> {
 }
 
 export async function listMine(): Promise<OwnedListing[]> {
-  const res = await fetch("/publish/listings", { credentials: "same-origin" });
+  const res = await fetch("/publish/v2/listings", {
+    credentials: "same-origin",
+  });
   if (!res.ok) return [];
   return ((await res.json()) as { listings: OwnedListing[] }).listings;
 }
@@ -90,14 +83,14 @@ export async function updateListing(
   id: string,
   body: PublishBody,
 ): Promise<PublishResult> {
-  const res = await fetch(`/publish/listings/${ownerPath(id)}`, {
+  const res = await fetch(`/publish/v2/listings/${ownerPath(id)}`, {
     method: "PATCH",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   if (res.ok) {
-    const data = (await res.json()) as { listing: Listing };
+    const data = (await res.json()) as { listing: ListingV2 };
     return { ok: true, listing: data.listing, warnings: [] };
   }
   const data = (await res.json().catch(() => null)) as {
@@ -117,7 +110,7 @@ export async function setVisibility(
   id: string,
   status: "visible" | "hidden",
 ): Promise<boolean> {
-  const res = await fetch(`/publish/listings/${ownerPath(id)}/status`, {
+  const res = await fetch(`/publish/v2/listings/${ownerPath(id)}/status`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
@@ -132,7 +125,7 @@ export async function deleteListing(
   hard = false,
 ): Promise<boolean> {
   const res = await fetch(
-    `/publish/listings/${ownerPath(id)}${hard ? "?hard=true" : ""}`,
+    `/publish/v2/listings/${ownerPath(id)}${hard ? "?hard=true" : ""}`,
     { method: "DELETE", credentials: "same-origin" },
   );
   return res.ok;

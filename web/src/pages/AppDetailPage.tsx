@@ -7,8 +7,8 @@ import {
 } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 import { agg, locale } from "../appstate.ts";
-import type { Listing } from "../../../spec/listing.ts";
-import { kindLabel, pick, t, tagLabel } from "../lib/i18n.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
+import { pick, t, tagLabel } from "../lib/i18n.ts";
 import {
   fetchListingByScopeSlug,
   fetchListingReadme,
@@ -19,13 +19,8 @@ import { IconTile } from "../components/IconTile.tsx";
 import { InstallPanel } from "../components/InstallPanel.tsx";
 import { EmptyState } from "../components/states.tsx";
 
-function repoUrl(git: string, path: string): string {
-  const base = git.replace(/\.git$/i, "");
-  if (/github\.com/i.test(base)) {
-    const sub = path && path !== "." ? `/${path.replace(/^\.?\/+/, "")}` : "";
-    return sub ? `${base}/tree/HEAD${sub}` : base;
-  }
-  return base;
+function repoUrl(git: string): string {
+  return git.replace(/\.git$/i, "");
 }
 
 export const AppDetailPage: Component = () => {
@@ -44,7 +39,7 @@ export const AppDetailPage: Component = () => {
       fetchListingByScopeSlug(homeBase(), scope, slug),
   );
 
-  const listing = createMemo<Listing | null>(
+  const listing = createMemo<ListingV2 | null>(
     () => fromFeed() ?? fetched() ?? null,
   );
   const seenOn = () => fromFeed()?.seenOn ?? [];
@@ -105,17 +100,13 @@ export const AppDetailPage: Component = () => {
                     {l().slug}
                   </p>
                   <div class="detail-chips">
-                    <For each={l().tags}>
+                    <For each={l().tags ?? []}>
                       {(tg) => (
                         <span class="chip chip-solid">
                           {tagLabel(tg, locale())}
                         </span>
                       )}
                     </For>
-                    <span class="chip chip-outline">
-                      {kindLabel(l().kind, locale())}
-                    </span>
-                    <span class="chip chip-outline">{l().provider}</span>
                   </div>
                 </div>
               </header>
@@ -156,14 +147,10 @@ export const AppDetailPage: Component = () => {
                 <dl class="kv">
                   <dt>git</dt>
                   <dd class="mono">{l().source.git}</dd>
-                  <Show when={l().source.path && l().source.path !== "."}>
-                    <dt>path</dt>
-                    <dd class="mono">{l().source.path}</dd>
-                  </Show>
                 </dl>
                 <a
                   class="linklike"
-                  href={repoUrl(l().source.git, l().source.path)}
+                  href={repoUrl(l().source.git)}
                   target="_blank"
                   rel="noreferrer noopener"
                 >

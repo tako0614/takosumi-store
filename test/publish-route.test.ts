@@ -22,6 +22,19 @@ function body(over: Record<string, unknown> = {}) {
   };
 }
 
+function bodyV2(over: Record<string, unknown> = {}) {
+  return {
+    source: { git: "https://github.com/o/v2-app.git" },
+    category: "social",
+    tags: ["social"],
+    suggestedName: "v2-app",
+    name: { ja: "V2 アプリ", en: "V2 App" },
+    description: { ja: "", en: "A v2 app" },
+    badge: { ja: "", en: "App" },
+    ...over,
+  };
+}
+
 let db: StoreDb;
 let pub: ReturnType<typeof createPublishRoutes>;
 let read: ReturnType<typeof createReadRoutes>;
@@ -33,6 +46,49 @@ beforeEach(async () => {
 });
 
 describe("publish routes", () => {
+  test("v2 publishing is URL-only and enforces Git identity", async () => {
+    const { cookie } = await login(db, { handle: "alice" });
+    const created = await jreq(pub, "/publish/v2/listings", {
+      cookie,
+      body: bodyV2(),
+    });
+    expect(created.status).toBe(201);
+    const response = await created.json();
+    expect(response.listing.source).toEqual({
+      git: "https://github.com/o/v2-app",
+    });
+    expect(response.listing).not.toHaveProperty("path");
+    expect(response.listing).not.toHaveProperty("provider");
+    expect(response.listing).not.toHaveProperty("kind");
+    expect(response.listing).not.toHaveProperty("surface");
+
+    const withPath = await jreq(pub, "/publish/v2/listings", {
+      cookie,
+      body: bodyV2({
+        source: { git: "https://github.com/o/other.git", path: "module" },
+      }),
+    });
+    expect(withPath.status).toBe(400);
+
+    const duplicate = await jreq(pub, "/publish/v2/listings", {
+      cookie,
+      body: bodyV2({
+        source: { git: "https://github.com/o/v2-app" },
+        suggestedName: "other",
+      }),
+    });
+    expect(duplicate.status).toBe(409);
+
+    const duplicateSpelling = await jreq(pub, "/publish/v2/listings", {
+      cookie,
+      body: bodyV2({
+        source: { git: "https://GitHub.com:443/o/v2-app.git/" },
+        suggestedName: "other-spelling",
+      }),
+    });
+    expect(duplicateSpelling.status).toBe(409);
+  });
+
   test("401 without a session", async () => {
     expect(
       (await jreq(pub, "/publish/listings", { body: body() })).status,

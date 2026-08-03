@@ -137,10 +137,6 @@ export const ManagePage: Component = () => {
                         </div>
                         <div class="manage-item-meta mono muted">
                           {l.scope}/{l.slug}
-                          <Show when={l.source.path && l.source.path !== "."}>
-                            {" "}
-                            · {l.source.path}
-                          </Show>
                         </div>
                         <Show when={errId() === l.id}>
                           <div class="field-error">

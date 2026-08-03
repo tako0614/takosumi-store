@@ -27,6 +27,8 @@ export const listings = sqliteTable(
     scope: text("scope").notNull().default(""),
     slug: text("slug").notNull().default(""),
     git: text("git").notNull(),
+    /** Canonical URL identity used by the TCS 2.0 uniqueness boundary. */
+    gitIdentity: text("git_identity").notNull().default(""),
     path: text("path").notNull().default(""),
     kind: text("kind").notNull(),
     surface: text("surface").notNull(),
@@ -51,6 +53,37 @@ export const listings = sqliteTable(
   },
   (t) => ({
     sourceUnique: uniqueIndex("listings_source_unique").on(t.git, t.path),
+    v2GitIdentityUnique: uniqueIndex("listings_v2_git_identity_unique").on(
+      t.gitIdentity,
+    ),
+    v2VisibleUpdatedIdx: index("listings_v2_visible_updated_idx").on(
+      t.status,
+      t.updatedAt,
+      t.id,
+    ),
+    v2VisibleCreatedIdx: index("listings_v2_visible_created_idx").on(
+      t.status,
+      t.createdAt,
+      t.id,
+    ),
+    v2VisibleCategoryUpdatedIdx: index(
+      "listings_v2_visible_category_updated_idx",
+    ).on(t.status, t.category, t.updatedAt, t.id),
+    v2VisibleCategoryCreatedIdx: index(
+      "listings_v2_visible_category_created_idx",
+    ).on(t.status, t.category, t.createdAt, t.id),
+    v2VisibleScopeUpdatedIdx: index("listings_v2_visible_scope_updated_idx").on(
+      t.status,
+      t.scope,
+      t.updatedAt,
+      t.id,
+    ),
+    v2VisibleScopeCreatedIdx: index("listings_v2_visible_scope_created_idx").on(
+      t.status,
+      t.scope,
+      t.createdAt,
+      t.id,
+    ),
     scopeIdx: index("listings_scope_idx").on(t.scope, t.slug),
     updatedIdx: index("listings_updated_idx").on(t.updatedAt, t.id),
     createdIdx: index("listings_created_idx").on(t.createdAt, t.id),

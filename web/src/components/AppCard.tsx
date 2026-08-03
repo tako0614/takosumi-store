@@ -1,8 +1,8 @@
 import { Show, type Component } from "solid-js";
 import { A } from "@solidjs/router";
-import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 import type { Locale } from "../../../spec/api.ts";
-import { kindLabel, pick, tagLabel } from "../lib/i18n.ts";
+import { pick, tagLabel } from "../lib/i18n.ts";
 import { IconTile } from "./IconTile.tsx";
 
 /**
@@ -10,21 +10,21 @@ import { IconTile } from "./IconTile.tsx";
  * card is a link to the detail page. `compact` shelf cards drop the description.
  */
 export const AppCard: Component<{
-  listing: Listing;
+  listing: ListingV2;
   locale: Locale;
   compact?: boolean;
 }> = (props) => {
   const l = () => props.listing;
-  // Prefer the publisher's tags; fall back to the kind when none were set.
+  // Prefer the publisher's tags; fall back to the generic category facet.
   const sub = () => {
-    const tags = l().tags;
+    const tags = l().tags ?? [];
     if (tags.length > 0) {
       return tags
         .slice(0, 3)
         .map((x) => tagLabel(x, props.locale))
         .join(" · ");
     }
-    return kindLabel(l().kind, props.locale);
+    return l().category ?? "";
   };
   return (
     <A

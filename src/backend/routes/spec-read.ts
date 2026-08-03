@@ -4,10 +4,13 @@ import { createD1Db, type StoreDb } from "../db/client.ts";
 import {
   getListingById,
   getListingByScopeSlug,
+  getListingByIdV2,
+  getListingByScopeSlugV2,
   queryListings,
+  queryListingsV2,
 } from "../db/listings-store.ts";
-import { buildServerInfo } from "../lib/server-info.ts";
-import { fetchListingReadme } from "../lib/readme.ts";
+import { buildServerInfo, buildServerInfoV2 } from "../lib/server-info.ts";
+import { fetchListingReadme, fetchListingReadmeV2 } from "../lib/readme.ts";
 import { tcsError, type TcsContext } from "../lib/http.ts";
 import {
   LIST_SORTS,
@@ -16,10 +19,14 @@ import {
   type ListListingsQuery,
   type Locale,
 } from "../../../spec/api.ts";
+import type { ListListingsV2Query } from "../../../spec/v2/api.ts";
 
 type ParseResult =
   | { ok: true; query: ListListingsQuery & { q?: string } }
   | { ok: false; response: Response };
+
+type ParseV2Result =
+  { ok: true; query: ListListingsV2Query } | { ok: false; response: Response };
 
 /** Canonical public base url for ServerInfo / self de-dup. */
 function baseUrlOf(c: TcsContext): string {
@@ -115,6 +122,83 @@ function parseCommonQuery(c: TcsContext): ParseResult {
   return { ok: true, query };
 }
 
+/** v2 query parser: only presentation facets are accepted on the wire. */
+function parseV2Query(c: TcsContext): ParseV2Result {
+  const q = c.req.query();
+  const query: ListListingsV2Query = {};
+  if (q.limit !== undefined) {
+    const n = Number(q.limit);
+    if (!Number.isInteger(n) || n < 1) {
+      return {
+        ok: false,
+        response: tcsError(
+          c,
+          "invalid_argument",
+          "`limit` must be a positive integer",
+        ),
+      };
+    }
+    (query as { limit?: number }).limit = n;
+  }
+  if (q.cursor !== undefined) (query as { cursor?: string }).cursor = q.cursor;
+  if (q.category !== undefined)
+    (query as { category?: string }).category = q.category;
+  if (q.scope !== undefined) (query as { scope?: string }).scope = q.scope;
+  if (q.category !== undefined && q.scope !== undefined) {
+    return {
+      ok: false,
+      response: tcsError(
+        c,
+        "invalid_argument",
+        "v2 does not combine `category` and `scope` filters",
+      ),
+    };
+  }
+  if (q.sort !== undefined) {
+    if (q.sort !== "updated" && q.sort !== "created") {
+      return {
+        ok: false,
+        response: tcsError(c, "invalid_argument", "unknown `sort`"),
+      };
+    }
+    (query as { sort?: "updated" | "created" }).sort = q.sort;
+  }
+  if (q.locale !== undefined) {
+    if (q.locale !== "ja" && q.locale !== "en") {
+      return {
+        ok: false,
+        response: tcsError(c, "invalid_argument", "`locale` must be ja or en"),
+      };
+    }
+    (query as { locale?: "ja" | "en" }).locale = q.locale;
+  }
+  for (const legacyFacet of ["kind", "surface", "provider"] as const) {
+    if (q[legacyFacet] !== undefined) {
+      return {
+        ok: false,
+        response: tcsError(
+          c,
+          "invalid_argument",
+          `v2 does not expose \`${legacyFacet}\` as an install or provider field`,
+        ),
+      };
+    }
+  }
+  for (const unboundedFacet of ["q", "tag"] as const) {
+    if (q[unboundedFacet] !== undefined) {
+      return {
+        ok: false,
+        response: tcsError(
+          c,
+          "not_implemented",
+          `v2 does not implement unbounded \`${unboundedFacet}\` filtering`,
+        ),
+      };
+    }
+  }
+  return { ok: true, query };
+}
+
 /** Resolve the store handle for a request. Overridable in tests. */
 export type DbResolver = (c: TcsContext) => StoreDb;
 
@@ -132,6 +216,13 @@ export function createReadRoutes(
 
   app.get("/.well-known/tcs", serverInfoHandler);
   app.get("/tcs/v1/server-info", serverInfoHandler);
+
+  const serverInfoV2Handler = async (c: TcsContext) => {
+    const info = await buildServerInfoV2(resolveDb(c), baseUrlOf(c));
+    return c.json(info);
+  };
+
+  app.get("/tcs/v2/server-info", serverInfoV2Handler);
 
   app.get("/tcs/v1/listings", async (c: TcsContext) => {
     const parsed = parseCommonQuery(c);
@@ -210,6 +301,76 @@ export function createReadRoutes(
     const id = c.req.param("id");
     if (!id) return tcsError(c, "not_found", "missing listing id");
     const listing = await getListingById(resolveDb(c), id);
+    if (!listing) return tcsError(c, "not_found", `no listing with id ${id}`);
+    return c.json(listing);
+  });
+
+  // TCS 2.0: URL-only repository discovery. Ambiguous legacy rows are
+  // filtered by the DB projection and never selected arbitrarily.
+  app.get("/tcs/v2/listings", async (c: TcsContext) => {
+    const parsed = parseV2Query(c);
+    if (!parsed.ok) return parsed.response;
+    const { page, cursorError } = await queryListingsV2(
+      resolveDb(c),
+      parsed.query,
+    );
+    if (cursorError) return tcsError(c, "invalid_argument", "invalid `cursor`");
+    return c.json(page);
+  });
+
+  app.get("/tcs/v2/listings/search", async (c: TcsContext) => {
+    const rawQ = c.req.query("q");
+    if (!rawQ || rawQ.trim() === "") {
+      return tcsError(c, "invalid_argument", "`q` is required");
+    }
+    return tcsError(
+      c,
+      "not_implemented",
+      "TCS 2.0 search is not implemented; use indexed listing facets",
+    );
+  });
+
+  app.get("/tcs/v2/listings/:scope/:slug", async (c: TcsContext) => {
+    const scope = c.req.param("scope");
+    const slug = c.req.param("slug");
+    if (!scope || !slug) return tcsError(c, "not_found", "missing scope/slug");
+    const listing = await getListingByScopeSlugV2(resolveDb(c), scope, slug);
+    if (!listing)
+      return tcsError(c, "not_found", `no listing ${scope}/${slug}`);
+    return c.json(listing);
+  });
+
+  app.get("/tcs/v2/listings/:scope/:slug/readme", async (c: TcsContext) => {
+    const scope = c.req.param("scope");
+    const slug = c.req.param("slug");
+    if (!scope || !slug) return tcsError(c, "not_found", "missing scope/slug");
+    const listing = await getListingByScopeSlugV2(resolveDb(c), scope, slug);
+    if (!listing)
+      return tcsError(c, "not_found", `no listing ${scope}/${slug}`);
+    const cacheKey = `readme:v2:${listing.source.git}`;
+    if (c.env.KV) {
+      const cached = await c.env.KV.get(cacheKey);
+      if (cached === "none") return tcsError(c, "not_found", "no README");
+      if (cached) {
+        return c.json(JSON.parse(cached) as unknown, 200, {
+          "cache-control": "public, max-age=600",
+        });
+      }
+    }
+    const readme = await fetchListingReadmeV2(listing.source);
+    if (c.env.KV) {
+      await c.env.KV.put(cacheKey, readme ? JSON.stringify(readme) : "none", {
+        expirationTtl: readme ? 3_600 : 120,
+      });
+    }
+    if (!readme) return tcsError(c, "not_found", "no README");
+    return c.json(readme, 200, { "cache-control": "public, max-age=600" });
+  });
+
+  app.get("/tcs/v2/listings/:id", async (c: TcsContext) => {
+    const id = c.req.param("id");
+    if (!id) return tcsError(c, "not_found", "missing listing id");
+    const listing = await getListingByIdV2(resolveDb(c), id);
     if (!listing) return tcsError(c, "not_found", `no listing with id ${id}`);
     return c.json(listing);
   });

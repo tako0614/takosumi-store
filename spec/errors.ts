@@ -10,6 +10,7 @@
 export type TcsErrorCode =
   | "invalid_argument"
   | "not_found"
+  | "conflict"
   | "not_implemented"
   | "resource_exhausted"
   | "internal_error";
@@ -27,6 +28,7 @@ export interface TcsErrorEnvelope {
 export const TCS_ERROR_HTTP_STATUS: Record<TcsErrorCode, number> = {
   invalid_argument: 400,
   not_found: 404,
+  conflict: 409,
   not_implemented: 501,
   resource_exhausted: 429,
   internal_error: 500,

@@ -12,3 +12,4 @@ export * from "./listing-source.ts";
 export * from "./listing.ts";
 export * from "./server-info.ts";
 export * from "./api.ts";
+export * from "./v2/index.ts";

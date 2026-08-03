@@ -5,10 +5,12 @@ import {
   canonicalGitUrl,
   canonicalModulePath,
   type ValidatedListing,
+  type ValidatedListingV2,
 } from "../lib/listing-validate.ts";
 import type { Publisher } from "./publishers-store.ts";
 import { decodeCursor, encodeCursor } from "../lib/cursor.ts";
 import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 import type {
   ListListingsQuery,
   ListingsPage,
@@ -19,6 +21,10 @@ import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
 } from "../../../spec/pagination.ts";
+import type {
+  ListListingsV2Query,
+  ListingsPageV2,
+} from "../../../spec/v2/api.ts";
 
 // ---------------------------------------------------------------------------
 // Row <-> wire mapping
@@ -79,6 +85,45 @@ export function rowToListing(row: ListingRow): Listing {
   };
 }
 
+/**
+ * Project one stored row to the TCS 2.0 wire shape. The legacy module path is
+ * intentionally not read here: v2 is a repository URL catalog, not an
+ * executable module locator.
+ */
+export function rowToListingV2(row: ListingRow): ListingV2 {
+  const git = canonicalGitUrl(row.gitIdentity || row.git);
+  if (!git) throw new Error("stored listing git is not canonicalizable");
+  const badges = parseJsonArray<string>(row.badges);
+  return {
+    id: row.id,
+    scope: row.scope,
+    slug: row.slug,
+    source: { git },
+    ...(row.category ? { category: row.category } : {}),
+    ...(parseJsonArray<string>(row.tags).length > 0
+      ? { tags: parseJsonArray<string>(row.tags) }
+      : {}),
+    suggestedName: row.suggestedName,
+    name: { ja: row.nameJa, en: row.nameEn },
+    description: { ja: row.descriptionJa, en: row.descriptionEn },
+    badge: { ja: row.badgeJa, en: row.badgeEn },
+    ...(row.iconUrl ? { iconUrl: row.iconUrl } : {}),
+    ...(row.publisherHandle
+      ? {
+          publisher: {
+            handle: row.publisherHandle,
+            ...(row.publisherDisplayName
+              ? { displayName: row.publisherDisplayName }
+              : {}),
+          },
+        }
+      : {}),
+    ...(badges.length > 0 ? { badges } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 /** Build an insert row from a Listing (used by seed and publish). */
 export function listingToInsert(listing: Listing): ListingInsert {
   const git = canonicalGitUrl(listing.source.git);
@@ -91,6 +136,7 @@ export function listingToInsert(listing: Listing): ListingInsert {
     scope: listing.scope,
     slug: listing.slug,
     git,
+    gitIdentity: git,
     path: storedModulePath(path),
     kind: listing.kind,
     surface: listing.surface,
@@ -261,6 +307,84 @@ export async function queryListings(
   };
 }
 
+// ---------------------------------------------------------------------------
+// TCS 2.0 URL-only projection
+// ---------------------------------------------------------------------------
+
+type QueryListingsV2Options = ListListingsV2Query;
+
+/** URL-only v2 list query with indexed Git identity and keyset pagination. */
+export async function queryListingsV2(
+  db: StoreDb,
+  opts: QueryListingsV2Options,
+): Promise<{ page: ListingsPageV2; cursorError: boolean }> {
+  const sort = opts.sort ?? "updated";
+  const locale = opts.locale ?? "en";
+  const plan = buildSortPlan(sort, locale);
+  const conditions: (SQL | undefined)[] = [eq(listings.status, "visible")];
+  if (opts.category) conditions.push(eq(listings.category, opts.category));
+  if (opts.scope) conditions.push(eq(listings.scope, opts.scope));
+  let cursorError = false;
+  if (opts.cursor) {
+    const decoded = decodeCursor(opts.cursor);
+    if (!decoded) cursorError = true;
+    else conditions.push(keysetPredicate(plan, decoded.k, decoded.id));
+  }
+  if (cursorError) return { page: { items: [] }, cursorError: true };
+  const where = and(
+    ...conditions.filter(
+      (condition): condition is SQL => condition !== undefined,
+    ),
+  );
+  const orderBy =
+    plan.direction === "desc"
+      ? [desc(plan.sortExpr), desc(listings.id)]
+      : [asc(plan.sortExpr), asc(listings.id)];
+  const rows = (await db
+    .select()
+    .from(listings)
+    .where(where)
+    .orderBy(...orderBy)
+    .limit(clampLimit(opts.limit) + 1)) as ListingRow[];
+  const limit = clampLimit(opts.limit);
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const items = pageRows.map(rowToListingV2);
+  if (!hasMore || pageRows.length === 0) {
+    return { page: { items }, cursorError: false };
+  }
+  const last = pageRows[pageRows.length - 1]!;
+  return {
+    page: {
+      items,
+      nextCursor: encodeCursor({ k: plan.keyOf(last), id: last.id }),
+    },
+    cursorError: false,
+  };
+}
+
+/** v2 detail lookup; the migration's unique Git index prevents ambiguity. */
+export async function getListingByIdV2(
+  db: StoreDb,
+  id: string,
+): Promise<ListingV2 | null> {
+  const rows = (await db
+    .select()
+    .from(listings)
+    .where(and(eq(listings.id, id), eq(listings.status, "visible")))
+    .limit(1)) as ListingRow[];
+  const row = rows[0];
+  return row ? rowToListingV2(row) : null;
+}
+
+export function getListingByScopeSlugV2(
+  db: StoreDb,
+  scope: string,
+  slug: string,
+): Promise<ListingV2 | null> {
+  return getListingByIdV2(db, `${scope}/${slug}`);
+}
+
 export async function getListingById(
   db: StoreDb,
   id: string,
@@ -357,6 +481,33 @@ export async function facetCounts(db: StoreDb): Promise<FacetCounts> {
   };
 }
 
+export interface FacetCountsV2 {
+  readonly total: number;
+  readonly categories: readonly { key: string; count: number }[];
+}
+
+/** Facets for v2's unique, visible repository URLs only. */
+export async function facetCountsV2(db: StoreDb): Promise<FacetCountsV2> {
+  const visible = eq(listings.status, "visible");
+  const countExpr = sql<number>`count(*)`;
+  const totalRows = (await db
+    .select({ c: countExpr })
+    .from(listings)
+    .where(visible)) as { c: number }[];
+  const byCategory = (await db
+    .select({ key: listings.category, count: countExpr })
+    .from(listings)
+    .where(visible)
+    .groupBy(listings.category)) as { key: string; count: number }[];
+  return {
+    total: Number(totalRows[0]?.c ?? 0),
+    categories: byCategory.map((row) => ({
+      key: row.key || "general",
+      count: Number(row.count),
+    })),
+  };
+}
+
 /** Insert listings, ignoring rows whose stored source tuple already exists. */
 export async function insertListingsIgnoreConflict(
   db: StoreDb,
@@ -394,9 +545,42 @@ async function findBySource(
   excludeId?: string,
 ): Promise<ListingRow | null> {
   const conditions = [
-    eq(listings.git, git),
+    eq(listings.gitIdentity, git),
     eq(listings.path, storedModulePath(path)),
   ];
+  if (excludeId) conditions.push(sql`${listings.id} != ${excludeId}`);
+  const rows = (await db
+    .select()
+    .from(listings)
+    .where(and(...conditions))
+    .limit(1)) as ListingRow[];
+  return rows[0] ?? null;
+}
+
+function v2CoreToLegacy(core: ValidatedListingV2): ValidatedListing {
+  return {
+    source: { git: core.source.git, path: "." },
+    kind: "worker",
+    surface: "service",
+    provider: "catalog",
+    category: core.category,
+    tags: core.tags,
+    suggestedName: core.suggestedName,
+    name: core.name,
+    description: core.description,
+    badge: core.badge,
+    ...(core.iconUrl ? { iconUrl: core.iconUrl } : {}),
+  };
+}
+
+async function findByCanonicalGit(
+  db: StoreDb,
+  git: string,
+  excludeId?: string,
+): Promise<ListingRow | null> {
+  const canonical = canonicalGitUrl(git);
+  if (!canonical) return null;
+  const conditions = [eq(listings.gitIdentity, canonical)];
   if (excludeId) conditions.push(sql`${listings.id} != ${excludeId}`);
   const rows = (await db
     .select()
@@ -419,6 +603,7 @@ function coreToInsert(
     scope,
     slug,
     git: core.source.git,
+    gitIdentity: core.source.git,
     path: storedModulePath(core.source.path),
     kind: core.kind,
     surface: core.surface,
@@ -468,13 +653,13 @@ export async function createListing(
   const max = Math.max(1, Math.floor(input.maxListingsInScope));
   const inserted = await db.all<{ id: string }>(sql`
     INSERT INTO listings (
-      id, scope, slug, git, path, kind, surface, provider, category, tags,
+      id, scope, slug, git, git_identity, path, kind, surface, provider, category, tags,
       suggested_name, name_ja, name_en, description_ja, description_en,
       badge_ja, badge_en, icon_url, publisher_id, publisher_handle,
       publisher_display_name, badges, status, created_at, updated_at
     )
     SELECT
-      ${row.id}, ${row.scope}, ${row.slug}, ${row.git}, ${row.path},
+      ${row.id}, ${row.scope}, ${row.slug}, ${row.git}, ${row.gitIdentity}, ${row.path},
       ${row.kind}, ${row.surface}, ${row.provider}, ${row.category}, ${row.tags},
       ${row.suggestedName}, ${row.nameJa}, ${row.nameEn}, ${row.descriptionJa},
       ${row.descriptionEn}, ${row.badgeJa}, ${row.badgeEn}, ${row.iconUrl},
@@ -500,6 +685,71 @@ export async function createListing(
   return { ok: true, listing: rowToListing(created) };
 }
 
+/**
+ * Create a v2 listing. The `NOT EXISTS` predicate makes Git-URL identity
+ * atomic even while the legacy `(git,path)` unique index remains in place.
+ */
+export async function createListingV2(
+  db: StoreDb,
+  input: {
+    id: string;
+    scope: string;
+    slug: string;
+    core: ValidatedListingV2;
+    publisher: Publisher;
+    now: Date;
+    maxListingsInScope: number;
+  },
+): Promise<
+  { ok: true; listing: ListingV2 } | { ok: false; reason: "conflict" | "quota" }
+> {
+  const row = coreToInsert(
+    input.id,
+    input.scope,
+    input.slug,
+    v2CoreToLegacy(input.core),
+    input.publisher,
+    input.now.toISOString(),
+  );
+  const max = Math.max(1, Math.floor(input.maxListingsInScope));
+  const inserted = await db.all<{ id: string }>(sql`
+    INSERT INTO listings (
+      id, scope, slug, git, git_identity, path, kind, surface, provider, category, tags,
+      suggested_name, name_ja, name_en, description_ja, description_en,
+      badge_ja, badge_en, icon_url, publisher_id, publisher_handle,
+      publisher_display_name, badges, status, created_at, updated_at
+    )
+    SELECT
+      ${row.id}, ${row.scope}, ${row.slug}, ${row.git}, ${row.gitIdentity}, ${row.path},
+      ${row.kind}, ${row.surface}, ${row.provider}, ${row.category}, ${row.tags},
+      ${row.suggestedName}, ${row.nameJa}, ${row.nameEn}, ${row.descriptionJa},
+      ${row.descriptionEn}, ${row.badgeJa}, ${row.badgeEn}, ${row.iconUrl},
+      ${row.publisherId}, ${row.publisherHandle}, ${row.publisherDisplayName},
+      ${row.badges}, ${row.status}, ${row.createdAt}, ${row.updatedAt}
+    WHERE (
+      SELECT count(*) FROM listings WHERE scope = ${input.scope}
+    ) < ${max}
+      AND NOT EXISTS (
+        SELECT 1 FROM listings existing
+        WHERE existing.git_identity = ${row.gitIdentity}
+      )
+    ON CONFLICT DO NOTHING
+    RETURNING id
+  `);
+  if (inserted.length !== 1) {
+    return {
+      ok: false,
+      reason:
+        (await countListingsInScope(db, input.scope)) >= max
+          ? "quota"
+          : "conflict",
+    };
+  }
+  const created = await getListingRow(db, input.id);
+  if (!created) throw new Error("created v2 listing disappeared");
+  return { ok: true, listing: rowToListingV2(created) };
+}
+
 export async function updateListingCore(
   db: StoreDb,
   input: {
@@ -516,6 +766,7 @@ export async function updateListingCore(
     .update(listings)
     .set({
       git: core.source.git,
+      gitIdentity: core.source.git,
       path: storedModulePath(core.source.path),
       kind: core.kind,
       surface: core.surface,
@@ -530,6 +781,34 @@ export async function updateListingCore(
       badgeJa: core.badge.ja,
       badgeEn: core.badge.en,
       iconUrl: core.iconUrl ?? null,
+      updatedAt: input.now.toISOString(),
+    })
+    .where(eq(listings.id, input.id));
+}
+
+/** Update v2 presentation metadata while preserving legacy internal path data. */
+export async function updateListingV2Core(
+  db: StoreDb,
+  input: { id: string; core: ValidatedListingV2; now: Date },
+): Promise<void> {
+  if (await findByCanonicalGit(db, input.core.source.git, input.id)) {
+    throw new Error("source_conflict");
+  }
+  await db
+    .update(listings)
+    .set({
+      git: input.core.source.git,
+      gitIdentity: input.core.source.git,
+      category: input.core.category,
+      tags: JSON.stringify(input.core.tags),
+      suggestedName: input.core.suggestedName,
+      nameJa: input.core.name.ja,
+      nameEn: input.core.name.en,
+      descriptionJa: input.core.description.ja,
+      descriptionEn: input.core.description.en,
+      badgeJa: input.core.badge.ja,
+      badgeEn: input.core.badge.en,
+      iconUrl: input.core.iconUrl ?? null,
       updatedAt: input.now.toISOString(),
     })
     .where(eq(listings.id, input.id));
@@ -588,6 +867,22 @@ export async function listOwnedListings(
     .orderBy(desc(listings.updatedAt), desc(listings.id))) as ListingRow[];
   return rows.map((row) => ({
     ...rowToListing(row),
+    status: row.status === "hidden" ? "hidden" : "visible",
+  }));
+}
+
+/** List a publisher's own rows projected through the URL-only v2 shape. */
+export async function listOwnedListingsV2(
+  db: StoreDb,
+  publisherId: string,
+): Promise<(ListingV2 & { readonly status: "visible" | "hidden" })[]> {
+  const rows = (await db
+    .select()
+    .from(listings)
+    .where(eq(listings.publisherId, publisherId))
+    .orderBy(desc(listings.updatedAt), desc(listings.id))) as ListingRow[];
+  return rows.map((row) => ({
+    ...rowToListingV2(row),
     status: row.status === "hidden" ? "hidden" : "visible",
   }));
 }

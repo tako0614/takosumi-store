@@ -6,7 +6,7 @@
  * appear on multiple servers are de-duplicated by their normalized (git,path)
  * identity and annotated with `seenOn`.
  */
-import { type Listing, listingIdentity } from "../../../spec/listing.ts";
+import { type ListingV2, listingIdentityV2 } from "../../../spec/v2/listing.ts";
 import type { ListSort, Locale } from "../../../spec/api.ts";
 import type { KnownServer } from "./servers.ts";
 import {
@@ -15,7 +15,7 @@ import {
   type PageQuery,
 } from "./tcs-client.ts";
 
-export interface AggregatedListing extends Listing {
+export interface AggregatedListing extends ListingV2 {
   /** Bases of every server this Capsule was found on. */
   readonly seenOn: string[];
   /** The server whose copy of the listing we display. */
@@ -35,7 +35,6 @@ export interface AggregateState {
   readonly servers: readonly KnownServer[];
   readonly sort: ListSort;
   readonly locale: Locale;
-  readonly q?: string;
   readonly limitPerServer: number;
   /** undefined = not yet fetched; null = exhausted; string = next cursor. */
   readonly cursors: Record<string, string | null | undefined>;
@@ -47,13 +46,12 @@ export interface AggregateState {
 
 export function initState(
   servers: readonly KnownServer[],
-  opts: { sort: ListSort; locale: Locale; q?: string; limitPerServer?: number },
+  opts: { sort: ListSort; locale: Locale; limitPerServer?: number },
 ): AggregateState {
   return {
     servers,
     sort: opts.sort,
     locale: opts.locale,
-    q: opts.q,
     limitPerServer: opts.limitPerServer ?? 24,
     cursors: {},
     items: [],
@@ -85,14 +83,14 @@ function isBetterPrimary(
 
 function mergeRound(
   existing: readonly AggregatedListing[],
-  incoming: { base: string; home: boolean; items: readonly Listing[] }[],
+  incoming: { base: string; home: boolean; items: readonly ListingV2[] }[],
 ): AggregatedListing[] {
   const map = new Map<string, AggregatedListing>();
-  for (const item of existing) map.set(listingIdentity(item.source), item);
+  for (const item of existing) map.set(listingIdentityV2(item.source), item);
 
   for (const { base, home, items } of incoming) {
     for (const listing of items) {
-      const key = listingIdentity(listing.source);
+      const key = listingIdentityV2(listing.source);
       const prev = map.get(key);
       if (!prev) {
         map.set(key, {
@@ -155,7 +153,6 @@ export async function loadMore(
       const query: PageQuery = {
         sort: state.sort,
         limit: state.limitPerServer,
-        ...(state.q ? { q: state.q } : {}),
         ...(typeof cursor === "string" ? { cursor } : {}),
       };
       const { signal, cancel } = withTimeout(timeoutMs);
@@ -174,7 +171,7 @@ export async function loadMore(
           server,
           ok: unsupported,
           supported: !unsupported,
-          items: [] as readonly Listing[],
+          items: [] as readonly ListingV2[],
           nextCursor: null,
           error: unsupported
             ? undefined

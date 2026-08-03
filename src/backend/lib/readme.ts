@@ -1,5 +1,6 @@
 import { guardedFetchText } from "./fetch-guard.ts";
 import type { ListingSource } from "../../../spec/listing.ts";
+import type { ListingSourceV2 } from "../../../spec/v2/listing-source.ts";
 
 /**
  * Best-effort README fetch for a listing's source repo, so the store detail
@@ -88,4 +89,11 @@ export async function fetchListingReadme(
     }
   }
   return null;
+}
+
+/** v2 README lookup is repository-root only; no module path is consulted. */
+export function fetchListingReadmeV2(
+  source: ListingSourceV2,
+): Promise<ListingReadme | null> {
+  return fetchListingReadme({ git: source.git, path: "." });
 }

@@ -27,3 +27,6 @@ export type TcsCapability =
   | "sort.created"
   | "sort.name"
   | "icons";
+
+/** Versions this node exposes from the same well-known discovery document. */
+export const TCS_ADVERTISED_VERSIONS: readonly string[] = ["1.0", "2.0"];

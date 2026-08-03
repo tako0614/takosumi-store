@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildInstallUrl } from "../web/src/lib/install-link.ts";
 import type { Listing } from "../spec/listing.ts";
+import type { ListingV2 } from "../spec/v2/listing.ts";
 
 /**
  * Faithful replica of takosumi/dashboard/src/lib/install-link.ts
@@ -69,6 +70,28 @@ const listing: Listing = {
 };
 
 describe("install-link", () => {
+  test("v2 handoff contains only the repository URL and display name", () => {
+    const v2: ListingV2 = {
+      id: "test/app",
+      scope: "test",
+      slug: "app",
+      source: { git: "https://github.com/o/r" },
+      suggestedName: "my-app",
+      name: { ja: "", en: "App" },
+      description: { ja: "", en: "" },
+      badge: { ja: "", en: "" },
+      tags: ["demo"],
+      createdAt: "",
+      updatedAt: "",
+    };
+    const keys = [
+      ...new URL(
+        buildInstallUrl("https://takos.example.com", v2),
+      ).searchParams.keys(),
+    ];
+    expect(keys).toEqual(["git", "name"]);
+  });
+
   test("builds an /install URL the real parser accepts and round-trips", () => {
     const url = buildInstallUrl("https://takos.example.com/", listing);
     expect(new URL(url).pathname).toBe("/install");

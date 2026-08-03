@@ -17,6 +17,8 @@ export interface ServerInfo {
   readonly spec: {
     readonly version: string;
     readonly capabilities: readonly TcsCapability[];
+    /** Additive discovery hint; v1 clients may ignore this field. */
+    readonly versions?: readonly string[];
   };
   readonly server: {
     /** Human label for this node. */

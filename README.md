@@ -7,9 +7,13 @@ install Capsules from inside those apps rather than visiting the store site
 directly. The store's own site is mainly for browsing its catalog and
 registering (publishing) listings.
 
-- **Read API:** `GET /tcs/v1/listings`, `GET /tcs/v1/listings/search`,
-  `GET /tcs/v1/listings/{id}`, `GET /.well-known/tcs` (ServerInfo). Error
-  envelope + keyset cursor pagination. CORS-open for cross-origin clients.
+- **Read API:** TCS 2.0 is the canonical URL-only surface:
+  `GET /tcs/v2/listings`,
+  `GET /tcs/v2/listings/{scope}/{slug}`, and `GET /tcs/v2/server-info`.
+  The v1 routes and `/.well-known/tcs` remain explicit read-only compatibility
+  adapters. Responses use the TCS error envelope and keyset cursor
+  pagination, with CORS open for cross-origin clients. See
+  [docs/SPEC-v2.md](docs/SPEC-v2.md).
 - **Publishing:** account-based registration ("Sign in with Takosumi Accounts"
   OIDC), moderation, and an install handoff that deep-links into a Takos
   `/install` flow.
@@ -18,10 +22,12 @@ registering (publishing) listings.
   the OpenTofu plan, and applies its own policy checks. No publisher signatures
   exist in v1.
 
-A Listing is a pointer to a Capsule: `{ git, path }` plus bilingual presentation
-metadata and browse facets. It is deliberately not an install manifest, input
-schema, output projection, or version lock. The wire schema is owned and
-re-declared here; the Store does not import `takosumi-contract`.
+The canonical v2 Listing is a repository URL `{ source: { git } }` plus
+bilingual presentation metadata and generic browse facets. It is deliberately
+not an install manifest, input schema, output projection, or version lock. The
+legacy v1 wire schema retains `{ git, path }` only for compatibility. The wire
+schema is owned and re-declared here; the Store does not import
+`takosumi-contract`.
 
 Repository metadata has two separate boundaries:
 
@@ -31,7 +37,7 @@ Repository metadata has two separate boundaries:
 - `.well-known/takosumi.json` is an optional, installer-owned Takosumi install
   UX proposal. The Store does not read, validate, persist, return, merge, or
   override it. Takosumi may consume it from the selected immutable source
-  snapshot after the Store hands off only `{ git, path }` and a suggested name.
+  snapshot; TCS 2.0 hands off only `{ git }` and a suggested name.
 
 ## Stack
 

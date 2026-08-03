@@ -18,7 +18,7 @@ import {
 } from "../lib/publish-client.ts";
 import { fetchListingByScopeSlug } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
-import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 function slugify(s: string): string {
   return s
@@ -49,12 +49,10 @@ export const PublishPage: Component = () => {
   const [git, setGit] = createSignal("");
   const [iconUrl, setIconUrl] = createSignal("");
   const [name, setName] = createSignal("");
-  // Advanced — only the user-meaningful overrides. Everything technical
-  // (kind, surface, provider) is defaulted server-side / below.
+  // Advanced — only user-meaningful presentation overrides.
   const [slug, setSlug] = createSignal("");
   const [tags, setTags] = createSignal<string[]>([]);
   const [tagDraft, setTagDraft] = createSignal("");
-  const [path, setPath] = createSignal("");
   const [description, setDescription] = createSignal("");
   const [errors, setErrors] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -64,7 +62,7 @@ export const PublishPage: Component = () => {
   // through `.well-known/takosumi.json`, which Store never reads or edits.
   const [editListing] = createResource(
     () => editId() || null,
-    async (id: string): Promise<Listing | null> => {
+    async (id: string): Promise<ListingV2 | null> => {
       const [scope, slug] = id.split("/");
       if (!scope || !slug) return null;
       return fetchListingByScopeSlug(homeBase(), scope, slug);
@@ -79,8 +77,7 @@ export const PublishPage: Component = () => {
     setName(l.name.ja || l.name.en);
     setIconUrl(l.iconUrl ?? "");
     setSlug(l.slug);
-    setTags([...l.tags]);
-    setPath(l.source.path && l.source.path !== "." ? l.source.path : "");
+    setTags([...(l.tags ?? [])]);
     setDescription(l.description.ja || l.description.en);
   });
 
@@ -135,10 +132,7 @@ export const PublishPage: Component = () => {
     const base: PublishBody = existing
       ? bodyFromListing(existing)
       : {
-          source: { git: "", path: "" },
-          kind: "worker",
-          surface: "service",
-          provider: "cloudflare",
+          source: { git: "" },
           suggestedName: slugify(display),
           name: { ja: display, en: display },
           description: { ja: "", en: "" },
@@ -146,10 +140,7 @@ export const PublishPage: Component = () => {
         };
     const body: PublishBody = {
       ...base,
-      source: {
-        git: git().trim(),
-        path: path().trim(),
-      },
+      source: { git: git().trim() },
       ...(!existing && slug().trim() ? { slug: slug().trim() } : {}),
       tags: tags(),
       name: { ja: display, en: display },
@@ -328,14 +319,6 @@ export const PublishPage: Component = () => {
                       />
                     </div>
                     <span class="field-hint">{t("tagsHint", locale())}</span>
-                  </label>
-                  <label class="field">
-                    <span>path</span>
-                    <input
-                      value={path()}
-                      onInput={(e) => setPath(e.currentTarget.value)}
-                      placeholder="(repo root)"
-                    />
                   </label>
                   <label class="field">
                     <span>{t("descriptionField", locale())}</span>

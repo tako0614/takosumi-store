@@ -13,14 +13,9 @@ const S = {
     ja: "Git で公開された OpenTofu Capsule を見つける場所",
     en: "Find Git-published OpenTofu Capsules",
   },
-  searchPlaceholder: {
-    ja: "リポジトリや Capsule を検索",
-    en: "Search repositories and Capsules",
-  },
   all: { ja: "すべて", en: "All" },
   apps: { ja: "アプリ", en: "Apps" },
   recentlyAdded: { ja: "新着・更新", en: "Recently updated" },
-  resultsFor: { ja: "の検索結果", en: "results" },
   sortUpdated: { ja: "更新順", en: "Recently updated" },
   sortName: { ja: "名前順", en: "Name" },
   loadMore: { ja: "もっと見る", en: "Load more" },
@@ -30,8 +25,8 @@ const S = {
     en: "No matching Capsules",
   },
   noResultsHint: {
-    ja: "別のキーワードやカテゴリで探してみてください。",
-    en: "Try a different keyword or category.",
+    ja: "別のカテゴリで探してみてください。",
+    en: "Try a different category.",
   },
   errorTitle: { ja: "読み込めませんでした", en: "Couldn’t load" },
   errorHint: {

@@ -16,11 +16,39 @@ export interface ListingSource {
 }
 
 const CONTROL = /\p{Cc}/u;
+const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u;
+const PATH_SEGMENT = /^[A-Za-z0-9._~-]+$/u;
 
-/** Canonicalize the URL-shaped part of a TCS source coordinate. */
+function hasAsciiHttpsScheme(value: string): boolean {
+  const expected = "https://";
+  if (value.length < expected.length) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    const expectedChar = expected[index]!;
+    const actualChar = value[index]!;
+    if (
+      actualChar !== expectedChar &&
+      actualChar !== expectedChar.toUpperCase()
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Canonicalize the URL-shaped part of a TCS source coordinate.
+ *
+ * This deliberately accepts a small ASCII grammar instead of delegating
+ * identity to the moving WHATWG URL serializer. The same grammar is used by
+ * the Store's SQL migration, so an old row cannot normalize differently from
+ * a newly published row. Repository paths remain case-sensitive.
+ */
 export function canonicalTcsGitUrl(raw: string): string | undefined {
   if (CONTROL.test(raw)) return undefined;
-  const value = raw.trim();
+  // SQLite trim(X) removes only U+0020 by default. Keep the JS parser's
+  // boundary identical rather than silently accepting NBSP/BOM/other Unicode
+  // whitespace that the migration would reject.
+  const value = raw.replace(/^ +/u, "").replace(/ +$/u, "");
   if (
     !value ||
     value.includes("\\") ||
@@ -29,27 +57,67 @@ export function canonicalTcsGitUrl(raw: string): string | undefined {
   ) {
     return undefined;
   }
-  try {
-    const parsed = new URL(value);
-    if (
-      parsed.protocol !== "https:" ||
-      !parsed.hostname ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      parsed.hash
-    ) {
-      return undefined;
-    }
-    const pathname = parsed.pathname
-      .replace(/\/+$/u, "")
-      .replace(/\.git$/iu, "");
-    if (!pathname || pathname === "/") return undefined;
-    parsed.pathname = pathname;
-    return parsed.toString().replace(/\/$/u, "");
-  } catch {
+  if (!hasAsciiHttpsScheme(value)) return undefined;
+
+  const rest = value.slice("https://".length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return undefined;
+
+  const authority = rest.slice(0, slash);
+  if (!authority || authority.includes("@")) return undefined;
+
+  const colon = authority.indexOf(":");
+  const host = colon === -1 ? authority : authority.slice(0, colon);
+  const portText = colon === -1 ? undefined : authority.slice(colon + 1);
+  if (
+    !host ||
+    authority.indexOf(":", colon === -1 ? 0 : colon + 1) !== -1 ||
+    host.split(".").some((label) => !DNS_LABEL.test(label))
+  ) {
     return undefined;
   }
+
+  let canonicalAuthority = host.toLowerCase();
+  if (portText !== undefined) {
+    if (!/^\d+$/u.test(portText)) return undefined;
+    const port = Number(portText);
+    if (!Number.isSafeInteger(port) || port > 65_535) return undefined;
+    if (port !== 443) canonicalAuthority += `:${port}`;
+  }
+
+  const rawPath = rest.slice(slash).replace(/\/+$/u, "");
+  if (!rawPath || rawPath === "/") return undefined;
+  const segments = rawPath.slice(1).split("/");
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        !PATH_SEGMENT.test(segment),
+    )
+  ) {
+    return undefined;
+  }
+
+  let canonicalPath = rawPath;
+  if (/\.git$/iu.test(canonicalPath)) {
+    canonicalPath = canonicalPath.slice(0, -4).replace(/\/+$/u, "");
+  }
+  if (!canonicalPath || canonicalPath === "/") return undefined;
+  const canonicalSegments = canonicalPath.slice(1).split("/");
+  if (
+    canonicalSegments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        !PATH_SEGMENT.test(segment),
+    )
+  ) {
+    return undefined;
+  }
+  return `https://${canonicalAuthority}${canonicalPath}`;
 }
 
 /** Canonicalize a repository-relative TCS module path without folding case. */

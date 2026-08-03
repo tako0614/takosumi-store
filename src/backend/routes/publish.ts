@@ -9,19 +9,25 @@ import {
 import { requirePublisher } from "../lib/auth.ts";
 import {
   validatePublishInput,
+  validatePublishInputV2,
   type ValidatedListing,
+  type ValidatedListingV2,
 } from "../lib/listing-validate.ts";
 import { isRehostedIconKey, rehostListingIcon } from "../lib/icon-rehost.ts";
 import {
   countListingIconReferences,
   createListing,
+  createListingV2,
   getListingRow,
   hardDeleteListing,
   listOwnedListings,
+  listOwnedListingsV2,
   rowToListing,
+  rowToListingV2,
   setListingStatus,
   slugTakenInScope,
   updateListingCore,
+  updateListingV2Core,
 } from "../db/listings-store.ts";
 import { normalizeSlug, slugIsValid } from "../lib/slug.ts";
 import type { StoreDb } from "../db/client.ts";
@@ -103,6 +109,44 @@ async function withRehostedIcon(
   return iconUrl ? { ...withoutIcon, iconUrl } : withoutIcon;
 }
 
+function v2AsLegacyCore(core: ValidatedListingV2): ValidatedListing {
+  return {
+    source: { git: core.source.git, path: "." },
+    kind: "worker",
+    surface: "service",
+    provider: "catalog",
+    category: core.category,
+    tags: core.tags,
+    suggestedName: core.suggestedName,
+    name: core.name,
+    description: core.description,
+    badge: core.badge,
+    ...(core.iconUrl ? { iconUrl: core.iconUrl } : {}),
+  };
+}
+
+async function withRehostedIconV2(
+  env: Env,
+  origin: string,
+  body: unknown,
+  core: ValidatedListingV2,
+  rehostIcon: IconRehoster,
+): Promise<ValidatedListingV2> {
+  const legacy = await withRehostedIcon(
+    env,
+    origin,
+    body,
+    v2AsLegacyCore(core),
+    rehostIcon,
+  );
+  return legacy.iconUrl
+    ? { ...core, iconUrl: legacy.iconUrl }
+    : (() => {
+        const { iconUrl: _icon, ...withoutIcon } = core;
+        return withoutIcon;
+      })();
+}
+
 export function createPublishRoutes(
   resolveDb: DbResolver = defaultResolveDb,
   rehostIcon: IconRehoster = rehostListingIcon,
@@ -128,6 +172,214 @@ export function createPublishRoutes(
       },
     });
   });
+
+  // -----------------------------------------------------------------------
+  // TCS 2.0 URL-only publisher surface. v1 mutation routes below remain
+  // explicit compatibility adapters for older clients.
+  // -----------------------------------------------------------------------
+
+  app.get("/publish/v2/listings", async (c: TcsContext) => {
+    const db = resolveDb(c);
+    const auth = await requirePublisher(c, db);
+    if (!auth.ok) return auth.response;
+    return c.json({
+      listings: await listOwnedListingsV2(db, auth.publisher.id),
+    });
+  });
+
+  app.post("/publish/v2/listings", async (c: TcsContext) => {
+    const db = resolveDb(c);
+    const auth = await requirePublisher(c, db);
+    if (!auth.ok) return auth.response;
+    if (!auth.publisher.handle) {
+      return jsonError(
+        c,
+        400,
+        "failed_precondition",
+        "set a handle before publishing",
+      );
+    }
+    const scope = auth.publisher.handle;
+    const body = await c.req.json().catch(() => null);
+    const result = validatePublishInputV2(body);
+    if (!result.ok) {
+      return jsonError(
+        c,
+        400,
+        "invalid_argument",
+        "invalid v2 listing",
+        result.errors,
+      );
+    }
+    const explicitSlug =
+      body && typeof (body as { slug?: unknown }).slug === "string"
+        ? (body as { slug: string }).slug.trim()
+        : "";
+    let slug: string;
+    if (explicitSlug) {
+      slug = normalizeSlug(explicitSlug);
+      if (!slugIsValid(slug)) {
+        return jsonError(
+          c,
+          400,
+          "invalid_argument",
+          "slug must be lowercase letters, digits, and hyphens",
+        );
+      }
+      if (await slugTakenInScope(db, scope, slug)) {
+        return jsonError(
+          c,
+          409,
+          "conflict",
+          `slug "${slug}" is already taken in ${scope}`,
+        );
+      }
+    } else {
+      const base = normalizeSlug(result.value.suggestedName);
+      if (!slugIsValid(base)) {
+        return jsonError(
+          c,
+          400,
+          "invalid_argument",
+          "could not derive a slug from the name; provide an explicit slug",
+        );
+      }
+      slug = await uniqueSlug(db, scope, base);
+    }
+    const core = await withRehostedIconV2(
+      c.env,
+      originOf(c),
+      body,
+      result.value,
+      rehostIcon,
+    );
+    const created = await createListingV2(db, {
+      id: `${scope}/${slug}`,
+      scope,
+      slug,
+      core,
+      publisher: auth.publisher,
+      now: new Date(),
+      maxListingsInScope: maxListingsPerScope(c.env),
+    });
+    if (!created.ok) {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
+      if (created.reason === "quota") {
+        return jsonError(
+          c,
+          429,
+          "resource_exhausted",
+          `listing quota reached for ${scope}`,
+        );
+      }
+      return jsonError(
+        c,
+        409,
+        "conflict",
+        "a listing for this git already exists",
+      );
+    }
+    return c.json({ listing: created.listing, warnings: result.warnings }, 201);
+  });
+
+  app.patch("/publish/v2/listings/:scope/:slug", async (c: TcsContext) => {
+    const db = resolveDb(c);
+    const auth = await requirePublisher(c, db);
+    if (!auth.ok) return auth.response;
+    const id = `${c.req.param("scope")}/${c.req.param("slug")}`;
+    const row = await getListingRow(db, id);
+    if (!row) return jsonError(c, 404, "not_found", "no such listing");
+    if (row.publisherId !== auth.publisher.id) {
+      return jsonError(c, 403, "permission_denied", "not your listing");
+    }
+    const body = await c.req.json().catch(() => null);
+    const result = validatePublishInputV2(body);
+    if (!result.ok) {
+      return jsonError(
+        c,
+        400,
+        "invalid_argument",
+        "invalid v2 listing",
+        result.errors,
+      );
+    }
+    const core = await withRehostedIconV2(
+      c.env,
+      originOf(c),
+      body,
+      result.value,
+      rehostIcon,
+    );
+    try {
+      await updateListingV2Core(db, { id, core, now: new Date() });
+    } catch {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
+      return jsonError(c, 409, "conflict", "git collides with another listing");
+    }
+    const updated = await getListingRow(db, id);
+    if (row.iconUrl !== updated?.iconUrl) {
+      await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
+    }
+    return c.json({ listing: updated ? rowToListingV2(updated) : null });
+  });
+
+  app.delete("/publish/v2/listings/:scope/:slug", async (c: TcsContext) => {
+    const db = resolveDb(c);
+    const auth = await requirePublisher(c, db);
+    if (!auth.ok) return auth.response;
+    const id = `${c.req.param("scope")}/${c.req.param("slug")}`;
+    const row = await getListingRow(db, id);
+    if (!row) return jsonError(c, 404, "not_found", "no such listing");
+    if (row.publisherId !== auth.publisher.id) {
+      return jsonError(c, 403, "permission_denied", "not your listing");
+    }
+    if (c.req.query("hard") === "true") {
+      await hardDeleteListing(db, id);
+      await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
+    } else {
+      await setListingStatus(db, id, "hidden");
+    }
+    return c.json({ ok: true });
+  });
+
+  app.post(
+    "/publish/v2/listings/:scope/:slug/status",
+    async (c: TcsContext) => {
+      const db = resolveDb(c);
+      const auth = await requirePublisher(c, db);
+      if (!auth.ok) return auth.response;
+      const id = `${c.req.param("scope")}/${c.req.param("slug")}`;
+      const row = await getListingRow(db, id);
+      if (!row) return jsonError(c, 404, "not_found", "no such listing");
+      if (row.publisherId !== auth.publisher.id) {
+        return jsonError(c, 403, "permission_denied", "not your listing");
+      }
+      const body = (await c.req.json().catch(() => null)) as {
+        status?: unknown;
+      } | null;
+      if (body?.status !== "visible" && body?.status !== "hidden") {
+        return jsonError(
+          c,
+          400,
+          "invalid_argument",
+          'status must be "visible" or "hidden"',
+        );
+      }
+      await setListingStatus(db, id, body.status);
+      const updated = await getListingRow(db, id);
+      return c.json({ listing: updated ? rowToListingV2(updated) : null });
+    },
+  );
 
   app.get("/publish/listings", async (c: TcsContext) => {
     const db = resolveDb(c);

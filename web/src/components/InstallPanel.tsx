@@ -1,5 +1,5 @@
 import { createSignal, Show, type Component } from "solid-js";
-import type { Listing } from "../../../spec/listing.ts";
+import type { ListingV2 } from "../../../spec/v2/listing.ts";
 import type { Locale } from "../../../spec/api.ts";
 import { t } from "../lib/i18n.ts";
 import { buildInstallUrl } from "../lib/install-link.ts";
@@ -11,7 +11,7 @@ import { getTakosOrigin, setTakosOrigin } from "../lib/takos-origin.ts";
  * confirm. The visitor sets their Takos origin once (kept in localStorage).
  */
 export const InstallPanel: Component<{
-  listing: Listing;
+  listing: ListingV2;
   locale: Locale;
 }> = (props) => {
   const [origin, setOrigin] = createSignal(getTakosOrigin());

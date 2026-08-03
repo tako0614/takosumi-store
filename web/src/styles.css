@@ -185,38 +185,6 @@ button {
   font-size: var(--tg-fs-lg);
   letter-spacing: -0.02em;
 }
-.topbar-search {
-  position: relative;
-  flex: 1 1 220px;
-  min-width: 0;
-  max-width: 540px;
-  display: flex;
-  align-items: center;
-}
-.topbar-search-icon {
-  position: absolute;
-  left: 14px;
-  color: var(--tg-fg-subtle);
-  pointer-events: none;
-}
-.topbar-search input {
-  width: 100%;
-  height: 42px;
-  padding: 0 16px 0 42px;
-  border: 1px solid var(--tg-line-strong);
-  border-radius: var(--tg-r-full);
-  background: var(--tg-bg-subtle);
-  color: var(--tg-fg);
-  font: inherit;
-  font-size: var(--tg-fs-sm);
-}
-.topbar-search input::placeholder {
-  color: var(--tg-fg-subtle);
-}
-.topbar-search input:focus-visible {
-  outline: none;
-  border-color: var(--tg-accent);
-}
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -822,11 +790,6 @@ button {
   .topbar-inner {
     flex-wrap: wrap;
     padding: var(--tg-s-2) var(--tg-s-4);
-  }
-  .topbar-search {
-    order: 3;
-    flex-basis: 100%;
-    max-width: none;
   }
   .container {
     padding: 0 var(--tg-s-4);
