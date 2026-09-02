@@ -90,8 +90,7 @@ const CONTRACT = {
       ],
       triggers: ["authority"],
       obligations: {
-        provenance:
-          "requires a clean main exactly equal to origin/main, runs bun run check, renders the manifest-only SQL twice, and requires TAKOSUMI_STORE_OFFICIAL_DATABASE_ID, TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_COMMIT, TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_SHA256, and TAKOSUMI_STORE_RELEASE_STATE_DIR to match the independently reviewed target, commit, digest, and private state directory",
+        provenance: `reads the operator-realized Wrangler config named by ${CONFIG_ENV} and requires it to name the exact official production Store (Worker name takosumi-store, https://store.takosumi.com origin, and the takosumi-store-db database matching TAKOSUMI_STORE_OFFICIAL_DATABASE_ID); also requires a clean main exactly equal to origin/main, runs bun run check, renders the manifest-only SQL twice, and requires TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_COMMIT, TAKOSUMI_STORE_OFFICIAL_LISTINGS_REVIEW_SHA256, and TAKOSUMI_STORE_RELEASE_STATE_DIR to match the independently reviewed commit, digest, and private state directory`,
         "post-conditions":
           "reads every official listing through https://store.takosumi.com and compares the public projection with the reviewed manifest",
         reversal:
@@ -121,8 +120,7 @@ const CONTRACT = {
       ],
       triggers: ["irreversible", "authority"],
       obligations: {
-        provenance:
-          "requires a clean commit exactly matching TAKOSUMI_STORE_SCHEMA_REVIEW_COMMIT, named reviewer TAKOSUMI_STORE_SCHEMA_REVIEWER, exact pending-migration manifest SHA-256 in TAKOSUMI_STORE_SCHEMA_REVIEW_SHA256, realized-config SHA-256 in TAKOSUMI_STORE_SCHEMA_CONFIG_SHA256, and exact D1 identity in TAKOSUMI_STORE_SCHEMA_DATABASE_ID/TAKOSUMI_STORE_SCHEMA_DATABASE_NAME before applying through this entrypoint",
+        provenance: `reads the operator-realized Wrangler config named by ${CONFIG_ENV}, rejects template placeholders, and requires TAKOSUMI_STORE_PUBLIC_ORIGIN to equal the realized config's APP_URL and be included in its route hostnames; also requires a clean commit exactly matching TAKOSUMI_STORE_SCHEMA_REVIEW_COMMIT, named reviewer TAKOSUMI_STORE_SCHEMA_REVIEWER, exact pending-migration manifest SHA-256 in TAKOSUMI_STORE_SCHEMA_REVIEW_SHA256, realized-config SHA-256 in TAKOSUMI_STORE_SCHEMA_CONFIG_SHA256, and exact D1 identity in TAKOSUMI_STORE_SCHEMA_DATABASE_ID/TAKOSUMI_STORE_SCHEMA_DATABASE_NAME before applying through this entrypoint`,
         "post-conditions":
           "runs a read-only canonical collision audit before mutation, then verifies the complete D1 migration ledger, git_identity, every v2 schema/index, full listings/reports row readback, existing report_rate_limits row preservation, 0007/0008 field transforms against the private snapshot, and a private post-readback snapshot",
         reversal:
