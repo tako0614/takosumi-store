@@ -7,6 +7,8 @@ install Capsules from inside those apps rather than visiting the store site
 directly. The store's own site is mainly for browsing its catalog and
 registering (publishing) listings.
 
+## What it gives you
+
 - **Read API:** TCS 2.0 is the canonical URL-only surface:
   `GET /tcs/v2/listings`,
   `GET /tcs/v2/listings/{scope}/{slug}`, and `GET /tcs/v2/server-info`.
@@ -39,12 +41,12 @@ Repository metadata has two separate boundaries:
   override it. Takosumi may consume it from the selected immutable source
   snapshot; TCS 2.0 hands off only `{ git }` and a suggested name.
 
-## Stack
+## How it is built
 
 Cloudflare Worker + Hono backend + Solid/Vite SPA + Drizzle/D1, bun tooling.
 The worker serves the SPA and the API on one origin.
 
-## Commands
+## Getting started
 
 ```bash
 bun install
