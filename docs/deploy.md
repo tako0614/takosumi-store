@@ -48,10 +48,11 @@ official Store is deployed only through
 
 ## Consuming the store
 
-The takos / takosumi clients consume the store's [read API](./SPEC.md) directly
-(CORS-open), so users browse and install Capsules from inside those apps. The
-store's own site is mainly for browsing its catalog and registering (publishing)
-listings.
+The takos / takosumi clients consume the store's [current TCS 2.0 read API](./SPEC-v2.md)
+directly (CORS-open), so users browse and install Capsules from inside those
+apps. The [TCS 1.0 contract](./SPEC.md) remains only as the v1 compatibility
+contract for the explicit `/tcs/v1` adapter. The store's own site is mainly for
+browsing its catalog and registering (publishing) listings.
 
 ## Operator release
 

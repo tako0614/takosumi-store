@@ -73,8 +73,9 @@ deployed by this repository's own entrypoint:
 bun run deploy
 ```
 
-Docs: the open read spec is in [`docs/SPEC.md`](docs/SPEC.md); self-hosting is
-in [`docs/deploy.md`](docs/deploy.md).
+Docs: the canonical TCS 2.0 open read spec is in
+[`docs/SPEC-v2.md`](docs/SPEC-v2.md); the v1 compatibility contract is in
+[`docs/SPEC.md`](docs/SPEC.md); self-hosting is in [`docs/deploy.md`](docs/deploy.md).
 
 This repository does not currently ship a deployable OpenTofu module. It must
 therefore not be listed as an installable Capsule. The supported deployment
