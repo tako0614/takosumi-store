@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Takosumi Store — a self-hostable store for Takos Capsules with an open HTTP/JSON read API (TCS). Browse and install Capsules; publishers register listings.",
+  "description": "a self-hostable store for Takos Capsules with an open HTTP/JSON read API (TCS). Browse and install Capsules; publishers register listings.",
   "scripts": {
     "dev": "bunx wrangler dev --config wrangler.local.toml",
     "dev:web": "bunx vite --config web/vite.config.ts",
