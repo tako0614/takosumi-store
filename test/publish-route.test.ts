@@ -46,7 +46,7 @@ beforeEach(async () => {
 });
 
 describe("publish routes", () => {
-  test("v2 publishing is URL-only and enforces Git identity", async () => {
+  test("v2 publishing enforces Git identity and keeps the reviewed module", async () => {
     const { cookie } = await login(db, { handle: "alice" });
     const created = await jreq(pub, "/publish/v2/listings", {
       cookie,
@@ -68,7 +68,11 @@ describe("publish routes", () => {
         source: { git: "https://github.com/o/other.git", path: "module" },
       }),
     });
-    expect(withPath.status).toBe(400);
+    expect(withPath.status).toBe(201);
+    expect((await withPath.json()).listing.source).toEqual({
+      git: "https://github.com/o/other",
+      path: "module",
+    });
 
     const duplicate = await jreq(pub, "/publish/v2/listings", {
       cookie,

@@ -1,16 +1,28 @@
 /**
  * TCS 2.0 listing source.
  *
- * A v2 source identifies a repository only.  A Store is a discovery catalog,
- * not an installer, so module paths, refs, commits, and install configuration
- * do not belong on this wire shape.
+ * A v2 source names the repository a listing is about and, when the catalog
+ * reviewed one specific module inside it, that module's directory. The module
+ * path is discovery/curation data, not install authority: an installer still
+ * resolves it against the immutable snapshot it scanned before it plans or
+ * applies anything. Refs, commits, and install configuration stay off this
+ * wire shape, so a listing can never pin executable bytes.
  */
 
-import { canonicalTcsGitUrl } from "../listing-source.ts";
+import {
+  canonicalTcsGitUrl,
+  canonicalTcsModulePath,
+} from "../listing-source.ts";
 
 export interface ListingSourceV2 {
   /** Canonical credential-free HTTPS Git repository URL (strict ASCII grammar). */
   readonly git: string;
+  /**
+   * Canonical repository-relative directory of the module this listing is
+   * about. `.` is the repository root module. Absent when the catalog names no
+   * module, which leaves the module choice to the installer's own scan.
+   */
+  readonly path?: string;
 }
 
 /** Parse an untrusted v2 source into its one canonical wire form. */
@@ -22,13 +34,17 @@ export function parseTcsV2ListingSource(
   }
   const source = input as Record<string, unknown>;
   if (
-    Object.keys(source).some((key) => key !== "git") ||
-    typeof source.git !== "string"
+    Object.keys(source).some((key) => key !== "git" && key !== "path") ||
+    typeof source.git !== "string" ||
+    ("path" in source && typeof source.path !== "string")
   ) {
     return undefined;
   }
   const git = canonicalTcsGitUrl(source.git);
-  return git ? { git } : undefined;
+  if (!git) return undefined;
+  if (!("path" in source)) return { git };
+  const path = canonicalTcsModulePath(source.path as string);
+  return path ? { git, path } : undefined;
 }
 
 /** Canonical URL identity used for v2 cross-server de-duplication. */

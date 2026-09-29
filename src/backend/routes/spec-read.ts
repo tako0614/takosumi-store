@@ -305,7 +305,7 @@ export function createReadRoutes(
     return c.json(listing);
   });
 
-  // TCS 2.0: URL-only repository discovery. Ambiguous legacy rows are
+  // TCS 2.0: repository discovery plus the reviewed module. Ambiguous legacy rows are
   // filtered by the DB projection and never selected arbitrarily.
   app.get("/tcs/v2/listings", async (c: TcsContext) => {
     const parsed = parseV2Query(c);

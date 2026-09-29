@@ -6,9 +6,11 @@
  * runs the compatibility check, and clicks install. There is no server call:
  * this is a plain cross-site link the user opens against their own Takos origin.
  *
- * v2 handoff fields are deliberately git / name only. The legacy v1 overload
- * still emits `path` for old callers; the Store UI and all v2 links use the
- * URL-only branch below.
+ * The handoff carries the repository, the display name, and — when the listing
+ * reviewed one non-root module — that module path. A listing that reviews the
+ * repository root emits no `path`, which leaves the module choice to the
+ * installer's own scan. The legacy v1 overload always carried a path; the
+ * branch below covers both shapes.
  */
 import type { Listing } from "../../../spec/listing.ts";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";

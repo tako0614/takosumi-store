@@ -14,11 +14,24 @@ export const TCS_V2_LISTING_SOURCE_FIXTURES: readonly ListingSourceV2Fixture[] =
       expected: { git: "https://github.com/tako0614/takos" },
     },
     {
-      name: "rejects a module path because v2 is URL-only",
+      name: "keeps and canonicalizes the module the listing reviewed",
       input: {
         git: "https://github.com/tako0614/takos",
-        path: "deploy/opentofu",
+        path: "deploy/opentofu/cloudflare/",
       },
+      expected: {
+        git: "https://github.com/tako0614/takos",
+        path: "deploy/opentofu/cloudflare",
+      },
+    },
+    {
+      name: "canonicalizes every root module spelling to dot",
+      input: { git: "https://github.com/tako0614/takos", path: "./" },
+      expected: { git: "https://github.com/tako0614/takos", path: "." },
+    },
+    {
+      name: "rejects a module path that escapes the repository",
+      input: { git: "https://github.com/tako0614/takos", path: "../secret" },
       expected: undefined,
     },
     {

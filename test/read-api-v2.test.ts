@@ -40,19 +40,38 @@ describe("TCS 2.0 read API", () => {
     expect(info.spec.versions).toEqual(["1.0", "2.0"]);
   });
 
-  test("list returns presentation metadata and a URL-only source", async () => {
+  test("list returns presentation metadata and the reviewed module", async () => {
     const res = await get("/tcs/v2/listings?limit=2");
     expect(res.status).toBe(200);
     const page = await res.json();
     expect(page.items).toHaveLength(2);
+    // A row that reviewed a non-root module says so; everything else about the
+    // listing is still presentation-only.
+    expect(page.items.map((item: { source: unknown }) => item.source)).toEqual([
+      {
+        git: "https://github.com/tako0614/takos",
+        path: "deploy/opentofu",
+      },
+      {
+        git: "https://github.com/tako0614/yurucommu",
+        path: "deploy/takoform",
+      },
+    ]);
     for (const item of page.items) {
-      expect(Object.keys(item.source)).toEqual(["git"]);
-      expect(item.source.git).toMatch(/^https:\/\//);
       expect(item).not.toHaveProperty("path");
       expect(item).not.toHaveProperty("provider");
       expect(item).not.toHaveProperty("kind");
       expect(item).not.toHaveProperty("surface");
     }
+  });
+
+  test("a root-reviewed listing keeps the repository-only source tuple", async () => {
+    const res = await get("/tcs/v2/listings/takos/takos-office");
+    expect(res.status).toBe(200);
+    const listing = await res.json();
+    expect(listing.source).toEqual({
+      git: "https://github.com/tako0614/takos-office",
+    });
   });
 
   test("search is explicitly unsupported and scope detail uses the v2 source shape", async () => {
@@ -65,6 +84,7 @@ describe("TCS 2.0 read API", () => {
     const listing = await detail.json();
     expect(listing.source).toEqual({
       git: "https://github.com/tako0614/yurucommu",
+      path: "deploy/takoform",
     });
     expect(listing).not.toHaveProperty("path");
   });

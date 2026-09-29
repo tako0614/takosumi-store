@@ -30,9 +30,9 @@ export interface ValidatedListing {
   readonly iconUrl?: string;
 }
 
-/** Publisher input accepted by the URL-only v2 mutation surface. */
+/** Publisher input accepted by the v2 mutation surface. */
 export interface ValidatedListingV2 {
-  readonly source: { readonly git: string };
+  readonly source: { readonly git: string; readonly path?: string };
   readonly category: string;
   readonly tags: readonly string[];
   readonly suggestedName: string;
@@ -190,11 +190,12 @@ export function validatePublishInputV2(input: unknown): ValidationV2Result {
   const body = asRecord(input);
   const source = asRecord(body.source);
   const errors: string[] = [];
-  for (const field of ["path", "ref", "resolvedCommit", "commit"]) {
+  if (source.path !== undefined && typeof source.path !== "string") {
+    errors.push("source.path must be a canonical repository-relative path");
+  }
+  for (const field of ["ref", "resolvedCommit", "commit"]) {
     if (source[field] !== undefined) {
-      errors.push(
-        `source.${field} is not part of the TCS 2.0 URL-only listing`,
-      );
+      errors.push(`source.${field} is not part of the TCS 2.0 listing source`);
     }
   }
   for (const field of ["kind", "surface", "provider"]) {
@@ -206,7 +207,7 @@ export function validatePublishInputV2(input: unknown): ValidationV2Result {
 
   const result = validatePublishInput({
     ...body,
-    source: { git: source.git, path: "" },
+    source: { git: source.git, path: source.path ?? "" },
     // These values are legacy storage defaults only. They are not returned by
     // rowToListingV2 and cannot influence install behavior.
     kind: "worker",
@@ -214,11 +215,17 @@ export function validatePublishInputV2(input: unknown): ValidationV2Result {
     provider: "catalog",
   });
   if (!result.ok) return result;
+  // The reviewed module path is part of the v2 source tuple; the root module
+  // stays implicit so a URL-only publisher keeps the v2 default.
+  const reviewedPath = result.value.source.path;
   return {
     ok: true,
     warnings: result.warnings,
     value: {
-      source: { git: result.value.source.git },
+      source: {
+        git: result.value.source.git,
+        ...(reviewedPath === "." ? {} : { path: reviewedPath }),
+      },
       category: result.value.category,
       tags: result.value.tags,
       suggestedName: result.value.suggestedName,

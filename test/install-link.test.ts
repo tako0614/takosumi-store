@@ -70,7 +70,7 @@ const listing: Listing = {
 };
 
 describe("install-link", () => {
-  test("v2 handoff contains only the repository URL and display name", () => {
+  test("a root-reviewed v2 handoff stays repository URL plus display name", () => {
     const v2: ListingV2 = {
       id: "test/app",
       scope: "test",
@@ -90,6 +90,30 @@ describe("install-link", () => {
       ).searchParams.keys(),
     ];
     expect(keys).toEqual(["git", "name"]);
+  });
+
+  test("v2 handoff carries the module the listing reviewed", () => {
+    const v2: ListingV2 = {
+      id: "test/app",
+      scope: "test",
+      slug: "app",
+      source: {
+        git: "https://github.com/o/r",
+        path: "deploy/opentofu/cloudflare",
+      },
+      suggestedName: "my-app",
+      name: { ja: "", en: "App" },
+      description: { ja: "", en: "" },
+      badge: { ja: "", en: "" },
+      createdAt: "",
+      updatedAt: "",
+    };
+    const prefill = parseInstallPrefill(
+      buildInstallUrl("https://takos.example.com", v2),
+    )!;
+    expect(prefill.git).toBe("https://github.com/o/r");
+    expect(prefill.path).toBe("deploy/opentofu/cloudflare");
+    expect(prefill.name).toBe("my-app");
   });
 
   test("builds an /install URL the real parser accepts and round-trips", () => {

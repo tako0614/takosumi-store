@@ -16,16 +16,29 @@ conformance tests are in `test/listing-v2-source-contract.test.ts` and
 
 ## Listing shape
 
-The canonical source is exactly one field:
+The canonical source is the repository, plus the module the listing reviewed
+when the catalog names one:
 
 ```json
-{ "source": { "git": "https://github.com/example/app" } }
+{
+  "source": {
+    "git": "https://github.com/example/app",
+    "path": "deploy/opentofu"
+  }
+}
 ```
 
 `git` is a credential-free HTTPS URL. Query strings, fragments, embedded
 credentials, percent-encoding, Unicode hosts/paths, and IPv6 authorities are
 rejected; empty, `.` and `..` path segments are rejected; a trailing slash and
 a trailing `.git` are normalized away.
+`path` is a canonical repository-relative directory and is optional. `.` is
+the repository root module; an absent field means the same thing, so a listing
+that only announces a repository stays valid. A non-root `path` is the piece
+of install-relevant context only the catalog knows: it says which module the
+listing is _about_. It is discovery data, never install authority — the
+installer still resolves it against the immutable source snapshot it scanned
+and confirms the choice with the user before anything runs.
 The canonical URL is the v2 de-duplication key. A v2 `Listing` may carry:
 
 - `id`, `scope`, `slug`, and `suggestedName` for presentation and stable links;
@@ -35,7 +48,7 @@ The canonical URL is the v2 de-duplication key. A v2 `Listing` may carry:
 - optional publisher attribution and server-local curation badges; and
 - `createdAt` / `updatedAt` timestamps.
 
-Provider, kind, surface, module path, ref, resolved commit, inputs,
+Provider, kind, surface, ref, resolved commit, inputs,
 `InstallConfig`, output policy, and credentials are not TCS 2.0 fields. A
 Store may retain old values internally for v1 compatibility, but must not
 return them from v2 or use them as install authority. Category and tags are

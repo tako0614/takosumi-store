@@ -9,7 +9,7 @@ registering (publishing) listings.
 
 ## What it gives you
 
-- **Read API:** TCS 2.0 is the canonical URL-only surface:
+- **Read API:** TCS 2.0 is the canonical surface:
   `GET /tcs/v2/listings`,
   `GET /tcs/v2/listings/{scope}/{slug}`, and `GET /tcs/v2/server-info`.
   The v1 routes and `/.well-known/tcs` remain explicit read-only compatibility

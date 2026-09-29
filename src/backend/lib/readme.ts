@@ -91,9 +91,9 @@ export async function fetchListingReadme(
   return null;
 }
 
-/** v2 README lookup is repository-root only; no module path is consulted. */
+/** v2 README lookup prefers the reviewed module's README, then the repo root. */
 export function fetchListingReadmeV2(
   source: ListingSourceV2,
 ): Promise<ListingReadme | null> {
-  return fetchListingReadme({ git: source.git, path: "." });
+  return fetchListingReadme({ git: source.git, path: source.path ?? "." });
 }
