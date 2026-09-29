@@ -174,7 +174,7 @@ export function createPublishRoutes(
   });
 
   // -----------------------------------------------------------------------
-  // TCS 2.0 URL-only publisher surface. v1 mutation routes below remain
+  // TCS 2.0 publisher surface. v1 mutation routes below remain
   // explicit compatibility adapters for older clients.
   // -----------------------------------------------------------------------
 

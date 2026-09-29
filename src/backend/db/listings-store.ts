@@ -86,19 +86,24 @@ export function rowToListing(row: ListingRow): Listing {
 }
 
 /**
- * Project one stored row to the TCS 2.0 wire shape. The legacy module path is
- * intentionally not read here: v2 is a repository URL catalog, not an
- * executable module locator.
+ * Project one stored row to the TCS 2.0 wire shape. A stored module path names
+ * the one module this listing is about, which is the piece of install-relevant
+ * context only the catalog knows. It stays optional: the repository root is
+ * the v2 default, so a row that reviews the root module emits the same source
+ * tuple as a URL-only listing.
  */
 export function rowToListingV2(row: ListingRow): ListingV2 {
   const git = canonicalGitUrl(row.gitIdentity || row.git);
-  if (!git) throw new Error("stored listing git is not canonicalizable");
+  const path = canonicalModulePath(row.path);
+  if (!git || path === undefined) {
+    throw new Error("stored listing source is not canonicalizable");
+  }
   const badges = parseJsonArray<string>(row.badges);
   return {
     id: row.id,
     scope: row.scope,
     slug: row.slug,
-    source: { git },
+    source: path === "." ? { git } : { git, path },
     ...(row.category ? { category: row.category } : {}),
     ...(parseJsonArray<string>(row.tags).length > 0
       ? { tags: parseJsonArray<string>(row.tags) }
@@ -308,12 +313,12 @@ export async function queryListings(
 }
 
 // ---------------------------------------------------------------------------
-// TCS 2.0 URL-only projection
+// TCS 2.0 projection
 // ---------------------------------------------------------------------------
 
 type QueryListingsV2Options = ListListingsV2Query;
 
-/** URL-only v2 list query with indexed Git identity and keyset pagination. */
+/** v2 list query with indexed Git identity and keyset pagination. */
 export async function queryListingsV2(
   db: StoreDb,
   opts: QueryListingsV2Options,
@@ -559,7 +564,7 @@ async function findBySource(
 
 function v2CoreToLegacy(core: ValidatedListingV2): ValidatedListing {
   return {
-    source: { git: core.source.git, path: "." },
+    source: { git: core.source.git, path: core.source.path ?? "." },
     kind: "worker",
     surface: "service",
     provider: "catalog",
@@ -871,7 +876,7 @@ export async function listOwnedListings(
   }));
 }
 
-/** List a publisher's own rows projected through the URL-only v2 shape. */
+/** List a publisher's own rows projected through the v2 shape. */
 export async function listOwnedListingsV2(
   db: StoreDb,
   publisherId: string,

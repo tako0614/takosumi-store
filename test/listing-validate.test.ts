@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { validatePublishInput } from "../src/backend/lib/listing-validate.ts";
+import {
+  validatePublishInput,
+  validatePublishInputV2,
+} from "../src/backend/lib/listing-validate.ts";
 
 function validBody(over: Record<string, unknown> = {}) {
   return {
@@ -190,6 +193,80 @@ describe("validatePublishInput", () => {
         }),
       );
       expect(result.ok).toBe(false);
+    }
+  });
+});
+
+describe("validatePublishInputV2", () => {
+  function v2Body(over: Record<string, unknown> = {}) {
+    return {
+      source: { git: "https://github.com/o/r.git" },
+      category: "social",
+      suggestedName: "my-app",
+      name: { ja: "アプリ", en: "App" },
+      description: { ja: "", en: "An app" },
+      badge: { ja: "", en: "App" },
+      ...over,
+    };
+  }
+
+  test("keeps the module the listing reviewed", () => {
+    const r = validatePublishInputV2(
+      v2Body({
+        source: {
+          git: "https://github.com/o/r.git",
+          path: "deploy/takoform/",
+        },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.source).toEqual({
+        git: "https://github.com/o/r",
+        path: "deploy/takoform",
+      });
+    }
+  });
+
+  test("leaves a root-reviewed listing URL-only", () => {
+    for (const path of [undefined, "", ".", "./"]) {
+      const r = validatePublishInputV2(
+        v2Body({
+          source: {
+            git: "https://github.com/o/r.git",
+            ...(path === undefined ? {} : { path }),
+          },
+        }),
+      );
+      expect(r.ok).toBe(true);
+      if (r.ok)
+        expect(r.value.source).toEqual({ git: "https://github.com/o/r" });
+    }
+  });
+
+  test("rejects refs, commits, and non-string module paths", () => {
+    for (const source of [
+      { git: "https://github.com/o/r.git", ref: "main" },
+      { git: "https://github.com/o/r.git", commit: "deadbeef" },
+      { git: "https://github.com/o/r.git", resolvedCommit: "deadbeef" },
+      { git: "https://github.com/o/r.git", path: 7 },
+    ]) {
+      const r = validatePublishInputV2(v2Body({ source }));
+      expect(r.ok).toBe(false);
+    }
+  });
+
+  test("rejects a module path that escapes the repository", () => {
+    const r = validatePublishInputV2(
+      v2Body({ source: { git: "https://github.com/o/r.git", path: "../s" } }),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test("rejects execution-looking v1 facets", () => {
+    for (const field of ["kind", "surface", "provider"]) {
+      const r = validatePublishInputV2(v2Body({ [field]: "worker" }));
+      expect(r.ok).toBe(false);
     }
   });
 });

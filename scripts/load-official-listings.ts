@@ -131,7 +131,9 @@ const OFFICIAL_SOURCES: readonly OfficialSource[] = [
     scope: "tako",
     slug: "takos",
     git: "https://github.com/tako0614/takos.git",
-    path: "deploy/opentofu",
+    // The reviewed module is the Cloudflare adapter root; `deploy/opentofu`
+    // itself holds no OpenTofu files, so it is not an installable module.
+    path: "deploy/opentofu/cloudflare",
     display: {
       kind: "worker",
       surface: "service",

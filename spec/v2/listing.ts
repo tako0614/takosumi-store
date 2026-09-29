@@ -1,4 +1,4 @@
-/** TCS 2.0 listing wire type: presentation metadata plus a Git URL only. */
+/** TCS 2.0 listing wire type: presentation metadata plus a repository source. */
 
 import type { LocalizedText, ListingPublisher } from "../listing.ts";
 import {
