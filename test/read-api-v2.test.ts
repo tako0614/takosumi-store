@@ -65,6 +65,35 @@ describe("TCS 2.0 read API", () => {
     }
   });
 
+  test("list continues keyset pagination without duplicates or omissions", async () => {
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+
+    while (pages < 10) {
+      const query = new URLSearchParams({ limit: "2" });
+      if (cursor) query.set("cursor", cursor);
+      const res = await get(`/tcs/v2/listings?${query}`);
+      expect(res.status).toBe(200);
+
+      const page = await res.json();
+      ids.push(...page.items.map((item: { id: string }) => item.id));
+      cursor = page.nextCursor;
+      pages += 1;
+      if (!cursor) break;
+    }
+
+    expect(cursor).toBeUndefined();
+    expect(pages).toBe(2);
+    expect(ids).toEqual([
+      "takos/takos",
+      "takos/yurucommu",
+      "takos/takos-office",
+      "takos/takos-computer",
+    ]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   test("a root-reviewed listing keeps the repository-only source tuple", async () => {
     const res = await get("/tcs/v2/listings/takos/takos-office");
     expect(res.status).toBe(200);
