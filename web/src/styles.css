@@ -21,7 +21,6 @@ body {
   font-family: var(--tg-font-body);
   font-size: var(--tg-fs-base);
   line-height: var(--tg-lh-snug);
-  font-feature-settings: "ss01", "ss02";
   -webkit-font-smoothing: antialiased;
 }
 
@@ -157,8 +156,7 @@ button {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: color-mix(in srgb, var(--tg-bg) 86%, transparent);
-  backdrop-filter: blur(12px);
+  background: var(--tg-bg);
   border-bottom: 1px solid var(--tg-line);
 }
 .topbar-inner {
@@ -220,12 +218,6 @@ button {
   flex-wrap: wrap;
   margin-bottom: var(--tg-s-5);
 }
-.filterbar-right {
-  display: flex;
-  align-items: center;
-  gap: var(--tg-s-3);
-  flex-wrap: wrap;
-}
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -279,16 +271,6 @@ button {
   padding: 4px 12px;
   font-size: var(--tg-fs-sm);
   font-weight: 650;
-}
-.sort {
-  height: 36px;
-  padding: 0 var(--tg-s-3);
-  border: 1px solid var(--tg-line-strong);
-  border-radius: var(--tg-r-md);
-  background: var(--tg-bg-subtle);
-  color: var(--tg-fg);
-  font: inherit;
-  font-size: var(--tg-fs-sm);
 }
 
 .results-head {
@@ -448,14 +430,7 @@ button {
 .skel {
   display: block;
   border-radius: var(--tg-r-sm);
-  background: linear-gradient(
-    90deg,
-    var(--tg-bg-subtle) 25%,
-    var(--tg-line) 37%,
-    var(--tg-bg-subtle) 63%
-  );
-  background-size: 400% 100%;
-  animation: skel-shimmer 1.4s ease infinite;
+  background: var(--tg-bg-subtle);
 }
 .skel-line {
   height: 11px;
@@ -474,14 +449,6 @@ button {
 }
 .skeleton-card {
   pointer-events: none;
-}
-@keyframes skel-shimmer {
-  0% {
-    background-position: 100% 0;
-  }
-  100% {
-    background-position: 0 0;
-  }
 }
 
 /* ===== Detail page ===== */
@@ -766,23 +733,6 @@ button {
   background: var(--tg-accent-soft);
   color: var(--tg-accent-text);
   font-size: var(--tg-fs-sm);
-}
-
-/* ===== Footer ===== */
-.footer {
-  border-top: 1px solid var(--tg-line);
-  padding: var(--tg-s-6) 0;
-  color: var(--tg-fg-muted);
-  font-size: var(--tg-fs-sm);
-}
-.footer .container {
-  display: flex;
-  align-items: center;
-  gap: var(--tg-s-2);
-  flex-wrap: wrap;
-}
-.footer-sep {
-  color: var(--tg-fg-subtle);
 }
 
 /* ===== Responsive ===== */

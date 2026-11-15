@@ -6,8 +6,14 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { agg, loadError, loadMoreItems, locale, rebuild } from "../appstate.ts";
-import type { ListSort } from "../../../spec/api.ts";
+import {
+  agg,
+  ensureListings,
+  loadError,
+  loadMoreItems,
+  locale,
+  rebuild,
+} from "../appstate.ts";
 import { tagLabel, t } from "../lib/i18n.ts";
 import { AppCard } from "../components/AppCard.tsx";
 import { CategoryShelf } from "../components/CategoryShelf.tsx";
@@ -18,7 +24,7 @@ const SHELF_MIN_TOTAL = 12;
 export const HomePage: Component = () => {
   const [fTag, setFTag] = createSignal("");
 
-  onMount(() => void rebuild());
+  onMount(ensureListings);
 
   const facetTags = createMemo(() => {
     const set = new Set<string>();
@@ -34,8 +40,6 @@ export const HomePage: Component = () => {
     !filtersActive() && agg().items.length >= SHELF_MIN_TOTAL;
   const recent = createMemo(() => agg().items.slice(0, 12));
 
-  const onSort = (value: ListSort) => void rebuild({ sort: value });
-
   const firstLoad = () => agg().loading && agg().items.length === 0;
 
   return (
@@ -43,11 +47,12 @@ export const HomePage: Component = () => {
       <div class="container">
         <Show when={agg().items.length > 0 || !firstLoad()}>
           <div class="filterbar">
-            <div class="chips" role="tablist" aria-label="Tags">
+            <div class="chips">
               <button
                 type="button"
                 class="chip"
                 classList={{ active: !fTag() }}
+                aria-pressed={!fTag()}
                 onClick={() => setFTag("")}
               >
                 {t("all", locale())}
@@ -58,22 +63,13 @@ export const HomePage: Component = () => {
                     type="button"
                     class="chip"
                     classList={{ active: fTag() === tg }}
+                    aria-pressed={fTag() === tg}
                     onClick={() => setFTag(fTag() === tg ? "" : tg)}
                   >
                     {tagLabel(tg, locale())}
                   </button>
                 )}
               </For>
-            </div>
-            <div class="filterbar-right">
-              <select
-                class="sort"
-                value={agg().sort}
-                onChange={(e) => onSort(e.currentTarget.value as ListSort)}
-                aria-label={t("sortUpdated", locale())}
-              >
-                <option value="updated">{t("sortUpdated", locale())}</option>
-              </select>
             </div>
           </div>
         </Show>

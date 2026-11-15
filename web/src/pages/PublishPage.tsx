@@ -7,7 +7,13 @@ import {
   type Component,
 } from "solid-js";
 import { A, useNavigate, useSearchParams } from "@solidjs/router";
-import { locale, me, oidcEnabled, setMe } from "../appstate.ts";
+import {
+  invalidateListings,
+  locale,
+  me,
+  oidcEnabled,
+  setMe,
+} from "../appstate.ts";
 import { t } from "../lib/i18n.ts";
 import { loginUrl, setHandle } from "../lib/account-client.ts";
 import {
@@ -155,6 +161,7 @@ export const PublishPage: Component = () => {
       : await createListing(body);
     setBusy(false);
     if (res.ok) {
+      invalidateListings();
       navigate(
         existing ? "/manage" : `/${res.listing.scope}/${res.listing.slug}`,
       );
