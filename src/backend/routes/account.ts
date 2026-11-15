@@ -15,6 +15,16 @@ import {
   randomToken,
 } from "../lib/oidc.ts";
 import {
+  bindingCookie,
+  matchesBrowserBinding,
+  OIDC_STATE_TTL_SECONDS,
+  readBrowserBinding,
+  readOidcState,
+  sanitizeLoginReturn,
+  validOidcStateId,
+  type OidcState,
+} from "../lib/oidc-state.ts";
+import {
   buildSessionCookie,
   clearSessionCookie,
   createSession,
@@ -43,12 +53,6 @@ function publicPublisher(p: Publisher) {
   };
 }
 
-function sanitizeReturn(value: string | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
-  if (/[\r\n]/.test(value)) return "/";
-  return value;
-}
-
 function moderatorSubs(env: Env): string[] {
   return (env.TCS_MODERATOR_SUBS ?? "")
     .split(",")
@@ -74,13 +78,25 @@ export function createAccountRoutes(
     const state = randomToken();
     const verifier = randomToken(48);
     const nonce = randomToken();
+    const browserBinding = randomToken();
     const challenge = await pkceChallenge(verifier);
     const redirectUri = `${originOf(c)}/account/callback`;
-    const returnTo = sanitizeReturn(c.req.query("return"));
-    await c.env.KV.put(
-      `oidc_state:${state}`,
-      JSON.stringify({ verifier, nonce, returnTo }),
-      { expirationTtl: 600 },
+    const returnTo = sanitizeLoginReturn(c.req.query("return"));
+    const browserBindingHash = await pkceChallenge(browserBinding);
+    const stored: OidcState = {
+      version: 1,
+      verifier,
+      nonce,
+      returnTo,
+      browserBindingHash,
+      expiresAt: Date.now() + OIDC_STATE_TTL_SECONDS * 1000,
+    };
+    await c.env.KV.put(`oidc_state:${state}`, JSON.stringify(stored), {
+      expirationTtl: OIDC_STATE_TTL_SECONDS,
+    });
+    c.header(
+      "Set-Cookie",
+      bindingCookie(state, browserBinding, isSecureRequest(c)),
     );
     const url = buildAuthorizeUrl(cfg, {
       redirectUri,
@@ -96,19 +112,53 @@ export function createAccountRoutes(
     if (!cfg) return jsonError(c, 404, "not_found", "login is not configured");
     const code = c.req.query("code");
     const state = c.req.query("state");
-    if (!code || !state) {
+    if (!state || !validOidcStateId(state)) {
       return jsonError(c, 400, "invalid_argument", "missing code/state");
     }
-    const raw = await c.env.KV.get(`oidc_state:${state}`);
-    if (!raw) {
-      return jsonError(c, 400, "invalid_argument", "invalid or expired state");
-    }
-    await c.env.KV.delete(`oidc_state:${state}`);
-    const { verifier, nonce, returnTo } = JSON.parse(raw) as {
-      verifier: string;
-      nonce: string;
-      returnTo: string;
+    const secure = isSecureRequest(c);
+    const clearedBinding = bindingCookie(state, "", secure);
+    c.header("Set-Cookie", clearedBinding, { append: true });
+    const reject = (status: 400 | 401, message: string) => {
+      // jsonError returns a standalone Response, without Hono's prepared
+      // headers. Attach cleanup to that actual failure response as well.
+      const response = jsonError(
+        c,
+        status,
+        status === 401 ? "unauthenticated" : "invalid_argument",
+        message,
+      );
+      response.headers.append("Set-Cookie", clearedBinding);
+      return response;
     };
+    if (!code) {
+      return reject(400, "missing code/state");
+    }
+    const browserBinding = readBrowserBinding(
+      c.req.header("cookie"),
+      state,
+      secure,
+    );
+    if (!browserBinding) {
+      return reject(400, "invalid browser state");
+    }
+    const raw = await c.env.KV.get(`oidc_state:${state}`);
+    const stored = readOidcState(raw, Date.now());
+    if (
+      !stored ||
+      !(await matchesBrowserBinding(
+        stored.browserBindingHash,
+        browserBinding,
+      )) ||
+      stored.expiresAt <= Date.now()
+    ) {
+      return reject(400, "invalid or expired state");
+    }
+    // Keep the existing KV consume-before-exchange ordering. KV get/delete is
+    // not a globally atomic compare-and-consume operation.
+    await c.env.KV.delete(`oidc_state:${state}`);
+    if (stored.expiresAt <= Date.now())
+      return reject(400, "invalid or expired state");
+    const { verifier, nonce, returnTo } = stored;
     const redirectUri = `${originOf(c)}/account/callback`;
     let identity;
     try {
@@ -119,7 +169,7 @@ export function createAccountRoutes(
         expectedNonce: nonce,
       });
     } catch {
-      return jsonError(c, 401, "unauthenticated", "login failed");
+      return reject(401, "login failed");
     }
 
     const db = resolveDb(c);
@@ -142,8 +192,9 @@ export function createAccountRoutes(
     c.header(
       "Set-Cookie",
       buildSessionCookie(token, { secure: isSecureRequest(c) }),
+      { append: true },
     );
-    return c.redirect(sanitizeReturn(returnTo), 302);
+    return c.redirect(sanitizeLoginReturn(returnTo), 302);
   });
 
   app.get("/account/me", async (c: TcsContext) => {
