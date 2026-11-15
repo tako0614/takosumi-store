@@ -315,8 +315,14 @@ export function createPublishRoutes(
       result.value,
       rehostIcon,
     );
+    let changed: boolean;
     try {
-      await updateListingV2Core(db, { id, core, now: new Date() });
+      changed = await updateListingV2Core(db, {
+        id,
+        expectedPublisherId: row.publisherId,
+        core,
+        now: new Date(),
+      });
     } catch {
       await cleanupUnreferencedManagedIcon(
         c.env,
@@ -325,6 +331,15 @@ export function createPublishRoutes(
         core.iconUrl,
       );
       return jsonError(c, 409, "conflict", "git collides with another listing");
+    }
+    if (!changed) {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
+      return jsonError(c, 409, "conflict", "listing ownership changed");
     }
     const updated = await getListingRow(db, id);
     if (row.iconUrl !== updated?.iconUrl) {
@@ -344,10 +359,14 @@ export function createPublishRoutes(
       return jsonError(c, 403, "permission_denied", "not your listing");
     }
     if (c.req.query("hard") === "true") {
-      await hardDeleteListing(db, id);
+      if (!(await hardDeleteListing(db, id, row.publisherId))) {
+        return jsonError(c, 409, "conflict", "listing ownership changed");
+      }
       await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
     } else {
-      await setListingStatus(db, id, "hidden");
+      if (!(await setListingStatus(db, id, "hidden", row.publisherId))) {
+        return jsonError(c, 409, "conflict", "listing ownership changed");
+      }
     }
     return c.json({ ok: true });
   });
@@ -375,7 +394,9 @@ export function createPublishRoutes(
           'status must be "visible" or "hidden"',
         );
       }
-      await setListingStatus(db, id, body.status);
+      if (!(await setListingStatus(db, id, body.status, row.publisherId))) {
+        return jsonError(c, 409, "conflict", "listing ownership changed");
+      }
       const updated = await getListingRow(db, id);
       return c.json({ listing: updated ? rowToListingV2(updated) : null });
     },
@@ -520,9 +541,11 @@ export function createPublishRoutes(
       result.value,
       rehostIcon,
     );
+    let changed: boolean;
     try {
-      await updateListingCore(db, {
+      changed = await updateListingCore(db, {
         id,
+        expectedPublisherId: row.publisherId,
         core,
         now: new Date(),
       });
@@ -539,6 +562,15 @@ export function createPublishRoutes(
         "conflict",
         "git+path collides with another listing",
       );
+    }
+    if (!changed) {
+      await cleanupUnreferencedManagedIcon(
+        c.env,
+        originOf(c),
+        db,
+        core.iconUrl,
+      );
+      return jsonError(c, 409, "conflict", "listing ownership changed");
     }
     const updated = await getListingRow(db, id);
     if (row.iconUrl !== updated?.iconUrl) {
@@ -558,10 +590,14 @@ export function createPublishRoutes(
       return jsonError(c, 403, "permission_denied", "not your listing");
     }
     if (c.req.query("hard") === "true") {
-      await hardDeleteListing(db, id);
+      if (!(await hardDeleteListing(db, id, row.publisherId))) {
+        return jsonError(c, 409, "conflict", "listing ownership changed");
+      }
       await cleanupUnreferencedManagedIcon(c.env, originOf(c), db, row.iconUrl);
     } else {
-      await setListingStatus(db, id, "hidden");
+      if (!(await setListingStatus(db, id, "hidden", row.publisherId))) {
+        return jsonError(c, 409, "conflict", "listing ownership changed");
+      }
     }
     return c.json({ ok: true });
   });
@@ -590,7 +626,9 @@ export function createPublishRoutes(
         'status must be "visible" or "hidden"',
       );
     }
-    await setListingStatus(db, id, status);
+    if (!(await setListingStatus(db, id, status, row.publisherId))) {
+      return jsonError(c, 409, "conflict", "listing ownership changed");
+    }
     const updated = await getListingRow(db, id);
     return c.json({ listing: updated ? rowToListing(updated) : null });
   });

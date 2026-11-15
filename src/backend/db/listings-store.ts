@@ -759,15 +759,16 @@ export async function updateListingCore(
   db: StoreDb,
   input: {
     id: string;
+    expectedPublisherId: string;
     core: ValidatedListing;
     now: Date;
   },
-): Promise<void> {
+): Promise<boolean> {
   const { core } = input;
   if (await findBySource(db, core.source.git, core.source.path, input.id)) {
     throw new Error("source_conflict");
   }
-  await db
+  const changed = await db
     .update(listings)
     .set({
       git: core.source.git,
@@ -788,18 +789,30 @@ export async function updateListingCore(
       iconUrl: core.iconUrl ?? null,
       updatedAt: input.now.toISOString(),
     })
-    .where(eq(listings.id, input.id));
+    .where(
+      and(
+        eq(listings.id, input.id),
+        eq(listings.publisherId, input.expectedPublisherId),
+      ),
+    )
+    .returning({ id: listings.id });
+  return changed.length === 1;
 }
 
 /** Update v2 presentation metadata while preserving legacy internal path data. */
 export async function updateListingV2Core(
   db: StoreDb,
-  input: { id: string; core: ValidatedListingV2; now: Date },
-): Promise<void> {
+  input: {
+    id: string;
+    expectedPublisherId: string;
+    core: ValidatedListingV2;
+    now: Date;
+  },
+): Promise<boolean> {
   if (await findByCanonicalGit(db, input.core.source.git, input.id)) {
     throw new Error("source_conflict");
   }
-  await db
+  const changed = await db
     .update(listings)
     .set({
       git: input.core.source.git,
@@ -816,15 +829,37 @@ export async function updateListingV2Core(
       iconUrl: input.core.iconUrl ?? null,
       updatedAt: input.now.toISOString(),
     })
-    .where(eq(listings.id, input.id));
+    .where(
+      and(
+        eq(listings.id, input.id),
+        eq(listings.publisherId, input.expectedPublisherId),
+      ),
+    )
+    .returning({ id: listings.id });
+  return changed.length === 1;
 }
 
 export async function setListingStatus(
   db: StoreDb,
   id: string,
   status: "visible" | "hidden",
-): Promise<void> {
-  await db.update(listings).set({ status }).where(eq(listings.id, id));
+  expectedPublisherId?: string,
+): Promise<boolean> {
+  // Moderation intentionally acts on the current listing independently of its
+  // publisher. Owner routes always supply their authorized row's publisher.
+  const changed = await db
+    .update(listings)
+    .set({ status })
+    .where(
+      and(
+        eq(listings.id, id),
+        expectedPublisherId === undefined
+          ? undefined
+          : eq(listings.publisherId, expectedPublisherId),
+      ),
+    )
+    .returning({ id: listings.id });
+  return changed.length === 1;
 }
 
 export async function setListingBadges(
@@ -841,8 +876,15 @@ export async function setListingBadges(
 export async function hardDeleteListing(
   db: StoreDb,
   id: string,
-): Promise<void> {
-  await db.delete(listings).where(eq(listings.id, id));
+  expectedPublisherId: string,
+): Promise<boolean> {
+  const changed = await db
+    .delete(listings)
+    .where(
+      and(eq(listings.id, id), eq(listings.publisherId, expectedPublisherId)),
+    )
+    .returning({ id: listings.id });
+  return changed.length === 1;
 }
 
 /** Count all live references before deleting a shared digest-addressed icon. */
