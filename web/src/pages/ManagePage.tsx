@@ -6,7 +6,7 @@ import {
   type Component,
 } from "solid-js";
 import { A } from "@solidjs/router";
-import { locale, me, oidcEnabled } from "../appstate.ts";
+import { invalidateListings, locale, me, oidcEnabled } from "../appstate.ts";
 import { pick, t } from "../lib/i18n.ts";
 import { loginUrl } from "../lib/account-client.ts";
 import {
@@ -33,8 +33,10 @@ export const ManagePage: Component = () => {
     setErrId("");
     const ok = await action();
     setBusyId("");
-    if (ok) refetch();
-    else setErrId(id);
+    if (ok) {
+      invalidateListings();
+      refetch();
+    } else setErrId(id);
   }
 
   const refresh = (l: OwnedListing) =>

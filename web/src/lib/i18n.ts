@@ -9,15 +9,9 @@ export function pick(text: LocalizedText, locale: Locale): string {
 type Dict = Record<Locale, string>;
 const S = {
   appName: { ja: "Takosumi Store", en: "Takosumi Store" },
-  tagline: {
-    ja: "Git で公開された OpenTofu Capsule を見つける場所",
-    en: "Find Git-published OpenTofu Capsules",
-  },
   all: { ja: "すべて", en: "All" },
   apps: { ja: "アプリ", en: "Apps" },
   recentlyAdded: { ja: "新着・更新", en: "Recently updated" },
-  sortUpdated: { ja: "更新順", en: "Recently updated" },
-  sortName: { ja: "名前順", en: "Name" },
   loadMore: { ja: "もっと見る", en: "Load more" },
   loading: { ja: "読み込み中…", en: "Loading…" },
   noResults: {

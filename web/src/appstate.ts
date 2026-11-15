@@ -4,7 +4,7 @@
  * Pages read these signals and call the actions; nothing here renders.
  */
 import { createSignal } from "solid-js";
-import type { Locale, ListSort } from "../../spec/api.ts";
+import type { Locale } from "../../spec/api.ts";
 import {
   type AggregateState,
   initState,
@@ -30,9 +30,9 @@ function initialLocale(): Locale {
 const [localeSig, setLocaleSig] = createSignal<Locale>(initialLocale());
 export const locale = localeSig;
 
-const [agg, setAgg] = createSignal<AggregateState>(
-  initState(getServers(), { sort: "updated", locale: initialLocale() }),
-);
+const freshCatalog = () =>
+  initState(getServers(), { sort: "updated", locale: localeSig() });
+const [agg, setAgg] = createSignal<AggregateState>(freshCatalog());
 export { agg };
 
 const [me, setMe] = createSignal<Me | null>(null);
@@ -53,21 +53,39 @@ export function setLocale(value: Locale): void {
   }));
 }
 
+const CATALOG_MAX_AGE_MS = 60_000;
+let loadedAt: number | undefined;
 let reqToken = 0;
-export async function rebuild(opts: { sort?: ListSort } = {}): Promise<void> {
+
+export function ensureListings(): void {
+  if (loadedAt === undefined || Date.now() - loadedAt >= CATALOG_MAX_AGE_MS) {
+    void rebuild();
+  }
+}
+
+export function invalidateListings(): void {
+  reqToken += 1;
+  loadedAt = undefined;
+  setAgg(freshCatalog());
+}
+
+export async function rebuild(): Promise<void> {
+  if (agg().loading) return;
   const token = ++reqToken;
-  const base = initState(getServers(), {
-    sort: opts.sort ?? agg().sort,
-    locale: localeSig(),
-  });
-  setAgg({ ...base, loading: true });
-  const next = await aggLoadMore(base);
-  if (token === reqToken) setAgg(next);
+  setAgg((p) => ({ ...p, loading: true }));
+  const next = await aggLoadMore(freshCatalog());
+  if (token !== reqToken) return;
+  loadedAt = next.status.every((s) => s.ok) ? Date.now() : undefined;
+  setAgg({ ...next, locale: localeSig() });
 }
 
 export async function loadMoreItems(): Promise<void> {
-  setAgg((p) => ({ ...p, loading: true }));
-  setAgg(await aggLoadMore(agg()));
+  const current = agg();
+  if (current.loading || current.done) return;
+  const token = ++reqToken;
+  setAgg({ ...current, loading: true });
+  const next = await aggLoadMore(current);
+  if (token === reqToken) setAgg({ ...next, locale: localeSig() });
 }
 
 export async function loadAccount(): Promise<void> {

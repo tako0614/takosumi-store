@@ -1,6 +1,6 @@
 import { For, Show, type Component, type JSX } from "solid-js";
 
-/** Shimmer placeholder cards shown while the first page loads. */
+/** Placeholder cards shown while the first page loads. */
 export const SkeletonGrid: Component<{ count?: number }> = (props) => {
   return (
     <div class="app-grid" aria-busy="true" aria-hidden="true">
