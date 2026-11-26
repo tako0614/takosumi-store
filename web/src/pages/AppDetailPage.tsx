@@ -126,7 +126,10 @@ export const AppDetailPage: Component = () => {
                       class="md"
                       // Safe: renderMarkdown escapes all input and only emits a
                       // whitelist of tags with scheme-checked link targets.
-                      innerHTML={renderMarkdown(doc().markdown)}
+                      innerHTML={renderMarkdown(
+                        doc().markdown,
+                        doc().sourceUrl,
+                      )}
                     />
                     <p class="muted readme-src">
                       <a
