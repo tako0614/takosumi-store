@@ -15,6 +15,51 @@ describe("renderMarkdown (safe README renderer)", () => {
     expect(html).toContain("<code>code</code>");
   });
 
+  test("preserves inline code and only formats emphasis outside literal spans", () => {
+    const html = renderMarkdown(
+      "**Use `oidc_owner_sub`** and `[x](https://example.com) <tag> *literal*`",
+    );
+    expect(html).toContain("<strong>Use <code>oidc_owner_sub</code></strong>");
+    expect(html).toContain(
+      "<code>[x](https://example.com) &lt;tag&gt; *literal*</code>",
+    );
+    expect(html).not.toContain("<em>");
+    expect(html).not.toContain("<a ");
+  });
+
+  test("formats link labels without rewriting literal link destinations", () => {
+    const html = renderMarkdown(
+      "[`app_owner_sub` and *docs*](https://example.com/app_owner_sub)",
+    );
+    expect(html).toContain('href="https://example.com/app_owner_sub"');
+    expect(html).toContain("<code>app_owner_sub</code> and <em>docs</em>");
+  });
+
+  test("resolves relative links from the fetched README while escaping the destination", () => {
+    const source =
+      "https://raw.githubusercontent.com/example/repo/HEAD/deploy/README.md";
+    const html = renderMarkdown(
+      "[guide](../docs/app_owner_sub.md?a=1&b=2)",
+      source,
+    );
+    expect(html).toContain(
+      'href="https://raw.githubusercontent.com/example/repo/HEAD/docs/app_owner_sub.md?a=1&amp;b=2"',
+    );
+    expect(renderMarkdown("[guide](../docs/guide.md)")).not.toContain("<a ");
+    expect(
+      renderMarkdown("[guide](//example.com/guide.md)", source),
+    ).not.toContain("<a ");
+    expect(
+      renderMarkdown("[guide](javascript:alert%281%29)", source),
+    ).not.toContain("<a ");
+    expect(
+      renderMarkdown(
+        "[guide](blob:https://raw.githubusercontent.com/fixture)",
+        source,
+      ),
+    ).not.toContain("<a ");
+  });
+
   test("renders http(s) links but drops dangerous schemes", () => {
     const ok = renderMarkdown("[site](https://example.com)");
     expect(ok).toContain('href="https://example.com"');

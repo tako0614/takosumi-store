@@ -18,50 +18,86 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Allow only safe link/image targets; everything else becomes empty. */
-function safeUrl(raw: string): string {
-  const url = raw.trim();
-  if (/^https?:\/\//i.test(url) || url.startsWith("#") || url.startsWith("/")) {
-    // The url is embedded into an already-escaped attribute context.
-    return escapeHtml(url);
+const URL_ENTITIES: Readonly<Record<string, string>> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+};
+
+/** Resolve a relative link against the fetched README's source. */
+function safeUrl(escaped: string, source: URL | undefined): string {
+  const url = escaped
+    .replace(/&(amp|lt|gt|quot|#39);/g, (entity) => URL_ENTITIES[entity]!)
+    .trim();
+  if (/^https?:\/\//i.test(url) || url.startsWith("#")) return escapeHtml(url);
+  if (!source) return url.startsWith("/") ? escapeHtml(url) : "";
+  try {
+    const target = new URL(url, source);
+    if (
+      target.protocol === source.protocol &&
+      target.origin === source.origin &&
+      !target.username &&
+      !target.password
+    ) {
+      return escapeHtml(target.href);
+    }
+  } catch {
+    // A malformed destination stays plain text.
   }
   return "";
 }
 
-/** Inline spans. Operates on ALREADY-ESCAPED text. */
-function renderInline(escaped: string): string {
-  let out = escaped;
-  // Inline code first, so its contents are not further transformed.
-  out = out.replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
-  // Images → a safe link (avoid loading arbitrary remote images).
-  out = out.replace(
-    /!\[([^\]]*)\]\(([^)\s]+)\)/g,
-    (m, alt: string, url: string) => {
-      const href = safeUrl(url);
-      return href
-        ? `<a href="${href}" target="_blank" rel="noopener noreferrer nofollow">🖼 ${alt || href}</a>`
-        : escapeHtml(m);
-    },
-  );
-  // Links.
-  out = out.replace(
-    /\[([^\]]+)\]\(([^)\s]+)\)/g,
-    (m, text: string, url: string) => {
-      const href = safeUrl(url);
-      return href
-        ? `<a href="${href}" target="_blank" rel="noopener noreferrer nofollow">${text}</a>`
-        : escapeHtml(m);
-    },
-  );
-  // Bold then italic.
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  out = out.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
-  return out;
+function readmeSource(url: string | undefined): URL | undefined {
+  if (!url) return undefined;
+  try {
+    const source = new URL(url);
+    if (source.protocol === "https:" && !source.username && !source.password)
+      return source;
+  } catch {
+    // A missing or malformed base leaves the existing Markdown subset available.
+  }
+  return undefined;
 }
 
-export function renderMarkdown(md: string): string {
+function renderEmphasis(escaped: string): string {
+  return escaped
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+}
+
+/** Inline spans. Operates on ALREADY-ESCAPED text. */
+function renderInline(escaped: string, source: URL | undefined): string {
+  const spans: string[] = [];
+  // Source angle brackets have already been escaped. Only the renderer can
+  // introduce these markers, and generated HTML never reenters emphasis parsing.
+  const protect = (html: string) => `<md-span-${spans.push(html) - 1}>`;
+  const restore = (html: string) =>
+    html.replace(/<md-span-(\d+)>/g, (_match, index) => spans[Number(index)]!);
+  let out = escaped.replace(/`([^`]+)`/g, (_match, code) =>
+    protect(`<code>${code}</code>`),
+  );
+  // Images become links, keeping third-party images out of the page.
+  out = out.replace(
+    /(!?)\[([^\]]*)\]\(([^)\s]+)\)/g,
+    (match, image: string, label: string, url: string) => {
+      if (!image && !label) return match;
+      const href = safeUrl(url, source);
+      if (!href) return match;
+      const content = label ? restore(renderEmphasis(label)) : href;
+      return protect(
+        `<a href="${href}" target="_blank" rel="noopener noreferrer nofollow">${image ? "🖼 " : ""}${content}</a>`,
+      );
+    },
+  );
+  return restore(renderEmphasis(out));
+}
+
+export function renderMarkdown(md: string, sourceUrl?: string): string {
+  const source = readmeSource(sourceUrl);
   const lines = md.replace(/\r\n?/g, "\n").split("\n");
   const html: string[] = [];
   let i = 0;
@@ -108,7 +144,7 @@ export function renderMarkdown(md: string): string {
       closeList();
       const level = heading[1]!.length;
       html.push(
-        `<h${level}>${renderInline(escapeHtml(heading[2]!.trim()))}</h${level}>`,
+        `<h${level}>${renderInline(escapeHtml(heading[2]!.trim()), source)}</h${level}>`,
       );
       i += 1;
       continue;
@@ -132,7 +168,9 @@ export function renderMarkdown(md: string): string {
         listOpen = kind;
         html.push(`<${kind}>`);
       }
-      html.push(`<li>${renderInline(escapeHtml((ul ?? ol)![1]!.trim()))}</li>`);
+      html.push(
+        `<li>${renderInline(escapeHtml((ul ?? ol)![1]!.trim()), source)}</li>`,
+      );
       i += 1;
       continue;
     }
@@ -146,7 +184,7 @@ export function renderMarkdown(md: string): string {
         i += 1;
       }
       html.push(
-        `<blockquote>${renderInline(escapeHtml(quote.join(" ")))}</blockquote>`,
+        `<blockquote>${renderInline(escapeHtml(quote.join(" ")), source)}</blockquote>`,
       );
       continue;
     }
@@ -166,7 +204,7 @@ export function renderMarkdown(md: string): string {
       para.push(lines[i]!);
       i += 1;
     }
-    html.push(`<p>${renderInline(escapeHtml(para.join(" ")))}</p>`);
+    html.push(`<p>${renderInline(escapeHtml(para.join(" ")), source)}</p>`);
   }
 
   closeList();
