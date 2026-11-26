@@ -52,6 +52,12 @@ describe("renderMarkdown (safe README renderer)", () => {
     expect(
       renderMarkdown("[guide](javascript:alert%281%29)", source),
     ).not.toContain("<a ");
+    expect(
+      renderMarkdown(
+        "[guide](blob:https://raw.githubusercontent.com/fixture)",
+        source,
+      ),
+    ).not.toContain("<a ");
   });
 
   test("renders http(s) links but drops dangerous schemes", () => {

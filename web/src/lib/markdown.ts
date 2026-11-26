@@ -36,6 +36,7 @@ function safeUrl(escaped: string, source: URL | undefined): string {
   try {
     const target = new URL(url, source);
     if (
+      target.protocol === source.protocol &&
       target.origin === source.origin &&
       !target.username &&
       !target.password
