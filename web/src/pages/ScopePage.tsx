@@ -37,9 +37,7 @@ export const ScopePage: Component = () => {
     const n = items().length;
     const loc = locale();
     if (n === 1) return t("scopeCountSingle", loc);
-    return loc === "ja"
-      ? `${n} ${t("scopeCountPlural", loc)}`
-      : `${n} ${t("scopeCountPlural", loc)}`;
+    return `${n} ${t("scopeCountPlural", loc)}`;
   };
 
   createEffect(() => {

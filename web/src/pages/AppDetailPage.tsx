@@ -86,24 +86,21 @@ export const AppDetailPage: Component = () => {
 
   const [codeCopyStatus, setCodeCopyStatus] = createSignal("");
   let mdRef: HTMLDivElement | undefined;
-  const copyTimers = new Set<ReturnType<typeof setTimeout>>();
-
-  const clearCopyTimers = () => {
-    for (const timer of copyTimers) clearTimeout(timer);
-    copyTimers.clear();
-  };
-  onCleanup(clearCopyTimers);
 
   // Enhance rendered README fenced code blocks with accessible copy buttons.
   createEffect(() => {
     const doc = readme();
     const loc = locale();
     const root = mdRef;
-    clearCopyTimers();
     setCodeCopyStatus("");
     if (!doc || !root) return;
 
+    let disposed = false;
     const cleanups: (() => void)[] = [];
+    const buttonTimers = new Map<
+      HTMLButtonElement,
+      ReturnType<typeof setTimeout>
+    >();
     const pres = Array.from(
       root.querySelectorAll<HTMLPreElement>("pre.md-code"),
     );
@@ -126,22 +123,33 @@ export const AppDetailPage: Component = () => {
       const onClick = async () => {
         const text =
           pre.querySelector("code")?.textContent ?? pre.textContent ?? "";
+        let ok = false;
         try {
           await navigator.clipboard.writeText(text);
+          ok = true;
+        } catch {
+          ok = false;
+        }
+        if (disposed) return;
+        if (ok) {
           btn.textContent = t("copied", loc);
           btn.dataset.copied = "true";
           setCodeCopyStatus(t("copied", loc));
-        } catch {
+        } else {
           btn.textContent = t("actionFailed", loc);
+          delete btn.dataset.copied;
           setCodeCopyStatus(t("copyFailed", loc));
         }
+        const existingTimer = buttonTimers.get(btn);
+        if (existingTimer !== undefined) clearTimeout(existingTimer);
         const timer = setTimeout(() => {
-          copyTimers.delete(timer);
+          buttonTimers.delete(btn);
+          if (disposed) return;
           btn.textContent = t("copyCode", loc);
           delete btn.dataset.copied;
           setCodeCopyStatus("");
         }, 2000);
-        copyTimers.add(timer);
+        buttonTimers.set(btn, timer);
       };
 
       btn.addEventListener("click", onClick);
@@ -152,8 +160,10 @@ export const AppDetailPage: Component = () => {
     }
 
     onCleanup(() => {
+      disposed = true;
       for (const fn of cleanups) fn();
-      clearCopyTimers();
+      for (const timer of buttonTimers.values()) clearTimeout(timer);
+      buttonTimers.clear();
     });
   });
 

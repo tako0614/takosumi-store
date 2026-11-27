@@ -34,7 +34,15 @@ export const CategoryShelf: Component<{
   onMount(() => {
     syncScroll();
     window.addEventListener("resize", syncScroll);
-    onCleanup(() => window.removeEventListener("resize", syncScroll));
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && rowRef) {
+      observer = new ResizeObserver(syncScroll);
+      observer.observe(rowRef);
+    }
+    onCleanup(() => {
+      window.removeEventListener("resize", syncScroll);
+      observer?.disconnect();
+    });
   });
 
   createEffect(() => {
@@ -46,7 +54,11 @@ export const CategoryShelf: Component<{
     const el = rowRef;
     if (!el) return;
     const step = Math.max(240, Math.round(el.clientWidth * 0.75));
-    el.scrollBy({ left: dir * step, behavior: "smooth" });
+    const reduced =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollBy({ left: dir * step, behavior: reduced ? "auto" : "smooth" });
   };
 
   return (

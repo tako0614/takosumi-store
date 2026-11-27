@@ -117,7 +117,7 @@ describe("renderMarkdown (safe README renderer)", () => {
     expect(html).not.toContain("<a ");
   });
 
-  test("renders task-list checkboxes safely inside unordered lists", () => {
+  test("renders task-list checkboxes safely inside unordered lists with sr-only status text", () => {
     const md = [
       "- [x] **Done** task",
       "- [X] Uppercase checked",
@@ -126,13 +126,13 @@ describe("renderMarkdown (safe README renderer)", () => {
     ].join("\n");
     const html = renderMarkdown(md);
     expect(html).toContain(
-      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span><strong>Done</strong> task</span></li>',
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span class="sr-only">Completed: </span><span><strong>Done</strong> task</span></li>',
     );
     expect(html).toContain(
-      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span>Uppercase checked</span></li>',
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span class="sr-only">Completed: </span><span>Uppercase checked</span></li>',
     );
     expect(html).toContain(
-      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled aria-hidden="true" tabindex="-1" /><span>&lt;script&gt;alert(1)&lt;/script&gt; pending</span></li>',
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled aria-hidden="true" tabindex="-1" /><span class="sr-only">Not completed: </span><span>&lt;script&gt;alert(1)&lt;/script&gt; pending</span></li>',
     );
     expect(html).toContain("<li>Plain item</li>");
     expect(html).not.toContain("<script>");

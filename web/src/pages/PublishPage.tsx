@@ -180,7 +180,10 @@ export const PublishPage: Component = () => {
         : logoErr()
           ? "publish-logo"
           : "publish-slug";
-      document.getElementById(focusId)?.focus();
+      const target = document.getElementById(focusId);
+      const details = target?.closest("details");
+      if (details && !details.open) details.open = true;
+      target?.focus();
       return;
     }
 

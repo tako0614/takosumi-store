@@ -86,8 +86,8 @@ const S = {
   copyCodeLabel: { ja: "コードをコピー", en: "Copy code" },
   copied: { ja: "コピーしました", en: "Copied" },
   copyFailed: {
-    ja: "クリップボードへコピーできませんでした",
-    en: "Could not copy link to clipboard",
+    ja: "クリップボードにコピーできませんでした",
+    en: "Could not copy to clipboard",
   },
   scrollPrev: { ja: "前へスクロール", en: "Scroll previous" },
   scrollNext: { ja: "次へスクロール", en: "Scroll next" },

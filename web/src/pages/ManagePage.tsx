@@ -60,8 +60,14 @@ export const ManagePage: Component = () => {
   ): Promise<boolean> {
     setBusyId(l.id);
     setErrId("");
-    const ok = await action();
-    setBusyId("");
+    let ok = false;
+    try {
+      ok = await action();
+    } catch {
+      ok = false;
+    } finally {
+      setBusyId("");
+    }
     if (ok) {
       invalidateListings();
       refetch();
@@ -91,14 +97,12 @@ export const ManagePage: Component = () => {
 
   const confirmRemove = async () => {
     const target = pendingDelete();
-    if (!target) return;
-    const ok = await run(
-      target,
-      () => deleteListing(target.id, true),
-      "deleted",
-    );
-    if (ok) setPendingDelete(null);
-    else setPendingDelete(null);
+    if (!target || busyId() === target.id) return;
+    try {
+      await run(target, () => deleteListing(target.id, true), "deleted");
+    } finally {
+      setPendingDelete(null);
+    }
   };
 
   const deleteMessage = () => {

@@ -299,8 +299,9 @@ export function renderMarkdown(
       const task = ul ? /^\[([ xX])\]\s+(.*)$/.exec(rawItem) : null;
       if (task) {
         const checked = task[1]!.toLowerCase() === "x";
+        const statusText = checked ? "Completed: " : "Not completed: ";
         html.push(
-          `<li class="md-task"><input type="checkbox" class="md-task-box" disabled${checked ? " checked" : ""} aria-hidden="true" tabindex="-1" /><span>${renderInline(escapeHtml(task[2]!.trim()), source)}</span></li>`,
+          `<li class="md-task"><input type="checkbox" class="md-task-box" disabled${checked ? " checked" : ""} aria-hidden="true" tabindex="-1" /><span class="sr-only">${statusText}</span><span>${renderInline(escapeHtml(task[2]!.trim()), source)}</span></li>`,
         );
       } else {
         html.push(`<li>${renderInline(escapeHtml(rawItem), source)}</li>`);

@@ -1,19 +1,23 @@
-import { createEffect, onCleanup, Show, type Component } from "solid-js";
+import {
+  createEffect,
+  createUniqueId,
+  onCleanup,
+  Show,
+  type Component,
+} from "solid-js";
 import { Portal } from "solid-js/web";
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled]):not([hidden])",
-  "input:not([disabled]):not([hidden])",
-  "select:not([disabled]):not([hidden])",
-  "textarea:not([disabled]):not([hidden])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(", ");
+import {
+  acquireInert,
+  handleConfirmDialogKeyDown,
+  releaseInert,
+  restoreDialogFocus,
+} from "../lib/confirm-dialog-a11y.ts";
 
 /**
  * Accessible in-app confirmation modal replacing native `window.confirm()`.
  * Traps Tab/Shift+Tab, ignores IME composition on Escape, defaults focus to
- * Cancel for destructive actions, and restores focus to the trigger on close.
+ * Cancel for destructive actions, ref-counts `.app.inert`, and restores focus
+ * to the trigger (or `#main` if disconnected) on close.
  */
 export const ConfirmDialog: Component<{
   open: boolean;
@@ -26,59 +30,35 @@ export const ConfirmDialog: Component<{
   onConfirm: () => void;
   onCancel: () => void;
 }> = (props) => {
+  const titleId = createUniqueId();
+  const descId = createUniqueId();
   let dialogRef: HTMLDivElement | undefined;
   let cancelBtnRef: HTMLButtonElement | undefined;
 
   createEffect(() => {
     if (!props.open) return;
+    let active = true;
     const opener = document.activeElement as HTMLElement | null;
     const appRoot = document.querySelector(".app") as HTMLElement | null;
-    if (appRoot) appRoot.inert = true;
+    acquireInert(appRoot);
 
     queueMicrotask(() => {
-      cancelBtnRef?.focus();
+      if (active) cancelBtnRef?.focus();
     });
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === "Escape") {
-        if (!props.busy) {
-          e.preventDefault();
-          props.onCancel();
-        }
-        return;
-      }
-      if (e.key === "Tab" && dialogRef) {
-        const focusable = Array.from(
-          dialogRef.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-        );
-        if (focusable.length === 0) {
-          e.preventDefault();
-          dialogRef.focus();
-          return;
-        }
-        const first = focusable[0]!;
-        const last = focusable[focusable.length - 1]!;
-        const active = document.activeElement as HTMLElement | null;
-        if (e.shiftKey) {
-          if (!active || !dialogRef.contains(active) || active === first) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else if (!active || !dialogRef.contains(active) || active === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+      handleConfirmDialogKeyDown(e, dialogRef, {
+        busy: props.busy,
+        onCancel: props.onCancel,
+      });
     };
 
     window.addEventListener("keydown", onKeyDown);
     onCleanup(() => {
+      active = false;
       window.removeEventListener("keydown", onKeyDown);
-      if (appRoot) appRoot.inert = false;
-      if (opener && opener.isConnected && typeof opener.focus === "function") {
-        opener.focus();
-      }
+      releaseInert(appRoot);
+      restoreDialogFocus(opener);
     });
   });
 
@@ -96,14 +76,14 @@ export const ConfirmDialog: Component<{
             class="confirm-dialog"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="confirm-dialog-title"
-            aria-describedby="confirm-dialog-desc"
+            aria-labelledby={titleId}
+            aria-describedby={descId}
             tabIndex={-1}
           >
-            <h2 id="confirm-dialog-title" class="confirm-dialog-title">
+            <h2 id={titleId} class="confirm-dialog-title">
               {props.title}
             </h2>
-            <p id="confirm-dialog-desc" class="confirm-dialog-desc muted">
+            <p id={descId} class="confirm-dialog-desc muted">
               {props.message}
             </p>
             <div class="confirm-dialog-actions">
