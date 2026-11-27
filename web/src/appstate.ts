@@ -89,8 +89,13 @@ export async function loadMoreItems(): Promise<void> {
 }
 
 export async function loadAccount(): Promise<void> {
-  const [config, who] = await Promise.all([fetchAccountConfig(), fetchMe()]);
+  const config = await fetchAccountConfig();
   setOidcEnabled(config.oidc);
+  if (!config.oidc) {
+    setMe(null);
+    return;
+  }
+  const who = await fetchMe();
   setMe(who);
 }
 

@@ -9,6 +9,24 @@ export function pick(text: LocalizedText, locale: Locale): string {
 type Dict = Record<Locale, string>;
 const S = {
   appName: { ja: "Takosumi Store", en: "Takosumi Store" },
+  storeSubtitle: {
+    ja: "install できる Capsule を探す、分散型のアプリストア。",
+    en: "Browse installable Capsules across decentralized stores.",
+  },
+  skipToContent: { ja: "本文へスキップ", en: "Skip to content" },
+  primaryNav: { ja: "主なメニュー", en: "Primary navigation" },
+  tagFilters: { ja: "タグで絞り込み", en: "Filter by tag" },
+  searchPlaceholder: {
+    ja: "アプリ名・説明・タグで検索…",
+    en: "Search apps, descriptions, or tags…",
+  },
+  searchLabel: { ja: "アプリを検索", en: "Search apps" },
+  clearSearch: { ja: "検索をクリア", en: "Clear search" },
+  resetFilters: { ja: "絞り込みを解除", en: "Clear filters" },
+  sortLabel: { ja: "並び順", en: "Sort order" },
+  sortUpdated: { ja: "更新順", en: "Recently updated" },
+  sortName: { ja: "名前順", en: "Name" },
+  resultsCount: { ja: "件表示", en: "shown" },
   all: { ja: "すべて", en: "All" },
   apps: { ja: "アプリ", en: "Apps" },
   recentlyAdded: { ja: "新着・更新", en: "Recently updated" },
@@ -19,8 +37,8 @@ const S = {
     en: "No matching Capsules",
   },
   noResultsHint: {
-    ja: "別のカテゴリで探してみてください。",
-    en: "Try a different category.",
+    ja: "検索語やタグを変えて探してみてください。",
+    en: "Try a different search term or tag.",
   },
   errorTitle: { ja: "読み込めませんでした", en: "Couldn’t load" },
   errorHint: {
@@ -33,6 +51,8 @@ const S = {
   about: { ja: "概要", en: "About" },
   developer: { ja: "提供", en: "Developer" },
   source: { ja: "ソース", en: "Source" },
+  modulePath: { ja: "モジュール", en: "Module" },
+  updatedAt: { ja: "更新日", en: "Updated" },
   openRepo: { ja: "リポジトリを開く", en: "Open repository" },
   alsoOnStores: {
     ja: "他のストアにもあります",
@@ -45,6 +65,7 @@ const S = {
     ja: "Git URL を追加画面へ渡します。設定と実行は Takosumi 側で確認します。",
     en: "Passes the Git URL to the add flow. Takosumi handles configuration and execution confirmation.",
   },
+  installTarget: { ja: "インストール先", en: "Target" },
   whereInstall: {
     ja: "あなたの Takos の URL",
     en: "Your Takos URL",
@@ -53,10 +74,19 @@ const S = {
     ja: "https://takos.example.com",
     en: "https://takos.example.com",
   },
+  invalidOriginError: {
+    ja: "https:// または http:// から始まる有効な URL を入力してください。",
+    en: "Enter a valid URL starting with https:// or http://.",
+  },
   change: { ja: "変更", en: "Change" },
+  cancel: { ja: "キャンセル", en: "Cancel" },
   save: { ja: "保存", en: "Save" },
   copyLink: { ja: "リンクをコピー", en: "Copy link" },
   copied: { ja: "コピーしました", en: "Copied" },
+  copyFailed: {
+    ja: "クリップボードへコピーできませんでした",
+    en: "Could not copy link to clipboard",
+  },
   // account / publish
   servers: { ja: "ストアサーバー", en: "Store servers" },
   signIn: { ja: "ログイン", en: "Sign in" },
@@ -175,16 +205,36 @@ export function categoryLabel(category: string, locale: Locale): string {
   return category.charAt(0).toUpperCase() + category.slice(1);
 }
 
+const TAG_PROPER_NAMES: Readonly<Record<string, string>> = {
+  ai: "AI",
+  activitypub: "ActivityPub",
+  api: "API",
+  cli: "CLI",
+  dns: "DNS",
+  git: "Git",
+  http: "HTTP",
+  oidc: "OIDC",
+  oss: "OSS",
+  sns: "SNS",
+  ui: "UI",
+};
+
 /**
  * Human label for a free-form tag. Reuses the known-category labels, otherwise
- * turns "dev-tools" into "Dev Tools".
+ * turns "dev-tools" into "Dev Tools" while preserving common acronyms.
  */
 export function tagLabel(tag: string, locale: Locale): string {
-  const found = CATEGORY_LABELS[tag.toLowerCase()];
+  const lower = tag.toLowerCase();
+  const found = CATEGORY_LABELS[lower];
   if (found) return found[locale];
+  if (TAG_PROPER_NAMES[lower]) return TAG_PROPER_NAMES[lower]!;
   return tag
     .split("-")
     .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .map(
+      (w) =>
+        TAG_PROPER_NAMES[w.toLowerCase()] ??
+        w.charAt(0).toUpperCase() + w.slice(1),
+    )
     .join(" ");
 }

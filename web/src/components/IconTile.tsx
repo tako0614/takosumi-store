@@ -1,4 +1,4 @@
-import { Show, type Component } from "solid-js";
+import { createEffect, createSignal, Show, type Component } from "solid-js";
 
 /**
  * App-store icon. Uses the listing's real `iconUrl` when present; otherwise
@@ -27,13 +27,21 @@ export const IconTile: Component<{
   iconUrl?: string;
   size?: number;
 }> = (props) => {
+  const [imgFailed, setImgFailed] = createSignal(false);
+  createEffect(() => {
+    void props.iconUrl;
+    setImgFailed(false);
+  });
+
   const size = () => props.size ?? 56;
   const hue = () => hueFromSeed(props.seed);
   const gradient = () =>
     `linear-gradient(145deg, hsl(${hue()} 70% 56%), hsl(${(hue() + 26) % 360} 72% 42%))`;
+  const resolvedUrl = () => (imgFailed() ? undefined : props.iconUrl);
+
   return (
     <Show
-      when={props.iconUrl}
+      when={resolvedUrl()}
       fallback={
         <span
           class="icon-tile icon-tile-generated"
@@ -59,6 +67,7 @@ export const IconTile: Component<{
           width={size()}
           height={size()}
           style={{ width: `${size()}px`, height: `${size()}px` }}
+          onError={() => setImgFailed(true)}
         />
       )}
     </Show>

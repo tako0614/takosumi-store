@@ -81,4 +81,14 @@ describe("renderMarkdown (safe README renderer)", () => {
     expect(renderMarkdown("- a\n- b")).toContain("<ul>");
     expect(renderMarkdown("1. a\n2. b")).toContain("<ol>");
   });
+
+  test("shifts heading levels when headingOffset is provided and clamps to h6", () => {
+    const html = renderMarkdown("# Top\n\n## Sub\n\n##### Deep", undefined, {
+      headingOffset: 2,
+    });
+    expect(html).toContain("<h3>Top</h3>");
+    expect(html).toContain("<h4>Sub</h4>");
+    expect(html).toContain("<h6>Deep</h6>");
+    expect(html).not.toContain("<h1>");
+  });
 });

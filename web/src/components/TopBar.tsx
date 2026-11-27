@@ -1,5 +1,5 @@
 import { Show, type Component } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
 import { locale, me, oidcEnabled, setMe } from "../appstate.ts";
 import { t } from "../lib/i18n.ts";
 import { loginUrl, logout } from "../lib/account-client.ts";
@@ -14,7 +14,8 @@ const Mark: Component = () => (
     src="/tako.png"
     width={26}
     height={26}
-    alt="Takosumi"
+    alt=""
+    aria-hidden="true"
     decoding="async"
     class="brand-mark"
   />
@@ -22,6 +23,7 @@ const Mark: Component = () => (
 
 export const TopBar: Component = () => {
   const navigate = useNavigate();
+  const route = useLocation();
 
   const onLogout = async () => {
     await logout();
@@ -32,41 +34,51 @@ export const TopBar: Component = () => {
   return (
     <header class="topbar">
       <div class="topbar-inner">
-        <A href="/" class="brand" aria-label="Takosumi Store">
+        <A href="/" class="brand">
           <Mark />
           <span class="brand-name">{t("appName", locale())}</span>
         </A>
 
-        <div class="topbar-actions">
-          <Show
-            when={me()}
-            fallback={
-              <Show when={oidcEnabled()}>
+        <Show when={me() || oidcEnabled()}>
+          <nav class="topbar-actions" aria-label={t("primaryNav", locale())}>
+            <Show
+              when={me()}
+              fallback={
                 <a
                   class="btn btn-ghost btn-sm"
-                  href={loginUrl(location.pathname + location.search)}
+                  href={loginUrl(route.pathname + route.search)}
                   rel="external"
                 >
                   {t("signIn", locale())}
                 </a>
-              </Show>
-            }
-          >
-            <A href="/manage" class="btn btn-ghost btn-sm">
-              {t("manage", locale())}
-            </A>
-            <A href="/publish" class="btn btn-secondary btn-sm">
-              {t("publish", locale())}
-            </A>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              onClick={onLogout}
+              }
             >
-              {t("signOut", locale())}
-            </button>
-          </Show>
-        </div>
+              <A
+                href="/manage"
+                class="btn btn-ghost btn-sm"
+                aria-current={route.pathname === "/manage" ? "page" : undefined}
+              >
+                {t("manage", locale())}
+              </A>
+              <A
+                href="/publish"
+                class="btn btn-secondary btn-sm"
+                aria-current={
+                  route.pathname === "/publish" ? "page" : undefined
+                }
+              >
+                {t("publish", locale())}
+              </A>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                onClick={onLogout}
+              >
+                {t("signOut", locale())}
+              </button>
+            </Show>
+          </nav>
+        </Show>
       </div>
     </header>
   );

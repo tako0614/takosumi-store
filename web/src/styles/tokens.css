@@ -1,19 +1,18 @@
 /*
- * Canonical Takos/Takosumi design tokens — dark-only, 朱 red UI accent.
- * Copied from the ecosystem canonical block (docs/reference/design-language.md /
- * takos/website/src/styles/tokens.css) so the store matches Takos + Takosumi.
+ * Canonical Takos/Takosumi design tokens — dark default + automatic light theme
+ * matching Takosumi's canonical palette, with 朱 red UI accent.
  * Decorative ink (--tg-ink-*) is kept available but the store UI stays clean
  * (Google Play–style), so it is not used here.
  */
 :root {
-  color-scheme: dark;
+  color-scheme: dark light;
 
   --tg-bg: #0a0a0a;
   --tg-bg-elev: #141414;
   --tg-bg-subtle: #1a1a1a;
   --tg-fg: #fafafa;
   --tg-fg-muted: #a3a3a3;
-  --tg-fg-subtle: #6b6b6b;
+  --tg-fg-subtle: #8a8a93;
   --tg-line: #262626;
   --tg-line-strong: #3f3f3f;
   --tg-code-bg: #141414;
@@ -34,7 +33,7 @@
   --tg-ink-red: #ff3b3b;
   --tg-ink-red-deep: #dc2626;
 
-  --tg-success: #16a34a;
+  --tg-success: #4ade80;
   --tg-warn: #ea580c;
   --tg-danger: #dc2626;
 
@@ -87,4 +86,35 @@
   /* Layout */
   --tg-container: 1120px;
   --tg-nav-h: 64px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --tg-bg: #f7f7f8;
+    --tg-bg-elev: #ffffff;
+    --tg-bg-subtle: #f1f1f3;
+    --tg-fg: #18181b;
+    --tg-fg-muted: #52525b;
+    --tg-fg-subtle: #6b6b74;
+    --tg-line: #e4e4e7;
+    --tg-line-strong: #d4d4d8;
+    --tg-code-bg: #f1f1f3;
+    --tg-code-fg: #18181b;
+
+    --tg-accent: #d32f24;
+    --tg-accent-hover: #b91c1c;
+    --tg-accent-fg: #ffffff;
+    --tg-accent-soft: #fef2f2;
+    --tg-accent-text: #b91c1c;
+
+    --tg-success: #166534;
+    --tg-warn: #c2410c;
+    --tg-danger: #b91c1c;
+
+    --tg-shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.06);
+    --tg-shadow-md: 0 4px 14px rgba(24, 24, 27, 0.08);
+    --tg-shadow-lg: 0 16px 40px rgba(24, 24, 27, 0.12);
+  }
 }

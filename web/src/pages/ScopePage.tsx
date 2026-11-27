@@ -1,24 +1,36 @@
-import { createResource, For, Show, type Component } from "solid-js";
+import {
+  createEffect,
+  createResource,
+  For,
+  Show,
+  type Component,
+} from "solid-js";
 import { A, useParams } from "@solidjs/router";
 import { locale } from "../appstate.ts";
 import { homeBase } from "../lib/servers.ts";
 import { fetchListingsPage } from "../lib/tcs-client.ts";
 import { t } from "../lib/i18n.ts";
 import { AppCard } from "../components/AppCard.tsx";
-import { EmptyState, SkeletonGrid } from "../components/states.tsx";
+import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
 
 /** A publisher namespace page — all apps under one `scope`. */
 export const ScopePage: Component = () => {
   const params = useParams();
-  const [page] = createResource(
+  const [page, { refetch }] = createResource(
     () => params.scope,
     (scope: string) =>
       fetchListingsPage(homeBase(), { scope, sort: "updated", limit: 100 }),
   );
   const items = () => page()?.items ?? [];
 
+  createEffect(() => {
+    document.title = params.scope
+      ? `${params.scope} — ${t("appName", locale())}`
+      : t("appName", locale());
+  });
+
   return (
-    <main class="page scope-page">
+    <main id="main" tabIndex={-1} class="page scope-page">
       <div class="container">
         <A href="/" class="back-link">
           ‹ {t("back", locale())}
@@ -31,10 +43,18 @@ export const ScopePage: Component = () => {
         <Show when={page.loading}>
           <SkeletonGrid count={4} />
         </Show>
-        <Show when={!page.loading && items().length === 0}>
+        <Show when={!page.loading && Boolean(page.error)}>
+          <ErrorState
+            title={t("errorTitle", locale())}
+            message={t("errorHint", locale())}
+            retryLabel={t("retry", locale())}
+            onRetry={() => void refetch()}
+          />
+        </Show>
+        <Show when={!page.loading && !page.error && items().length === 0}>
           <EmptyState glyph="📦" title={t("scopeEmpty", locale())} />
         </Show>
-        <Show when={items().length > 0}>
+        <Show when={!page.error && items().length > 0}>
           <section class="app-grid">
             <For each={items()}>
               {(listing) => <AppCard listing={listing} locale={locale()} />}
