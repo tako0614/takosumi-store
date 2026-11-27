@@ -82,11 +82,15 @@ const S = {
   cancel: { ja: "キャンセル", en: "Cancel" },
   save: { ja: "保存", en: "Save" },
   copyLink: { ja: "リンクをコピー", en: "Copy link" },
+  copyCode: { ja: "コピー", en: "Copy" },
+  copyCodeLabel: { ja: "コードをコピー", en: "Copy code" },
   copied: { ja: "コピーしました", en: "Copied" },
   copyFailed: {
     ja: "クリップボードへコピーできませんでした",
     en: "Could not copy link to clipboard",
   },
+  scrollPrev: { ja: "前へスクロール", en: "Scroll previous" },
+  scrollNext: { ja: "次へスクロール", en: "Scroll next" },
   // account / publish
   servers: { ja: "ストアサーバー", en: "Store servers" },
   signIn: { ja: "ログイン", en: "Sign in" },
@@ -115,9 +119,41 @@ const S = {
     ja: "この発行者が共有したリポジトリ",
     en: "Repositories shared by this publisher",
   },
+  scopeCountSingle: { ja: "1 件のリポジトリ", en: "1 repository" },
+  scopeCountPlural: { ja: "件のリポジトリ", en: "repositories" },
   scopeEmpty: {
     ja: "このスコープにリポジトリはありません",
     en: "No repositories in this scope",
+  },
+  livePreview: { ja: "カード表示プレビュー", en: "Listing card preview" },
+  previewFallbackName: { ja: "アプリ名", en: "App name" },
+  previewFallbackDesc: {
+    ja: "説明文を入力するとここに表示されます。",
+    en: "Your description will appear here.",
+  },
+  gitUrlRequired: {
+    ja: "Git リポジトリの URL を入力してください。",
+    en: "Enter a Git repository URL.",
+  },
+  gitUrlInvalid: {
+    ja: "https:// または http:// から始まる有効な Git URL を入力してください。",
+    en: "Enter a valid Git URL starting with https:// or http://.",
+  },
+  logoUrlInvalid: {
+    ja: "ロゴ画像は https:// から始まる有効な URL を入力してください。",
+    en: "Enter a valid HTTPS image URL starting with https://.",
+  },
+  slugInvalid: {
+    ja: "スラッグは半角小文字英数字とハイフン（1〜48文字）で入力してください。",
+    en: "Use lowercase letters, numbers, and hyphens (1–48 characters).",
+  },
+  handleRequired: {
+    ja: "ハンドルを入力してください。",
+    en: "Enter a handle.",
+  },
+  handleInvalid: {
+    ja: "ハンドルは半角小文字英数字とハイフン（1〜32文字）で入力してください。",
+    en: "Use lowercase letters, numbers, and hyphens (1–32 characters).",
   },
   slug: { ja: "スラッグ（URL 名・任意）", en: "Slug (URL name, optional)" },
   slugPlaceholder: { ja: "名前から自動生成", en: "auto from the name" },
@@ -155,9 +191,16 @@ const S = {
   refreshVersion: { ja: "最新コミットに更新", en: "Update to latest commit" },
   refreshing: { ja: "更新中…", en: "Updating…" },
   refreshed: { ja: "更新しました", en: "Updated" },
+  unpublished: { ja: "非公開にしました", en: "Unlisted" },
+  republished: { ja: "公開しました", en: "Published" },
+  deleted: { ja: "削除しました", en: "Deleted" },
   unpublish: { ja: "非公開にする", en: "Unpublish" },
   republish: { ja: "公開する", en: "Republish" },
   deleteAction: { ja: "削除", en: "Delete" },
+  confirmDeleteTitle: {
+    ja: "リポジトリ表示を削除しますか？",
+    en: "Delete repository listing?",
+  },
   confirmDelete: {
     ja: "このリポジトリ表示を完全に削除します。よろしいですか？",
     en: "Permanently delete this repository listing. Are you sure?",

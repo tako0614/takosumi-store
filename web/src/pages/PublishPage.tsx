@@ -14,7 +14,7 @@ import {
   oidcEnabled,
   setMe,
 } from "../appstate.ts";
-import { t } from "../lib/i18n.ts";
+import { t, tagLabel } from "../lib/i18n.ts";
 import { loginUrl, setHandle } from "../lib/account-client.ts";
 import {
   bodyFromListing,
@@ -22,8 +22,16 @@ import {
   updateListing,
   type PublishBody,
 } from "../lib/publish-client.ts";
+import {
+  repoNameFromGitUrl,
+  validateGitUrl,
+  validateHandle,
+  validateLogoUrl,
+  validateSlug,
+} from "../lib/publish-validation.ts";
 import { fetchListingByScopeSlug } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
+import { IconTile } from "../components/IconTile.tsx";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 function slugify(s: string): string {
@@ -52,6 +60,15 @@ export const PublishPage: Component = () => {
   const [handleErr, setHandleErr] = createSignal("");
   const submitHandle = async (e: Event) => {
     e.preventDefault();
+    const check = validateHandle(handleDraft());
+    if (check === "required") {
+      setHandleErr(t("handleRequired", locale()));
+      return;
+    }
+    if (check === "invalid") {
+      setHandleErr(t("handleInvalid", locale()));
+      return;
+    }
     setHandleErr("");
     const r = await setHandle(handleDraft().trim());
     if (r.ok) setMe(r.me);
@@ -69,6 +86,29 @@ export const PublishPage: Component = () => {
   const [description, setDescription] = createSignal("");
   const [errors, setErrors] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
+
+  // Touched flags for calm, non-nagging inline field validation.
+  const [gitTouched, setGitTouched] = createSignal(false);
+  const [logoTouched, setLogoTouched] = createSignal(false);
+  const [slugTouched, setSlugTouched] = createSignal(false);
+
+  const gitErr = (): string => {
+    if (!gitTouched()) return "";
+    const code = validateGitUrl(git());
+    if (code === "required") return t("gitUrlRequired", locale());
+    if (code === "invalid") return t("gitUrlInvalid", locale());
+    return "";
+  };
+  const logoErr = (): string => {
+    if (!logoTouched()) return "";
+    return validateLogoUrl(iconUrl()) === "invalid"
+      ? t("logoUrlInvalid", locale())
+      : "";
+  };
+  const slugErr = (): string => {
+    if (!slugTouched() || Boolean(editId())) return "";
+    return validateSlug(slug()) === "invalid" ? t("slugInvalid", locale()) : "";
+  };
 
   // Edit mode: load the existing discovery listing and prefill editable fields.
   // Install UX remains outside Store. A repository may propose it to Takosumi
@@ -116,25 +156,34 @@ export const PublishPage: Component = () => {
   const removeTag = (tag: string) =>
     setTags((prev) => prev.filter((x) => x !== tag));
 
-  const repoName = (): string => {
-    try {
-      const u = new URL(git().trim());
-      return (
-        u.pathname
-          .replace(/\.git$/i, "")
-          .replace(/\/+$/, "")
-          .split("/")
-          .pop() ?? ""
-      ).trim();
-    } catch {
-      return "";
-    }
-  };
+  const repoName = (): string => repoNameFromGitUrl(git());
   const effectiveName = () => name().trim() || repoName();
   const autoSlug = () => slugify(effectiveName());
+  const previewIconUrl = () => {
+    const trimmed = iconUrl().trim();
+    return trimmed && validateLogoUrl(trimmed) === null ? trimmed : undefined;
+  };
+  const previewTagsText = () =>
+    tags()
+      .slice(0, 3)
+      .map((tg) => tagLabel(tg, locale()))
+      .join(" · ");
 
   const submit = async (e: Event) => {
     e.preventDefault();
+    setGitTouched(true);
+    setLogoTouched(true);
+    setSlugTouched(true);
+    if (gitErr() || logoErr() || slugErr()) {
+      const focusId = gitErr()
+        ? "publish-git"
+        : logoErr()
+          ? "publish-logo"
+          : "publish-slug";
+      document.getElementById(focusId)?.focus();
+      return;
+    }
+
     setBusy(true);
     setErrors([]);
     const display = effectiveName();
@@ -218,17 +267,35 @@ export const PublishPage: Component = () => {
             <Show
               when={who().handle}
               fallback={
-                <form class="form handle-step" onSubmit={submitHandle}>
-                  <label class="field">
+                <form
+                  class="form handle-step"
+                  onSubmit={submitHandle}
+                  noValidate
+                >
+                  <label class="field" for="publish-handle">
                     <span>{t("setHandle", locale())}</span>
                     <input
+                      id="publish-handle"
+                      name="handle"
                       value={handleDraft()}
-                      onInput={(e) => setHandleDraft(e.currentTarget.value)}
+                      aria-invalid={Boolean(handleErr()) || undefined}
+                      aria-describedby={
+                        handleErr() ? "publish-handle-error" : undefined
+                      }
+                      onInput={(e) => {
+                        setHandleDraft(e.currentTarget.value);
+                        if (handleErr()) setHandleErr("");
+                      }}
                       placeholder={t("handlePlaceholder", locale())}
+                      autocomplete="username"
                     />
                   </label>
                   <Show when={handleErr()}>
-                    <p class="field-error" role="alert">
+                    <p
+                      id="publish-handle-error"
+                      class="field-error"
+                      role="alert"
+                    >
                       {handleErr()}
                     </p>
                   </Show>
@@ -238,20 +305,68 @@ export const PublishPage: Component = () => {
                 </form>
               }
             >
-              <form class="form publish-form" onSubmit={submit}>
-                <label class="field">
-                  <span>{t("gitUrl", locale())}</span>
+              <section
+                class="publish-preview"
+                aria-label={t("livePreview", locale())}
+              >
+                <span class="publish-preview-label muted">
+                  {t("livePreview", locale())}
+                </span>
+                <div class="app-card publish-preview-card">
+                  <IconTile
+                    label={
+                      effectiveName() || t("previewFallbackName", locale())
+                    }
+                    seed={`${who().handle}/${slug().trim() || autoSlug() || "preview"}`}
+                    iconUrl={previewIconUrl()}
+                    size={60}
+                  />
+                  <div class="app-card-text">
+                    <span class="app-card-name">
+                      {effectiveName() || t("previewFallbackName", locale())}
+                    </span>
+                    <span class="app-card-sub">
+                      {previewTagsText() ||
+                        `${who().handle}/${slug().trim() || autoSlug() || "app"}`}
+                    </span>
+                    <span class="app-card-desc">
+                      {description().trim() ||
+                        t("previewFallbackDesc", locale())}
+                    </span>
+                  </div>
+                </div>
+              </section>
+
+              <form class="form publish-form" onSubmit={submit} noValidate>
+                <div class="field">
+                  <label for="publish-git">{t("gitUrl", locale())}</label>
                   <input
+                    id="publish-git"
+                    name="git"
+                    type="url"
                     value={git()}
+                    aria-invalid={Boolean(gitErr()) || undefined}
+                    aria-describedby={
+                      gitErr() ? "publish-git-error" : undefined
+                    }
                     onInput={(e) => setGit(e.currentTarget.value)}
+                    onBlur={() => setGitTouched(true)}
                     placeholder="https://github.com/you/app.git"
                     autocomplete="off"
                     required
                   />
-                </label>
-                <label class="field">
-                  <span>{t("displayName", locale())}</span>
+                  <Show when={gitErr()}>
+                    <p id="publish-git-error" class="field-error" role="alert">
+                      {gitErr()}
+                    </p>
+                  </Show>
+                </div>
+
+                <div class="field">
+                  <label for="publish-name">{t("displayName", locale())}</label>
                   <input
+                    id="publish-name"
+                    name="name"
                     value={name()}
                     onInput={(e) => setName(e.currentTarget.value)}
                     placeholder={
@@ -259,27 +374,50 @@ export const PublishPage: Component = () => {
                     }
                     autocomplete="off"
                   />
-                </label>
-                <label class="field">
-                  <span>{t("logoUrl", locale())}</span>
+                </div>
+
+                <div class="field">
+                  <label for="publish-logo">{t("logoUrl", locale())}</label>
                   <input
+                    id="publish-logo"
+                    name="iconUrl"
+                    type="url"
                     value={iconUrl()}
+                    aria-invalid={Boolean(logoErr()) || undefined}
+                    aria-describedby={
+                      logoErr() ? "publish-logo-error" : undefined
+                    }
                     onInput={(e) => setIconUrl(e.currentTarget.value)}
+                    onBlur={() => setLogoTouched(true)}
                     placeholder="https://…/icon.png"
                     autocomplete="off"
                   />
-                </label>
+                  <Show when={logoErr()}>
+                    <p id="publish-logo-error" class="field-error" role="alert">
+                      {logoErr()}
+                    </p>
+                  </Show>
+                </div>
 
                 <details class="adv">
                   <summary>{t("advanced", locale())}</summary>
-                  <label class="field">
-                    <span>{t("publicId", locale())}</span>
+                  <div class="field">
+                    <label for="publish-slug">{t("publicId", locale())}</label>
                     <div class="slug-row">
                       <span class="slug-scope">{who().handle}</span>
                       <span class="slug-sep">/</span>
                       <input
+                        id="publish-slug"
+                        name="slug"
                         value={slug()}
+                        aria-invalid={Boolean(slugErr()) || undefined}
+                        aria-describedby={
+                          slugErr()
+                            ? "publish-slug-error publish-slug-hint"
+                            : "publish-slug-hint"
+                        }
                         onInput={(e) => setSlug(e.currentTarget.value)}
+                        onBlur={() => setSlugTouched(true)}
                         placeholder={
                           autoSlug() || t("slugPlaceholder", locale())
                         }
@@ -287,12 +425,22 @@ export const PublishPage: Component = () => {
                         disabled={Boolean(editId())}
                       />
                     </div>
-                    <span class="field-hint">
+                    <Show when={slugErr()}>
+                      <p
+                        id="publish-slug-error"
+                        class="field-error"
+                        role="alert"
+                      >
+                        {slugErr()}
+                      </p>
+                    </Show>
+                    <span id="publish-slug-hint" class="field-hint">
                       {t("publicIdHint", locale())}
                     </span>
-                  </label>
-                  <label class="field">
-                    <span>{t("tagsField", locale())}</span>
+                  </div>
+
+                  <div class="field">
+                    <label for="publish-tags">{t("tagsField", locale())}</label>
                     <div class="tag-input">
                       <For each={tags()}>
                         {(tg) => (
@@ -310,10 +458,14 @@ export const PublishPage: Component = () => {
                         )}
                       </For>
                       <input
+                        id="publish-tags"
+                        name="tags"
                         class="tag-entry"
                         value={tagDraft()}
+                        aria-describedby="publish-tags-hint"
                         onInput={(e) => setTagDraft(e.currentTarget.value)}
                         onKeyDown={(e) => {
+                          if (e.isComposing || e.keyCode === 229) return;
                           if (e.key === "Enter" || e.key === ",") {
                             e.preventDefault();
                             addTags(tagDraft());
@@ -334,16 +486,23 @@ export const PublishPage: Component = () => {
                         autocomplete="off"
                       />
                     </div>
-                    <span class="field-hint">{t("tagsHint", locale())}</span>
-                  </label>
-                  <label class="field">
-                    <span>{t("descriptionField", locale())}</span>
+                    <span id="publish-tags-hint" class="field-hint">
+                      {t("tagsHint", locale())}
+                    </span>
+                  </div>
+
+                  <div class="field">
+                    <label for="publish-description">
+                      {t("descriptionField", locale())}
+                    </label>
                     <textarea
+                      id="publish-description"
+                      name="description"
                       value={description()}
                       onInput={(e) => setDescription(e.currentTarget.value)}
                       rows={3}
                     />
-                  </label>
+                  </div>
                 </details>
 
                 <Show when={errors().length > 0}>

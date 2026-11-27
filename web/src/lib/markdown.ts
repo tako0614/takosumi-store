@@ -5,8 +5,8 @@
  * HTML-escaped FIRST, then only a whitelist of our own tags is introduced, and
  * link/image URLs are scheme-checked (http/https/anchor only). No raw HTML from
  * the source is ever passed through, so the result is safe for innerHTML.
- * It intentionally supports only the common subset (headings, emphasis, code,
- * lists, quotes, rules, links) — anything else degrades to escaped text.
+ * Supports the common README subset (headings, emphasis, code, tables,
+ * task-lists, lists, quotes, rules, links) — anything else degrades to escaped text.
  */
 
 function escapeHtml(s: string): string {
@@ -96,6 +96,80 @@ function renderInline(escaped: string, source: URL | undefined): string {
   return restore(renderEmphasis(out));
 }
 
+type TableAlign = "left" | "center" | "right" | null;
+
+/**
+ * Splits a Markdown table row into trimmed cells, ignoring pipes inside
+ * backtick code spans or escaped as `\|`.
+ */
+function splitTableRow(line: string): string[] {
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|") && !trimmed.endsWith("\\|")) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  const cells: string[] = [];
+  let current = "";
+  let inCode = false;
+  for (let idx = 0; idx < trimmed.length; idx += 1) {
+    const ch = trimmed[idx]!;
+    if (ch === "\\" && !inCode && trimmed[idx + 1] === "|") {
+      current += "|";
+      idx += 1;
+      continue;
+    }
+    if (ch === "`") {
+      inCode = !inCode;
+      current += ch;
+      continue;
+    }
+    if (ch === "|" && !inCode) {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+/** Parses a GFM table separator row (e.g. `| --- | :---: | ---: |`). */
+function parseTableSeparator(line: string): TableAlign[] | null {
+  if (!line.includes("|") && !/^\s*:?-{3,}:?\s*$/.test(line)) return null;
+  const cells = splitTableRow(line);
+  if (cells.length === 0) return null;
+  const aligns: TableAlign[] = [];
+  for (const cell of cells) {
+    if (!/^:?-{3,}:?$/.test(cell)) return null;
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) aligns.push("center");
+    else if (right) aligns.push("right");
+    else if (left) aligns.push("left");
+    else aligns.push(null);
+  }
+  return aligns;
+}
+
+function isTableStart(lines: readonly string[], index: number): boolean {
+  if (index + 1 >= lines.length) return false;
+  const headerLine = lines[index]!;
+  const sepLine = lines[index + 1]!;
+  if (!headerLine.includes("|")) return false;
+  const aligns = parseTableSeparator(sepLine);
+  if (!aligns) return false;
+  const headerCells = splitTableRow(headerLine);
+  return headerCells.length === aligns.length && headerCells.length > 0;
+}
+
+function alignAttr(align: TableAlign | undefined): string {
+  if (align === "center" || align === "right" || align === "left") {
+    return ` style="text-align:${align}"`;
+  }
+  return "";
+}
+
 export interface RenderMarkdownOptions {
   /** Shift heading levels downward (clamped to h6) to preserve page outline. */
   readonly headingOffset?: number;
@@ -171,7 +245,47 @@ export function renderMarkdown(
       continue;
     }
 
-    // Unordered / ordered list item.
+    // GitHub-style table (header + delimiter row + 0..N body rows).
+    if (isTableStart(lines, i)) {
+      closeList();
+      const headers = splitTableRow(lines[i]!);
+      const aligns = parseTableSeparator(lines[i + 1]!)!;
+      i += 2;
+      const bodyRows: string[][] = [];
+      while (
+        i < lines.length &&
+        !/^\s*$/.test(lines[i]!) &&
+        lines[i]!.includes("|") &&
+        !/^\s*```/.test(lines[i]!) &&
+        !/^(#{1,6})\s+/.test(lines[i]!)
+      ) {
+        bodyRows.push(splitTableRow(lines[i]!));
+        i += 1;
+      }
+      const headHtml = headers
+        .map(
+          (cell, col) =>
+            `<th${alignAttr(aligns[col])}>${renderInline(escapeHtml(cell), source)}</th>`,
+        )
+        .join("");
+      const bodyHtml = bodyRows
+        .map((row) => {
+          const cells = headers
+            .map(
+              (_h, col) =>
+                `<td${alignAttr(aligns[col])}>${renderInline(escapeHtml(row[col] ?? ""), source)}</td>`,
+            )
+            .join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
+      html.push(
+        `<div class="md-table-wrap"><table><thead><tr>${headHtml}</tr></thead>${bodyRows.length > 0 ? `<tbody>${bodyHtml}</tbody>` : ""}</table></div>`,
+      );
+      continue;
+    }
+
+    // Unordered / ordered list item (including GFM task-list checkboxes).
     const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
     const ol = /^\s*\d+\.\s+(.*)$/.exec(line);
     if (ul || ol) {
@@ -181,9 +295,16 @@ export function renderMarkdown(
         listOpen = kind;
         html.push(`<${kind}>`);
       }
-      html.push(
-        `<li>${renderInline(escapeHtml((ul ?? ol)![1]!.trim()), source)}</li>`,
-      );
+      const rawItem = (ul ?? ol)![1]!.trim();
+      const task = ul ? /^\[([ xX])\]\s+(.*)$/.exec(rawItem) : null;
+      if (task) {
+        const checked = task[1]!.toLowerCase() === "x";
+        html.push(
+          `<li class="md-task"><input type="checkbox" class="md-task-box" disabled${checked ? " checked" : ""} aria-hidden="true" tabindex="-1" /><span>${renderInline(escapeHtml(task[2]!.trim()), source)}</span></li>`,
+        );
+      } else {
+        html.push(`<li>${renderInline(escapeHtml(rawItem), source)}</li>`);
+      }
       i += 1;
       continue;
     }
@@ -212,7 +333,8 @@ export function renderMarkdown(
       !/^\s*```/.test(lines[i]!) &&
       !/^\s*[-*+]\s+/.test(lines[i]!) &&
       !/^\s*\d+\.\s+/.test(lines[i]!) &&
-      !/^\s*>\s?/.test(lines[i]!)
+      !/^\s*>\s?/.test(lines[i]!) &&
+      !isTableStart(lines, i)
     ) {
       para.push(lines[i]!);
       i += 1;
