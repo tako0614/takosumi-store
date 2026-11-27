@@ -39,11 +39,11 @@ export const TopBar: Component = () => {
           <span class="brand-name">{t("appName", locale())}</span>
         </A>
 
-        <nav class="topbar-actions" aria-label={t("primaryNav", locale())}>
-          <Show
-            when={me()}
-            fallback={
-              <Show when={oidcEnabled()}>
+        <Show when={me() || oidcEnabled()}>
+          <nav class="topbar-actions" aria-label={t("primaryNav", locale())}>
+            <Show
+              when={me()}
+              fallback={
                 <a
                   class="btn btn-ghost btn-sm"
                   href={loginUrl(route.pathname + route.search)}
@@ -51,32 +51,34 @@ export const TopBar: Component = () => {
                 >
                   {t("signIn", locale())}
                 </a>
-              </Show>
-            }
-          >
-            <A
-              href="/manage"
-              class="btn btn-ghost btn-sm"
-              aria-current={route.pathname === "/manage" ? "page" : undefined}
+              }
             >
-              {t("manage", locale())}
-            </A>
-            <A
-              href="/publish"
-              class="btn btn-secondary btn-sm"
-              aria-current={route.pathname === "/publish" ? "page" : undefined}
-            >
-              {t("publish", locale())}
-            </A>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              onClick={onLogout}
-            >
-              {t("signOut", locale())}
-            </button>
-          </Show>
-        </nav>
+              <A
+                href="/manage"
+                class="btn btn-ghost btn-sm"
+                aria-current={route.pathname === "/manage" ? "page" : undefined}
+              >
+                {t("manage", locale())}
+              </A>
+              <A
+                href="/publish"
+                class="btn btn-secondary btn-sm"
+                aria-current={
+                  route.pathname === "/publish" ? "page" : undefined
+                }
+              >
+                {t("publish", locale())}
+              </A>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                onClick={onLogout}
+              >
+                {t("signOut", locale())}
+              </button>
+            </Show>
+          </nav>
+        </Show>
       </div>
     </header>
   );

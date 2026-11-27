@@ -32,6 +32,7 @@ function paramStr(value: string | string[] | undefined): string {
 export const HomePage: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   let searchInputRef: HTMLInputElement | undefined;
+  let composing = false;
 
   const fTag = () => paramStr(searchParams.tag);
   const fQuery = () => paramStr(searchParams.q);
@@ -53,7 +54,16 @@ export const HomePage: Component = () => {
   onMount(() => {
     ensureListings();
     const onGlobalKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (
+        e.isComposing ||
+        e.defaultPrevented ||
+        e.key !== "/" ||
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey
+      ) {
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -75,6 +85,13 @@ export const HomePage: Component = () => {
 
   createEffect(() => {
     document.title = t("appName", locale());
+  });
+
+  createEffect(() => {
+    const q = fQuery();
+    if (!composing && searchInputRef && searchInputRef.value !== q) {
+      searchInputRef.value = q;
+    }
   });
 
   const facetTags = createMemo(() => {
@@ -117,18 +134,37 @@ export const HomePage: Component = () => {
                   {t("searchLabel", locale())}
                 </label>
                 <input
-                  ref={searchInputRef}
+                  ref={(el) => {
+                    searchInputRef = el;
+                    el.value = fQuery();
+                  }}
                   id="catalog-search"
+                  name="q"
                   type="search"
                   class="search-input"
-                  value={fQuery()}
                   placeholder={t("searchPlaceholder", locale())}
                   autocomplete="off"
                   spellcheck={false}
-                  onInput={(e) => setFQuery(e.currentTarget.value)}
+                  onCompositionStart={() => {
+                    composing = true;
+                  }}
+                  onCompositionEnd={(e) => {
+                    composing = false;
+                    setFQuery(e.currentTarget.value);
+                  }}
+                  onInput={(e) => {
+                    if (!e.isComposing && !composing) {
+                      setFQuery(e.currentTarget.value);
+                    }
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Escape" && fQuery()) {
+                    if (e.isComposing || e.keyCode === 229) return;
+                    if (
+                      e.key === "Escape" &&
+                      (fQuery() || e.currentTarget.value)
+                    ) {
                       e.preventDefault();
+                      e.currentTarget.value = "";
                       setFQuery("");
                     }
                   }}

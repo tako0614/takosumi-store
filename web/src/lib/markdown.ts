@@ -107,7 +107,10 @@ export function renderMarkdown(
   opts?: RenderMarkdownOptions,
 ): string {
   const source = readmeSource(sourceUrl);
-  const headingOffset = Math.max(0, Math.floor(opts?.headingOffset ?? 0));
+  const rawOffset = opts?.headingOffset ?? 0;
+  const headingOffset = Number.isFinite(rawOffset)
+    ? Math.max(0, Math.floor(rawOffset))
+    : 0;
   const lines = md.replace(/\r\n?/g, "\n").split("\n");
   const html: string[] = [];
   let i = 0;

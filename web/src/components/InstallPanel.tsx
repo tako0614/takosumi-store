@@ -1,4 +1,4 @@
-import { createSignal, Show, type Component } from "solid-js";
+import { createSignal, onCleanup, Show, type Component } from "solid-js";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 import type { Locale } from "../../../spec/api.ts";
 import { t } from "../lib/i18n.ts";
@@ -22,6 +22,16 @@ export const InstallPanel: Component<{
     "",
   );
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearCopyStatus = () => {
+    if (copyTimer) {
+      clearTimeout(copyTimer);
+      copyTimer = undefined;
+    }
+    setCopyStatus("");
+  };
+  onCleanup(() => {
+    if (copyTimer) clearTimeout(copyTimer);
+  });
 
   const installUrl = () =>
     origin() ? buildInstallUrl(origin(), props.listing) : "";
@@ -37,6 +47,7 @@ export const InstallPanel: Component<{
     e.preventDefault();
     const normalized = setTakosOrigin(draft());
     if (normalized) {
+      clearCopyStatus();
       setOrigin(normalized);
       setDraft(normalized);
       setOriginErr("");
@@ -70,6 +81,7 @@ export const InstallPanel: Component<{
             onSubmit={saveOrigin}
             noValidate
             onKeyDown={(e) => {
+              if (e.isComposing || e.keyCode === 229) return;
               if (e.key === "Escape" && origin()) {
                 e.preventDefault();
                 cancelEdit();
@@ -147,6 +159,7 @@ export const InstallPanel: Component<{
             type="button"
             class="btn btn-ghost btn-sm install-change-btn"
             onClick={() => {
+              clearCopyStatus();
               setDraft(origin());
               setOriginErr("");
               setEditing(true);

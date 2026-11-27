@@ -57,7 +57,7 @@ export const AppDetailPage: Component = () => {
   );
 
   const listing = createMemo<ListingV2 | null>(
-    () => fromFeed() ?? fetched() ?? null,
+    () => fromFeed() ?? (fetched.error ? null : (fetched() ?? null)),
   );
   const seenOn = () => fromFeed()?.seenOn ?? [];
   const resolving = () => !listing() && fetched.loading;
