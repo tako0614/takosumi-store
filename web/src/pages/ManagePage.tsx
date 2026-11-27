@@ -1,4 +1,5 @@
 import {
+  createEffect,
   createResource,
   createSignal,
   For,
@@ -18,7 +19,7 @@ import {
   type OwnedListing,
 } from "../lib/publish-client.ts";
 import { IconTile } from "../components/IconTile.tsx";
-import { EmptyState } from "../components/states.tsx";
+import { EmptyState, ErrorState } from "../components/states.tsx";
 
 export const ManagePage: Component = () => {
   const [items, { refetch }] = createResource<OwnedListing[], unknown>(
@@ -27,6 +28,10 @@ export const ManagePage: Component = () => {
   );
   const [busyId, setBusyId] = createSignal("");
   const [errId, setErrId] = createSignal("");
+
+  createEffect(() => {
+    document.title = `${t("myListings", locale())} — ${t("appName", locale())}`;
+  });
 
   async function run(id: string, action: () => Promise<boolean>) {
     setBusyId(id);
@@ -53,7 +58,7 @@ export const ManagePage: Component = () => {
   };
 
   return (
-    <main class="page manage">
+    <main id="main" tabIndex={-1} class="page manage">
       <div class="container container-narrow">
         <A href="/" class="back-link">
           ‹ {t("back", locale())}
@@ -91,106 +96,118 @@ export const ManagePage: Component = () => {
             fallback={<p class="muted">{t("loading", locale())}</p>}
           >
             <Show
-              when={(items() ?? []).length > 0}
+              when={!items.error}
               fallback={
-                <EmptyState
-                  glyph="📦"
-                  title={t("noListings", locale())}
-                  action={
-                    <A href="/publish" class="btn btn-primary">
-                      {t("publishFirst", locale())}
-                    </A>
-                  }
+                <ErrorState
+                  title={t("errorTitle", locale())}
+                  message={t("errorHint", locale())}
+                  retryLabel={t("retry", locale())}
+                  onRetry={() => void refetch()}
                 />
               }
             >
-              <ul class="manage-list">
-                <For each={items()}>
-                  {(l) => (
-                    <li
-                      class="manage-item"
-                      classList={{ "is-hidden": l.status === "hidden" }}
-                    >
-                      <IconTile
-                        label={pick(l.name, locale())}
-                        seed={l.id}
-                        iconUrl={l.iconUrl}
-                        size={52}
-                      />
-                      <div class="manage-item-main">
-                        <div class="manage-item-head">
+              <Show
+                when={(items() ?? []).length > 0}
+                fallback={
+                  <EmptyState
+                    glyph="📦"
+                    title={t("noListings", locale())}
+                    action={
+                      <A href="/publish" class="btn btn-primary">
+                        {t("publishFirst", locale())}
+                      </A>
+                    }
+                  />
+                }
+              >
+                <ul class="manage-list">
+                  <For each={items()}>
+                    {(l) => (
+                      <li
+                        class="manage-item"
+                        classList={{ "is-hidden": l.status === "hidden" }}
+                      >
+                        <IconTile
+                          label={pick(l.name, locale())}
+                          seed={l.id}
+                          iconUrl={l.iconUrl}
+                          size={52}
+                        />
+                        <div class="manage-item-main">
+                          <div class="manage-item-head">
+                            <A
+                              href={`/${encodeURIComponent(l.scope)}/${encodeURIComponent(l.slug)}`}
+                              class="manage-item-name"
+                            >
+                              {pick(l.name, locale())}
+                            </A>
+                            <span
+                              class="chip chip-mini"
+                              classList={{
+                                "chip-ok": l.status === "visible",
+                                "chip-muted": l.status === "hidden",
+                              }}
+                            >
+                              {l.status === "visible"
+                                ? t("statusVisible", locale())
+                                : t("statusHidden", locale())}
+                            </span>
+                          </div>
+                          <div class="manage-item-meta mono muted">
+                            {l.scope}/{l.slug}
+                          </div>
+                          <Show when={errId() === l.id}>
+                            <div class="field-error" role="alert">
+                              {t("actionFailed", locale())}
+                            </div>
+                          </Show>
+                        </div>
+                        <div class="manage-item-actions">
                           <A
-                            href={`/${encodeURIComponent(l.scope)}/${encodeURIComponent(l.slug)}`}
-                            class="manage-item-name"
+                            href={`/publish?edit=${encodeURIComponent(l.id)}`}
+                            class="btn btn-secondary btn-sm"
                           >
-                            {pick(l.name, locale())}
+                            {t("edit", locale())}
                           </A>
-                          <span
-                            class="chip chip-mini"
-                            classList={{
-                              "chip-ok": l.status === "visible",
-                              "chip-muted": l.status === "hidden",
-                            }}
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-sm"
+                            disabled={busyId() === l.id}
+                            onClick={() => refresh(l)}
+                          >
+                            {busyId() === l.id
+                              ? t("refreshing", locale())
+                              : t("refreshVersion", locale())}
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-sm"
+                            disabled={busyId() === l.id}
+                            onClick={() => toggle(l)}
                           >
                             {l.status === "visible"
-                              ? t("statusVisible", locale())
-                              : t("statusHidden", locale())}
-                          </span>
+                              ? t("unpublish", locale())
+                              : t("republish", locale())}
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-sm btn-danger"
+                            disabled={busyId() === l.id}
+                            onClick={() => remove(l)}
+                          >
+                            {t("deleteAction", locale())}
+                          </button>
                         </div>
-                        <div class="manage-item-meta mono muted">
-                          {l.scope}/{l.slug}
-                        </div>
-                        <Show when={errId() === l.id}>
-                          <div class="field-error">
-                            {t("actionFailed", locale())}
-                          </div>
-                        </Show>
-                      </div>
-                      <div class="manage-item-actions">
-                        <A
-                          href={`/publish?edit=${encodeURIComponent(l.id)}`}
-                          class="btn btn-secondary btn-sm"
-                        >
-                          {t("edit", locale())}
-                        </A>
-                        <button
-                          type="button"
-                          class="btn btn-ghost btn-sm"
-                          disabled={busyId() === l.id}
-                          onClick={() => refresh(l)}
-                        >
-                          {busyId() === l.id
-                            ? t("refreshing", locale())
-                            : t("refreshVersion", locale())}
-                        </button>
-                        <button
-                          type="button"
-                          class="btn btn-ghost btn-sm"
-                          disabled={busyId() === l.id}
-                          onClick={() => toggle(l)}
-                        >
-                          {l.status === "visible"
-                            ? t("unpublish", locale())
-                            : t("republish", locale())}
-                        </button>
-                        <button
-                          type="button"
-                          class="btn btn-ghost btn-sm btn-danger"
-                          disabled={busyId() === l.id}
-                          onClick={() => remove(l)}
-                        >
-                          {t("deleteAction", locale())}
-                        </button>
-                      </div>
-                    </li>
-                  )}
-                </For>
-              </ul>
-              <p class="muted manage-hint">
-                <A href="/publish" class="linklike">
-                  + {t("publish", locale())}
-                </A>
-              </p>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+                <p class="muted manage-hint">
+                  <A href="/publish" class="linklike">
+                    + {t("publish", locale())}
+                  </A>
+                </p>
+              </Show>
             </Show>
           </Show>
         </Show>

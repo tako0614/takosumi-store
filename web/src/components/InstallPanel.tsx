@@ -17,29 +17,46 @@ export const InstallPanel: Component<{
   const [origin, setOrigin] = createSignal(getTakosOrigin());
   const [editing, setEditing] = createSignal(!getTakosOrigin());
   const [draft, setDraft] = createSignal(getTakosOrigin());
-  const [copied, setCopied] = createSignal(false);
+  const [originErr, setOriginErr] = createSignal("");
+  const [copyStatus, setCopyStatus] = createSignal<"" | "copied" | "failed">(
+    "",
+  );
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   const installUrl = () =>
     origin() ? buildInstallUrl(origin(), props.listing) : "";
+
+  const cancelEdit = () => {
+    if (!origin()) return;
+    setDraft(origin());
+    setOriginErr("");
+    setEditing(false);
+  };
 
   const saveOrigin = (e: Event) => {
     e.preventDefault();
     const normalized = setTakosOrigin(draft());
     if (normalized) {
       setOrigin(normalized);
+      setDraft(normalized);
+      setOriginErr("");
       setEditing(false);
+    } else {
+      setOriginErr(t("invalidOriginError", props.locale));
     }
   };
 
   const copy = async () => {
     const url = installUrl();
     if (!url) return;
+    if (copyTimer) clearTimeout(copyTimer);
     try {
       await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      setCopyStatus("copied");
+      copyTimer = setTimeout(() => setCopyStatus(""), 2000);
     } catch {
-      /* clipboard may be unavailable; the link itself still works */
+      setCopyStatus("failed");
+      copyTimer = setTimeout(() => setCopyStatus(""), 3000);
     }
   };
 
@@ -48,22 +65,61 @@ export const InstallPanel: Component<{
       <Show
         when={origin() && !editing()}
         fallback={
-          <form class="install-origin" onSubmit={saveOrigin}>
+          <form
+            class="install-origin"
+            onSubmit={saveOrigin}
+            noValidate
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && origin()) {
+                e.preventDefault();
+                cancelEdit();
+              }
+            }}
+          >
             <label for="takos-origin">{t("whereInstall", props.locale)}</label>
             <div class="install-origin-row">
               <input
                 id="takos-origin"
                 type="url"
                 value={draft()}
-                onInput={(e) => setDraft(e.currentTarget.value)}
+                aria-invalid={Boolean(originErr()) || undefined}
+                aria-describedby={
+                  originErr() ? "takos-origin-error" : "takos-origin-hint"
+                }
+                onInput={(e) => {
+                  setDraft(e.currentTarget.value);
+                  if (originErr()) setOriginErr("");
+                }}
                 placeholder={t("takosOriginPlaceholder", props.locale)}
                 autocomplete="url"
               />
-              <button type="submit" class="btn btn-secondary">
-                {t("save", props.locale)}
-              </button>
+              <div class="install-origin-buttons">
+                <button type="submit" class="btn btn-primary">
+                  {t("save", props.locale)}
+                </button>
+                <Show when={origin()}>
+                  <button
+                    type="button"
+                    class="btn btn-ghost"
+                    onClick={cancelEdit}
+                  >
+                    {t("cancel", props.locale)}
+                  </button>
+                </Show>
+              </div>
             </div>
-            <p class="install-hint">{t("installHint", props.locale)}</p>
+            <Show when={originErr()}>
+              <p
+                id="takos-origin-error"
+                class="field-error install-error"
+                role="alert"
+              >
+                {originErr()}
+              </p>
+            </Show>
+            <p id="takos-origin-hint" class="install-hint">
+              {t("installHint", props.locale)}
+            </p>
           </form>
         }
       >
@@ -77,22 +133,37 @@ export const InstallPanel: Component<{
             {t("openInTakos", props.locale)} ↗
           </a>
           <button type="button" class="btn btn-secondary" onClick={copy}>
-            {copied() ? t("copied", props.locale) : t("copyLink", props.locale)}
+            {copyStatus() === "copied"
+              ? t("copied", props.locale)
+              : t("copyLink", props.locale)}
           </button>
         </div>
-        <p class="install-hint">
-          {t("installHint", props.locale)}{" "}
+        <div class="install-target-row">
+          <span class="install-target-label">
+            {t("installTarget", props.locale)}
+          </span>
+          <span class="install-target-origin mono">{origin()}</span>
           <button
             type="button"
-            class="linklike"
+            class="btn btn-ghost btn-sm install-change-btn"
             onClick={() => {
               setDraft(origin());
+              setOriginErr("");
               setEditing(true);
             }}
           >
-            {origin()} ({t("change", props.locale)})
+            {t("change", props.locale)}
           </button>
-        </p>
+        </div>
+        <Show when={copyStatus() === "failed"}>
+          <p class="field-error install-error" role="alert">
+            {t("copyFailed", props.locale)}
+          </p>
+        </Show>
+        <span class="sr-only" aria-live="polite">
+          {copyStatus() === "copied" ? t("copied", props.locale) : ""}
+        </span>
+        <p class="install-hint">{t("installHint", props.locale)}</p>
       </Show>
     </div>
   );

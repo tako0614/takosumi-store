@@ -1,4 +1,5 @@
 import {
+  createEffect,
   createMemo,
   createResource,
   For,
@@ -8,6 +9,7 @@ import {
 import { A, useParams } from "@solidjs/router";
 import { agg, locale } from "../appstate.ts";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
+import type { Locale } from "../../../spec/api.ts";
 import { pick, t, tagLabel } from "../lib/i18n.ts";
 import {
   fetchListingByScopeSlug,
@@ -17,10 +19,25 @@ import { homeBase } from "../lib/servers.ts";
 import { renderMarkdown } from "../lib/markdown.ts";
 import { IconTile } from "../components/IconTile.tsx";
 import { InstallPanel } from "../components/InstallPanel.tsx";
-import { EmptyState } from "../components/states.tsx";
+import { EmptyState, ErrorState } from "../components/states.tsx";
 
 function repoUrl(git: string): string {
   return git.replace(/\.git$/i, "");
+}
+
+function formatDate(iso: string | undefined, loc: Locale): string {
+  if (!iso) return "";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "";
+  try {
+    return new Intl.DateTimeFormat(loc === "ja" ? "ja-JP" : "en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(ms));
+  } catch {
+    return iso.slice(0, 10);
+  }
 }
 
 export const AppDetailPage: Component = () => {
@@ -30,7 +47,7 @@ export const AppDetailPage: Component = () => {
 
   // Deep-link fallback: fetch the single listing from this store if the feed
   // hasn't loaded it (e.g. the visitor opened /:scope/:slug directly).
-  const [fetched] = createResource(
+  const [fetched, { refetch }] = createResource(
     () =>
       fromFeed()
         ? null
@@ -44,6 +61,15 @@ export const AppDetailPage: Component = () => {
   );
   const seenOn = () => fromFeed()?.seenOn ?? [];
   const resolving = () => !listing() && fetched.loading;
+  const fetchFailed = () =>
+    !listing() && !fetched.loading && Boolean(fetched.error);
+
+  createEffect(() => {
+    const l = listing();
+    document.title = l
+      ? `${pick(l.name, locale())} — ${t("appName", locale())}`
+      : t("appName", locale());
+  });
 
   // README from the source repo — registry-grade detail. Fetched lazily once
   // the listing resolves; absent READMEs simply omit the section.
@@ -57,14 +83,14 @@ export const AppDetailPage: Component = () => {
   );
 
   return (
-    <main class="page detail">
+    <main id="main" tabIndex={-1} class="page detail">
       <div class="container container-narrow">
         <A href="/" class="back-link">
           ‹ {t("back", locale())}
         </A>
 
         <Show when={resolving()}>
-          <div class="detail-hero">
+          <div class="detail-hero" aria-busy="true">
             <span class="icon-tile skel skel-icon-lg" />
             <div class="detail-hero-text">
               <span class="skel skel-line" style={{ width: "50%" }} />
@@ -73,7 +99,16 @@ export const AppDetailPage: Component = () => {
           </div>
         </Show>
 
-        <Show when={!resolving() && !listing()}>
+        <Show when={fetchFailed()}>
+          <ErrorState
+            title={t("errorTitle", locale())}
+            message={t("errorHint", locale())}
+            retryLabel={t("retry", locale())}
+            onRetry={() => void refetch()}
+          />
+        </Show>
+
+        <Show when={!resolving() && !fetchFailed() && !listing()}>
           <EmptyState glyph="🧩" title={t("noResults", locale())} />
         </Show>
 
@@ -99,15 +134,21 @@ export const AppDetailPage: Component = () => {
                     <span class="detail-id-sep">/</span>
                     {l().slug}
                   </p>
-                  <div class="detail-chips">
-                    <For each={l().tags ?? []}>
-                      {(tg) => (
-                        <span class="chip chip-solid">
-                          {tagLabel(tg, locale())}
-                        </span>
-                      )}
-                    </For>
-                  </div>
+                  <Show when={(l().tags ?? []).length > 0}>
+                    <div class="detail-chips">
+                      <For each={l().tags ?? []}>
+                        {(tg) => (
+                          <A
+                            href={`/?tag=${encodeURIComponent(tg)}`}
+                            end
+                            class="chip chip-solid chip-link"
+                          >
+                            {tagLabel(tg, locale())}
+                          </A>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                 </div>
               </header>
 
@@ -129,6 +170,7 @@ export const AppDetailPage: Component = () => {
                       innerHTML={renderMarkdown(
                         doc().markdown,
                         doc().sourceUrl,
+                        { headingOffset: 2 },
                       )}
                     />
                     <p class="muted readme-src">
@@ -150,9 +192,25 @@ export const AppDetailPage: Component = () => {
                 <dl class="kv">
                   <dt>git</dt>
                   <dd class="mono">{l().source.git}</dd>
+                  <Show when={l().source.path}>
+                    {(modPath) => (
+                      <>
+                        <dt>{t("modulePath", locale())}</dt>
+                        <dd class="mono">{modPath()}</dd>
+                      </>
+                    )}
+                  </Show>
+                  <Show when={formatDate(l().updatedAt, locale())}>
+                    {(dateLabel) => (
+                      <>
+                        <dt>{t("updatedAt", locale())}</dt>
+                        <dd>{dateLabel()}</dd>
+                      </>
+                    )}
+                  </Show>
                 </dl>
                 <a
-                  class="linklike"
+                  class="linklike detail-repo-link"
                   href={repoUrl(l().source.git)}
                   target="_blank"
                   rel="noreferrer noopener"

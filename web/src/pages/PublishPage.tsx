@@ -41,6 +41,13 @@ export const PublishPage: Component = () => {
   const editId = () =>
     typeof searchParams.edit === "string" ? searchParams.edit : "";
 
+  createEffect(() => {
+    const heading = editId()
+      ? t("editApp", locale())
+      : t("publishApp", locale());
+    document.title = `${heading} — ${t("appName", locale())}`;
+  });
+
   const [handleDraft, setHandleDraft] = createSignal("");
   const [handleErr, setHandleErr] = createSignal("");
   const submitHandle = async (e: Event) => {
@@ -173,7 +180,7 @@ export const PublishPage: Component = () => {
   };
 
   return (
-    <main class="page publish">
+    <main id="main" tabIndex={-1} class="page publish">
       <div class="container container-narrow">
         <A href="/" class="back-link">
           ‹ {t("back", locale())}
@@ -221,7 +228,9 @@ export const PublishPage: Component = () => {
                     />
                   </label>
                   <Show when={handleErr()}>
-                    <p class="field-error">{handleErr()}</p>
+                    <p class="field-error" role="alert">
+                      {handleErr()}
+                    </p>
                   </Show>
                   <button type="submit" class="btn btn-primary">
                     {t("save", locale())}
@@ -292,7 +301,7 @@ export const PublishPage: Component = () => {
                             <button
                               type="button"
                               class="tag-x"
-                              aria-label={t("removeTag", locale())}
+                              aria-label={`${t("removeTag", locale())}: ${tg}`}
                               onClick={() => removeTag(tg)}
                             >
                               ×
@@ -338,7 +347,7 @@ export const PublishPage: Component = () => {
                 </details>
 
                 <Show when={errors().length > 0}>
-                  <ul class="form-errors">
+                  <ul class="form-errors" role="alert">
                     <For each={errors()}>{(err) => <li>{err}</li>}</For>
                   </ul>
                 </Show>

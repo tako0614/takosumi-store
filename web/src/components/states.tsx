@@ -47,7 +47,7 @@ export const ErrorState: Component<{
   retryLabel?: string;
 }> = (props) => {
   return (
-    <div class="state">
+    <div class="state" role="alert">
       <div class="state-glyph" aria-hidden="true">
         ⚠️
       </div>

@@ -96,8 +96,18 @@ function renderInline(escaped: string, source: URL | undefined): string {
   return restore(renderEmphasis(out));
 }
 
-export function renderMarkdown(md: string, sourceUrl?: string): string {
+export interface RenderMarkdownOptions {
+  /** Shift heading levels downward (clamped to h6) to preserve page outline. */
+  readonly headingOffset?: number;
+}
+
+export function renderMarkdown(
+  md: string,
+  sourceUrl?: string,
+  opts?: RenderMarkdownOptions,
+): string {
   const source = readmeSource(sourceUrl);
+  const headingOffset = Math.max(0, Math.floor(opts?.headingOffset ?? 0));
   const lines = md.replace(/\r\n?/g, "\n").split("\n");
   const html: string[] = [];
   let i = 0;
@@ -142,7 +152,7 @@ export function renderMarkdown(md: string, sourceUrl?: string): string {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       closeList();
-      const level = heading[1]!.length;
+      const level = Math.min(6, heading[1]!.length + headingOffset);
       html.push(
         `<h${level}>${renderInline(escapeHtml(heading[2]!.trim()), source)}</h${level}>`,
       );
