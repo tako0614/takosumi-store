@@ -37,12 +37,17 @@ export type PublishResult =
   | { ok: false; status: number; message: string; errors?: string[] };
 
 export async function createListing(body: PublishBody): Promise<PublishResult> {
-  const res = await fetch("/publish/v2/listings", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch("/publish/v2/listings", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, status: 0, message: "Network error" };
+  }
   if (res.status === 201) {
     const data = (await res.json()) as {
       listing: ListingV2;
@@ -83,12 +88,17 @@ export async function updateListing(
   id: string,
   body: PublishBody,
 ): Promise<PublishResult> {
-  const res = await fetch(`/publish/v2/listings/${ownerPath(id)}`, {
-    method: "PATCH",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/publish/v2/listings/${ownerPath(id)}`, {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, status: 0, message: "Network error" };
+  }
   if (res.ok) {
     const data = (await res.json()) as { listing: ListingV2 };
     return { ok: true, listing: data.listing, warnings: [] };
@@ -110,13 +120,17 @@ export async function setVisibility(
   id: string,
   status: "visible" | "hidden",
 ): Promise<boolean> {
-  const res = await fetch(`/publish/v2/listings/${ownerPath(id)}/status`, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ status }),
-  });
-  return res.ok;
+  try {
+    const res = await fetch(`/publish/v2/listings/${ownerPath(id)}/status`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Hard-delete a listing (`?hard=true`) or soft-hide it (default). */
@@ -124,9 +138,13 @@ export async function deleteListing(
   id: string,
   hard = false,
 ): Promise<boolean> {
-  const res = await fetch(
-    `/publish/v2/listings/${ownerPath(id)}${hard ? "?hard=true" : ""}`,
-    { method: "DELETE", credentials: "same-origin" },
-  );
-  return res.ok;
+  try {
+    const res = await fetch(
+      `/publish/v2/listings/${ownerPath(id)}${hard ? "?hard=true" : ""}`,
+      { method: "DELETE", credentials: "same-origin" },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

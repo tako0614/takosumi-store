@@ -2,7 +2,9 @@ import {
   createEffect,
   createMemo,
   createResource,
+  createSignal,
   For,
+  onCleanup,
   Show,
   type Component,
 } from "solid-js";
@@ -81,6 +83,89 @@ export const AppDetailPage: Component = () => {
     ([scope, slug]: readonly [string, string]) =>
       fetchListingReadme(homeBase(), scope, slug),
   );
+
+  const [codeCopyStatus, setCodeCopyStatus] = createSignal("");
+  let mdRef: HTMLDivElement | undefined;
+
+  // Enhance rendered README fenced code blocks with accessible copy buttons.
+  createEffect(() => {
+    const doc = readme();
+    const loc = locale();
+    const root = mdRef;
+    setCodeCopyStatus("");
+    if (!doc || !root) return;
+
+    let disposed = false;
+    const cleanups: (() => void)[] = [];
+    const buttonTimers = new Map<
+      HTMLButtonElement,
+      ReturnType<typeof setTimeout>
+    >();
+    const pres = Array.from(
+      root.querySelectorAll<HTMLPreElement>("pre.md-code"),
+    );
+    for (const pre of pres) {
+      let wrap = pre.parentElement;
+      if (!wrap || !wrap.classList.contains("md-code-block")) {
+        wrap = document.createElement("div");
+        wrap.className = "md-code-block";
+        pre.parentNode?.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
+      }
+      wrap.querySelector(".md-code-copy")?.remove();
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "md-code-copy";
+      btn.textContent = t("copyCode", loc);
+      btn.setAttribute("aria-label", t("copyCodeLabel", loc));
+
+      const onClick = async () => {
+        const text =
+          pre.querySelector("code")?.textContent ?? pre.textContent ?? "";
+        let ok = false;
+        try {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        } catch {
+          ok = false;
+        }
+        if (disposed) return;
+        if (ok) {
+          btn.textContent = t("copied", loc);
+          btn.dataset.copied = "true";
+          setCodeCopyStatus(t("copied", loc));
+        } else {
+          btn.textContent = t("actionFailed", loc);
+          delete btn.dataset.copied;
+          setCodeCopyStatus(t("copyFailed", loc));
+        }
+        const existingTimer = buttonTimers.get(btn);
+        if (existingTimer !== undefined) clearTimeout(existingTimer);
+        const timer = setTimeout(() => {
+          buttonTimers.delete(btn);
+          if (disposed) return;
+          btn.textContent = t("copyCode", loc);
+          delete btn.dataset.copied;
+          setCodeCopyStatus("");
+        }, 2000);
+        buttonTimers.set(btn, timer);
+      };
+
+      btn.addEventListener("click", onClick);
+      wrap.appendChild(btn);
+      cleanups.push(() => {
+        btn.removeEventListener("click", onClick);
+      });
+    }
+
+    onCleanup(() => {
+      disposed = true;
+      for (const fn of cleanups) fn();
+      for (const timer of buttonTimers.values()) clearTimeout(timer);
+      buttonTimers.clear();
+    });
+  });
 
   return (
     <main id="main" tabIndex={-1} class="page detail">
@@ -164,6 +249,7 @@ export const AppDetailPage: Component = () => {
                   <section class="detail-section">
                     <h2>{t("readme", locale())}</h2>
                     <div
+                      ref={mdRef}
                       class="md"
                       // Safe: renderMarkdown escapes all input and only emits a
                       // whitelist of tags with scheme-checked link targets.
@@ -173,6 +259,9 @@ export const AppDetailPage: Component = () => {
                         { headingOffset: 2 },
                       )}
                     />
+                    <span class="sr-only" aria-live="polite">
+                      {codeCopyStatus()}
+                    </span>
                     <p class="muted readme-src">
                       <a
                         class="linklike"

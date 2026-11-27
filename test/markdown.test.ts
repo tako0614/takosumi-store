@@ -91,4 +91,50 @@ describe("renderMarkdown (safe README renderer)", () => {
     expect(html).toContain("<h6>Deep</h6>");
     expect(html).not.toContain("<h1>");
   });
+
+  test("renders GitHub-style tables inside a scroll wrapper with column alignment and XSS escaping", () => {
+    const md = [
+      "| Name | Alignment | Example |",
+      "| :--- | :---: | ---: |",
+      "| `a | b` | **center** | <img src=x onerror=alert(1)> |",
+      "| escaped \\| pipe | [link](javascript:alert(1)) | 42 |",
+    ].join("\n");
+    const html = renderMarkdown(md);
+    expect(html).toContain('<div class="md-table-wrap"><table><thead><tr>');
+    expect(html).toContain('<th style="text-align:left">Name</th>');
+    expect(html).toContain('<th style="text-align:center">Alignment</th>');
+    expect(html).toContain('<th style="text-align:right">Example</th>');
+    expect(html).toContain(
+      '<td style="text-align:left"><code>a | b</code></td>',
+    );
+    expect(html).toContain(
+      '<td style="text-align:center"><strong>center</strong></td>',
+    );
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("escaped | pipe");
+    expect(html).not.toContain('href="javascript:');
+    expect(html).not.toContain("<a ");
+  });
+
+  test("renders task-list checkboxes safely inside unordered lists with sr-only status text", () => {
+    const md = [
+      "- [x] **Done** task",
+      "- [X] Uppercase checked",
+      "- [ ] <script>alert(1)</script> pending",
+      "- Plain item",
+    ].join("\n");
+    const html = renderMarkdown(md);
+    expect(html).toContain(
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span class="sr-only">Completed: </span><span><strong>Done</strong> task</span></li>',
+    );
+    expect(html).toContain(
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled checked aria-hidden="true" tabindex="-1" /><span class="sr-only">Completed: </span><span>Uppercase checked</span></li>',
+    );
+    expect(html).toContain(
+      '<li class="md-task"><input type="checkbox" class="md-task-box" disabled aria-hidden="true" tabindex="-1" /><span class="sr-only">Not completed: </span><span>&lt;script&gt;alert(1)&lt;/script&gt; pending</span></li>',
+    );
+    expect(html).toContain("<li>Plain item</li>");
+    expect(html).not.toContain("<script>");
+  });
 });

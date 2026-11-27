@@ -3,12 +3,13 @@ import {
   createResource,
   createSignal,
   For,
+  onCleanup,
   Show,
   type Component,
 } from "solid-js";
 import { A } from "@solidjs/router";
 import { invalidateListings, locale, me, oidcEnabled } from "../appstate.ts";
-import { pick, t } from "../lib/i18n.ts";
+import { pick, t, type StringKey } from "../lib/i18n.ts";
 import { loginUrl } from "../lib/account-client.ts";
 import {
   bodyFromListing,
@@ -18,6 +19,7 @@ import {
   updateListing,
   type OwnedListing,
 } from "../lib/publish-client.ts";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
 
@@ -28,33 +30,86 @@ export const ManagePage: Component = () => {
   );
   const [busyId, setBusyId] = createSignal("");
   const [errId, setErrId] = createSignal("");
+  const [statusMessage, setStatusMessage] = createSignal("");
+  const [pendingDelete, setPendingDelete] = createSignal<OwnedListing | null>(
+    null,
+  );
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const announce = (msg: string) => {
+    if (statusTimer) clearTimeout(statusTimer);
+    setStatusMessage(msg);
+    statusTimer = setTimeout(() => {
+      setStatusMessage("");
+      statusTimer = undefined;
+    }, 4000);
+  };
+
+  onCleanup(() => {
+    if (statusTimer) clearTimeout(statusTimer);
+  });
 
   createEffect(() => {
     document.title = `${t("myListings", locale())} — ${t("appName", locale())}`;
   });
 
-  async function run(id: string, action: () => Promise<boolean>) {
-    setBusyId(id);
+  async function run(
+    l: OwnedListing,
+    action: () => Promise<boolean>,
+    successKey: StringKey,
+  ): Promise<boolean> {
+    setBusyId(l.id);
     setErrId("");
-    const ok = await action();
-    setBusyId("");
+    let ok = false;
+    try {
+      ok = await action();
+    } catch {
+      ok = false;
+    } finally {
+      setBusyId("");
+    }
     if (ok) {
       invalidateListings();
       refetch();
-    } else setErrId(id);
+      const label = pick(l.name, locale());
+      announce(`${label}: ${t(successKey, locale())}`);
+    } else {
+      setErrId(l.id);
+    }
+    return ok;
   }
 
   const refresh = (l: OwnedListing) =>
-    run(l.id, async () => (await updateListing(l.id, bodyFromListing(l))).ok);
-
-  const toggle = (l: OwnedListing) =>
-    run(l.id, () =>
-      setVisibility(l.id, l.status === "visible" ? "hidden" : "visible"),
+    run(
+      l,
+      async () => (await updateListing(l.id, bodyFromListing(l))).ok,
+      "refreshed",
     );
 
-  const remove = (l: OwnedListing) => {
-    if (!window.confirm(t("confirmDelete", locale()))) return;
-    run(l.id, () => deleteListing(l.id, true));
+  const toggle = (l: OwnedListing) => {
+    const next = l.status === "visible" ? "hidden" : "visible";
+    return run(
+      l,
+      () => setVisibility(l.id, next),
+      next === "hidden" ? "unpublished" : "republished",
+    );
+  };
+
+  const confirmRemove = async () => {
+    const target = pendingDelete();
+    if (!target || busyId() === target.id) return;
+    try {
+      await run(target, () => deleteListing(target.id, true), "deleted");
+    } finally {
+      setPendingDelete(null);
+    }
+  };
+
+  const deleteMessage = () => {
+    const target = pendingDelete();
+    if (!target) return "";
+    const label = pick(target.name, locale());
+    return `${label} (${target.scope}/${target.slug}) — ${t("confirmDelete", locale())}`;
   };
 
   return (
@@ -65,6 +120,12 @@ export const ManagePage: Component = () => {
         </A>
         <h1 class="page-title">{t("myListings", locale())}</h1>
         <p class="muted manage-sub">{t("manageSubtitle", locale())}</p>
+
+        <div class="manage-status-wrap" role="status" aria-live="polite">
+          <Show when={statusMessage()}>
+            {(msg) => <p class="manage-status">{msg()}</p>}
+          </Show>
+        </div>
 
         <Show
           when={me()}
@@ -173,7 +234,7 @@ export const ManagePage: Component = () => {
                             type="button"
                             class="btn btn-ghost btn-sm"
                             disabled={busyId() === l.id}
-                            onClick={() => refresh(l)}
+                            onClick={() => void refresh(l)}
                           >
                             {busyId() === l.id
                               ? t("refreshing", locale())
@@ -183,7 +244,7 @@ export const ManagePage: Component = () => {
                             type="button"
                             class="btn btn-ghost btn-sm"
                             disabled={busyId() === l.id}
-                            onClick={() => toggle(l)}
+                            onClick={() => void toggle(l)}
                           >
                             {l.status === "visible"
                               ? t("unpublish", locale())
@@ -193,7 +254,7 @@ export const ManagePage: Component = () => {
                             type="button"
                             class="btn btn-ghost btn-sm btn-danger"
                             disabled={busyId() === l.id}
-                            onClick={() => remove(l)}
+                            onClick={() => setPendingDelete(l)}
                           >
                             {t("deleteAction", locale())}
                           </button>
@@ -212,6 +273,18 @@ export const ManagePage: Component = () => {
           </Show>
         </Show>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingDelete())}
+        title={t("confirmDeleteTitle", locale())}
+        message={deleteMessage()}
+        confirmLabel={t("deleteAction", locale())}
+        cancelLabel={t("cancel", locale())}
+        danger
+        busy={Boolean(pendingDelete() && busyId() === pendingDelete()?.id)}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => void confirmRemove()}
+      />
     </main>
   );
 };

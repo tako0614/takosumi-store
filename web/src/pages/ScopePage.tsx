@@ -1,5 +1,6 @@
 import {
   createEffect,
+  createMemo,
   createResource,
   For,
   Show,
@@ -23,9 +24,26 @@ export const ScopePage: Component = () => {
   );
   const items = () => page()?.items ?? [];
 
+  const publisherDisplayName = createMemo(() => {
+    const scope = params.scope ?? "";
+    for (const item of items()) {
+      const display = item.publisher?.displayName?.trim();
+      if (display && display !== scope) return display;
+    }
+    return "";
+  });
+
+  const countLabel = () => {
+    const n = items().length;
+    const loc = locale();
+    if (n === 1) return t("scopeCountSingle", loc);
+    return `${n} ${t("scopeCountPlural", loc)}`;
+  };
+
   createEffect(() => {
-    document.title = params.scope
-      ? `${params.scope} — ${t("appName", locale())}`
+    const label = publisherDisplayName() || params.scope;
+    document.title = label
+      ? `${label} — ${t("appName", locale())}`
       : t("appName", locale());
   });
 
@@ -36,8 +54,23 @@ export const ScopePage: Component = () => {
           ‹ {t("back", locale())}
         </A>
         <header class="scope-head">
-          <h1 class="scope-name">{params.scope}</h1>
-          <p class="muted">{t("scopeSubtitle", locale())}</p>
+          <div class="scope-head-row">
+            <h1
+              class="scope-name"
+              classList={{
+                "scope-name-display": Boolean(publisherDisplayName()),
+              }}
+            >
+              {publisherDisplayName() || params.scope}
+            </h1>
+            <Show when={!page.loading && !page.error && items().length > 0}>
+              <span class="scope-count">{countLabel()}</span>
+            </Show>
+          </div>
+          <Show when={publisherDisplayName()}>
+            <p class="scope-handle mono muted">{params.scope}</p>
+          </Show>
+          <p class="muted scope-subtitle">{t("scopeSubtitle", locale())}</p>
         </header>
 
         <Show when={page.loading}>
