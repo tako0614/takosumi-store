@@ -19,6 +19,8 @@ import {
 } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
 import { renderMarkdown } from "../lib/markdown.ts";
+import { setPageTitle } from "../lib/nav-history.ts";
+import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { InstallPanel } from "../components/InstallPanel.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
@@ -65,12 +67,22 @@ export const AppDetailPage: Component = () => {
   const resolving = () => !listing() && fetched.loading;
   const fetchFailed = () =>
     !listing() && !fetched.loading && Boolean(fetched.error);
+  const notFound = () => !resolving() && !fetchFailed() && !listing();
 
   createEffect(() => {
     const l = listing();
-    document.title = l
-      ? `${pick(l.name, locale())} — ${t("appName", locale())}`
-      : t("appName", locale());
+    const loc = locale();
+    const label = l
+      ? pick(l.name, loc)
+      : notFound()
+        ? t("listingNotFoundTitle", loc)
+        : fetchFailed()
+          ? t("errorTitle", loc)
+          : "";
+    setPageTitle(
+      label ? `${label} — ${t("appName", loc)}` : t("appName", loc),
+      resolving(),
+    );
   });
 
   // README from the source repo — registry-grade detail. Fetched lazily once
@@ -170,9 +182,7 @@ export const AppDetailPage: Component = () => {
   return (
     <main id="main" tabIndex={-1} class="page detail">
       <div class="container container-narrow">
-        <A href="/" class="back-link">
-          ‹ {t("back", locale())}
-        </A>
+        <BackLink />
 
         <Show when={resolving()}>
           <div class="detail-hero" aria-busy="true">
@@ -186,6 +196,7 @@ export const AppDetailPage: Component = () => {
 
         <Show when={fetchFailed()}>
           <ErrorState
+            heading
             title={t("errorTitle", locale())}
             message={t("errorHint", locale())}
             retryLabel={t("retry", locale())}
@@ -193,8 +204,18 @@ export const AppDetailPage: Component = () => {
           />
         </Show>
 
-        <Show when={!resolving() && !fetchFailed() && !listing()}>
-          <EmptyState glyph="🧩" title={t("noResults", locale())} />
+        <Show when={notFound()}>
+          <EmptyState
+            heading
+            glyph="🧩"
+            title={t("listingNotFoundTitle", locale())}
+            message={t("listingNotFoundHint", locale())}
+            action={
+              <A href="/" class="btn btn-primary">
+                {t("browseCatalog", locale())}
+              </A>
+            }
+          />
         </Show>
 
         <Show when={listing()}>

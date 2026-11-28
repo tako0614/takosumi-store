@@ -211,6 +211,54 @@ const S = {
   readme: { ja: "README", en: "README" },
   readmeFrom: { ja: "リポジトリの README", en: "From the repository README" },
   actionFailed: { ja: "操作に失敗しました", en: "That action failed" },
+  // language switcher (label is shown in the *target* language)
+  switchLanguage: { ja: "English", en: "日本語" },
+  switchLanguageLabel: {
+    ja: "Switch language to English",
+    en: "表示言語を日本語に切り替え",
+  },
+  // not found / empty catalog / signed-out notices
+  notFoundTitle: {
+    ja: "ページが見つかりません",
+    en: "Page not found",
+  },
+  notFoundHint: {
+    ja: "URL が間違っているか、ページが移動・削除された可能性があります。",
+    en: "The URL may be wrong, or the page was moved or removed.",
+  },
+  listingNotFoundTitle: {
+    ja: "Capsule が見つかりません",
+    en: "Capsule not found",
+  },
+  listingNotFoundHint: {
+    ja: "非公開・削除されたか、URL が間違っている可能性があります。",
+    en: "It may have been unlisted or removed, or the URL is wrong.",
+  },
+  browseCatalog: { ja: "アプリ一覧へ", en: "Browse apps" },
+  emptyCatalogTitle: {
+    ja: "まだ Capsule が公開されていません",
+    en: "No Capsules published yet",
+  },
+  emptyCatalogHint: {
+    ja: "リポジトリが共有されると、ここに表示されます。",
+    en: "Shared repositories will appear here.",
+  },
+  signInToPublish: {
+    ja: "リポジトリを共有するには、Takosumi Accounts でログインしてください。",
+    en: "Sign in with Takosumi Accounts to share a repository.",
+  },
+  signInToManage: {
+    ja: "共有したリポジトリを管理するには、Takosumi Accounts でログインしてください。",
+    en: "Sign in with Takosumi Accounts to manage your shared repositories.",
+  },
+  readOnlyPublish: {
+    ja: "このストアは現在 読み取り専用です（公開は無効）。",
+    en: "This store is currently read-only (publishing disabled).",
+  },
+  readOnly: {
+    ja: "このストアは現在 読み取り専用です。",
+    en: "This store is currently read-only.",
+  },
 } satisfies Record<string, Dict>;
 
 export type StringKey = keyof typeof S;
