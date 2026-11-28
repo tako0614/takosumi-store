@@ -25,13 +25,20 @@ export const EmptyState: Component<{
   title: string;
   message?: string;
   action?: JSX.Element;
+  /** Render the title as the page's `<h1>` (for whole-page states). */
+  heading?: boolean;
 }> = (props) => {
   return (
     <div class="state">
       <div class="state-glyph" aria-hidden="true">
         {props.glyph ?? "🔍"}
       </div>
-      <p class="state-title">{props.title}</p>
+      <Show
+        when={props.heading}
+        fallback={<p class="state-title">{props.title}</p>}
+      >
+        <h1 class="state-title">{props.title}</h1>
+      </Show>
       <Show when={props.message}>
         <p class="state-message">{props.message}</p>
       </Show>
@@ -45,13 +52,20 @@ export const ErrorState: Component<{
   message?: string;
   onRetry?: () => void;
   retryLabel?: string;
+  /** Render the title as the page's `<h1>` (for whole-page states). */
+  heading?: boolean;
 }> = (props) => {
   return (
     <div class="state" role="alert">
       <div class="state-glyph" aria-hidden="true">
         ⚠️
       </div>
-      <p class="state-title">{props.title}</p>
+      <Show
+        when={props.heading}
+        fallback={<p class="state-title">{props.title}</p>}
+      >
+        <h1 class="state-title">{props.title}</h1>
+      </Show>
       <Show when={props.message}>
         <p class="state-message">{props.message}</p>
       </Show>

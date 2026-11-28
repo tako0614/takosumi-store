@@ -6,7 +6,7 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { A, useNavigate, useSearchParams } from "@solidjs/router";
+import { useNavigate, useSearchParams } from "@solidjs/router";
 import {
   invalidateListings,
   locale,
@@ -31,6 +31,7 @@ import {
 } from "../lib/publish-validation.ts";
 import { fetchListingByScopeSlug } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
+import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
@@ -221,8 +222,10 @@ export const PublishPage: Component = () => {
     setBusy(false);
     if (res.ok) {
       invalidateListings();
+      // Replace the form entry so "Back" never returns to a submitted form.
       navigate(
         existing ? "/manage" : `/${res.listing.scope}/${res.listing.slug}`,
+        { replace: true },
       );
     } else if (res.status === 429) {
       setErrors([t("quotaReached", locale())]);
@@ -234,9 +237,7 @@ export const PublishPage: Component = () => {
   return (
     <main id="main" tabIndex={-1} class="page publish">
       <div class="container container-narrow">
-        <A href="/" class="back-link">
-          ‹ {t("back", locale())}
-        </A>
+        <BackLink />
         <h1 class="page-title">
           {editId() ? t("editApp", locale()) : t("publishApp", locale())}
         </h1>
@@ -248,13 +249,12 @@ export const PublishPage: Component = () => {
               <Show
                 when={oidcEnabled()}
                 fallback={
-                  <p class="muted">
-                    {locale() === "ja"
-                      ? "このストアは現在 読み取り専用です（公開は無効）。"
-                      : "This store is currently read-only (publishing disabled)."}
+                  <p class="muted notice-text">
+                    {t("readOnlyPublish", locale())}
                   </p>
                 }
               >
+                <p class="notice-text">{t("signInToPublish", locale())}</p>
                 <a
                   class="btn btn-primary"
                   href={loginUrl("/publish")}

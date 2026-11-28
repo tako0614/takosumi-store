@@ -6,12 +6,13 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { A, useParams } from "@solidjs/router";
+import { useParams } from "@solidjs/router";
 import { locale } from "../appstate.ts";
 import { homeBase } from "../lib/servers.ts";
 import { fetchListingsPage } from "../lib/tcs-client.ts";
 import { t } from "../lib/i18n.ts";
 import { AppCard } from "../components/AppCard.tsx";
+import { BackLink } from "../components/BackLink.tsx";
 import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
 
 /** A publisher namespace page — all apps under one `scope`. */
@@ -22,7 +23,9 @@ export const ScopePage: Component = () => {
     (scope: string) =>
       fetchListingsPage(homeBase(), { scope, sort: "updated", limit: 100 }),
   );
-  const items = () => page()?.items ?? [];
+  // Reading a resource in its error state throws; guard so the error state
+  // (with Retry) renders instead of the whole page silently breaking.
+  const items = () => (page.error ? [] : (page()?.items ?? []));
 
   const publisherDisplayName = createMemo(() => {
     const scope = params.scope ?? "";
@@ -50,9 +53,7 @@ export const ScopePage: Component = () => {
   return (
     <main id="main" tabIndex={-1} class="page scope-page">
       <div class="container">
-        <A href="/" class="back-link">
-          ‹ {t("back", locale())}
-        </A>
+        <BackLink />
         <header class="scope-head">
           <div class="scope-head-row">
             <h1

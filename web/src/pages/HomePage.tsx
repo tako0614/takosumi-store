@@ -7,7 +7,7 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { useSearchParams } from "@solidjs/router";
+import { A, useSearchParams } from "@solidjs/router";
 import type { ListSort } from "../../../spec/api.ts";
 import {
   agg,
@@ -15,6 +15,7 @@ import {
   loadError,
   loadMoreItems,
   locale,
+  me,
   rebuild,
 } from "../appstate.ts";
 import { filterCatalog, normalizeCatalogSort } from "../lib/catalog-filter.ts";
@@ -126,7 +127,7 @@ export const HomePage: Component = () => {
           <p class="home-subtitle muted">{t("storeSubtitle", locale())}</p>
         </header>
 
-        <Show when={agg().items.length > 0 || !firstLoad()}>
+        <Show when={agg().items.length > 0 || filtersActive()}>
           <div class="catalog-controls">
             <div class="catalog-toolbar">
               <div class="search-field">
@@ -270,21 +271,39 @@ export const HomePage: Component = () => {
         </Show>
 
         <Show when={!firstLoad() && !loadError() && displayed().length === 0}>
-          <EmptyState
-            title={t("noResults", locale())}
-            message={t("noResultsHint", locale())}
-            action={
-              <Show when={filtersActive()}>
-                <button
-                  type="button"
-                  class="btn btn-secondary"
-                  onClick={resetFilters}
-                >
-                  {t("resetFilters", locale())}
-                </button>
-              </Show>
+          <Show
+            when={filtersActive() || agg().items.length > 0}
+            fallback={
+              <EmptyState
+                glyph="📦"
+                title={t("emptyCatalogTitle", locale())}
+                message={t("emptyCatalogHint", locale())}
+                action={
+                  <Show when={me()}>
+                    <A href="/publish" class="btn btn-primary">
+                      {t("publishFirst", locale())}
+                    </A>
+                  </Show>
+                }
+              />
             }
-          />
+          >
+            <EmptyState
+              title={t("noResults", locale())}
+              message={t("noResultsHint", locale())}
+              action={
+                <Show when={filtersActive()}>
+                  <button
+                    type="button"
+                    class="btn btn-secondary"
+                    onClick={resetFilters}
+                  >
+                    {t("resetFilters", locale())}
+                  </button>
+                </Show>
+              }
+            />
+          </Show>
         </Show>
 
         <Show when={showShelf()}>

@@ -67,11 +67,17 @@ export async function createListing(body: PublishBody): Promise<PublishResult> {
   };
 }
 
+/**
+ * The signed-in publisher's own listings. A signed-out session (401) is an
+ * empty list; any other failure throws so the dashboard shows a retryable
+ * error instead of a misleading "you haven't shared anything yet".
+ */
 export async function listMine(): Promise<OwnedListing[]> {
   const res = await fetch("/publish/v2/listings", {
     credentials: "same-origin",
   });
-  if (!res.ok) return [];
+  if (res.status === 401) return [];
+  if (!res.ok) throw new Error(`publish listings ${res.status}`);
   return ((await res.json()) as { listings: OwnedListing[] }).listings;
 }
 

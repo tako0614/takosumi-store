@@ -223,6 +223,27 @@ button {
   gap: var(--tg-s-2);
   flex: none;
 }
+.topbar-end {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--tg-s-2);
+  min-width: 0;
+}
+.lang-toggle {
+  border-color: var(--tg-line);
+}
+.lang-toggle-glyph {
+  font-size: 0.85em;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--tg-fg-subtle);
+}
+/* Programmatic focus after route changes lands on <main>; no ring there. */
+main:focus {
+  outline: none;
+}
 .topbar-actions a[aria-current="page"] {
   color: var(--tg-fg);
   border-color: var(--tg-line-strong);
@@ -646,6 +667,7 @@ button {
 .back-link {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   min-height: 36px;
   padding: 4px 2px;
   margin-bottom: var(--tg-s-4);
@@ -1072,6 +1094,11 @@ button {
     flex-direction: column;
     align-items: stretch;
   }
+  /* In the stacked (column) layout `flex: 1` would resolve the input's height
+     from a 0 basis and collapse it to a sliver; keep its natural height. */
+  .install-origin-row input {
+    flex: none;
+  }
   .install-origin-buttons {
     justify-content: flex-start;
   }
@@ -1189,8 +1216,25 @@ button {
   border-radius: 14px;
   background: var(--tg-bg-elev);
 }
-.manage-item.is-hidden {
-  opacity: 0.62;
+.manage-item.is-hidden .icon-tile {
+  /* Dim only the icon: the "Unlisted" chip carries the state, and the text
+     and actions must keep full AA contrast (they stay fully operable). */
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+.manage-skel-icon {
+  width: 52px;
+  height: 52px;
+}
+.manage-item-actions .btn-ghost {
+  border-color: var(--tg-line);
+}
+.notice-text {
+  margin: 0 0 var(--tg-s-4);
+  line-height: 1.55;
+}
+.notice-text:last-child {
+  margin-bottom: 0;
 }
 .manage-item-main {
   min-width: 0;
@@ -1392,4 +1436,117 @@ button {
 .readme-src {
   margin-top: 14px;
   font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Touch ergonomics: on phones / coarse pointers every standalone control gets
+   at least a 44×44px target (WCAG 2.5.5 / platform HIG). Desktop density with
+   a fine pointer is unchanged.
+--------------------------------------------------------------------------- */
+@media (max-width: 720px), (pointer: coarse) {
+  .btn,
+  .btn-sm,
+  .sort-btn,
+  button.chip,
+  a.chip,
+  .back-link,
+  .brand,
+  .detail-repo-link,
+  .results-bar .linklike {
+    min-height: 44px;
+  }
+  .btn-sm {
+    padding: 10px 14px;
+  }
+  /* Keep the signed-in top bar to two rows on phones: compact the actions and
+     drop the decorative glyph from the language switcher. */
+  .topbar-end {
+    flex: 1 1 auto;
+    gap: 4px;
+  }
+  .topbar-actions {
+    gap: 4px;
+  }
+  .topbar .btn-sm {
+    padding: 10px 10px;
+  }
+  .lang-toggle-glyph {
+    display: none;
+  }
+  button.chip,
+  a.chip,
+  .back-link {
+    min-width: 44px;
+  }
+  .manage-item-name {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .install-change-btn {
+    min-height: 44px;
+  }
+  .results-bar .linklike {
+    display: inline-flex;
+    align-items: center;
+  }
+  .shelf-nav-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .search-input {
+    height: 48px;
+    padding-right: 50px;
+  }
+  .search-clear {
+    right: 2px;
+    width: 44px;
+    height: 44px;
+  }
+  .field input,
+  .field select,
+  .install-origin input {
+    height: 48px;
+  }
+  .field .tag-input input.tag-entry {
+    height: 36px;
+  }
+  .tag-x {
+    position: relative;
+    width: 28px;
+    height: 28px;
+  }
+  .tag-x::after {
+    /* Extend the hit area to 44px without growing the chip visually. */
+    content: "";
+    position: absolute;
+    inset: -8px;
+  }
+  .adv > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--tg-s-2);
+    min-height: 44px;
+    list-style: none;
+  }
+  .adv > summary::before {
+    content: "▸";
+    transition: transform 0.15s ease;
+  }
+  .adv[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .adv > summary::-webkit-details-marker {
+    display: none;
+  }
+  .md-code-copy {
+    top: 4px;
+    right: 4px;
+    min-height: 44px;
+    min-width: 64px;
+  }
+  .md-code-block pre.md-code {
+    min-height: 52px;
+    padding-right: 80px;
+  }
 }

@@ -20,6 +20,7 @@ import {
   type OwnedListing,
 } from "../lib/publish-client.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
 
@@ -115,9 +116,7 @@ export const ManagePage: Component = () => {
   return (
     <main id="main" tabIndex={-1} class="page manage">
       <div class="container container-narrow">
-        <A href="/" class="back-link">
-          ‹ {t("back", locale())}
-        </A>
+        <BackLink />
         <h1 class="page-title">{t("myListings", locale())}</h1>
         <p class="muted manage-sub">{t("manageSubtitle", locale())}</p>
 
@@ -134,13 +133,10 @@ export const ManagePage: Component = () => {
               <Show
                 when={oidcEnabled()}
                 fallback={
-                  <p class="muted">
-                    {locale() === "ja"
-                      ? "このストアは現在 読み取り専用です。"
-                      : "This store is currently read-only."}
-                  </p>
+                  <p class="muted notice-text">{t("readOnly", locale())}</p>
                 }
               >
+                <p class="notice-text">{t("signInToManage", locale())}</p>
                 <a
                   class="btn btn-primary"
                   href={loginUrl("/manage")}
@@ -154,7 +150,24 @@ export const ManagePage: Component = () => {
         >
           <Show
             when={!items.loading}
-            fallback={<p class="muted">{t("loading", locale())}</p>}
+            fallback={
+              <div class="manage-list" aria-busy="true">
+                <span class="sr-only" role="status">
+                  {t("loading", locale())}
+                </span>
+                <For each={[0, 1, 2]}>
+                  {() => (
+                    <div class="manage-item" aria-hidden="true">
+                      <span class="skel skel-icon manage-skel-icon" />
+                      <div class="manage-item-main">
+                        <span class="skel skel-line" style={{ width: "40%" }} />
+                        <span class="skel skel-line" style={{ width: "28%" }} />
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            }
           >
             <Show
               when={!items.error}
@@ -263,8 +276,8 @@ export const ManagePage: Component = () => {
                     )}
                   </For>
                 </ul>
-                <p class="muted manage-hint">
-                  <A href="/publish" class="linklike">
+                <p class="manage-hint">
+                  <A href="/publish" class="btn btn-secondary">
                     + {t("publish", locale())}
                   </A>
                 </p>
