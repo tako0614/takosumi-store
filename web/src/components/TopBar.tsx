@@ -1,4 +1,12 @@
-import { createSignal, onCleanup, Show, type Component } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  createUniqueId,
+  For,
+  onCleanup,
+  Show,
+  type Component,
+} from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import {
   locale,
@@ -6,10 +14,12 @@ import {
   oidcEnabled,
   setLocale,
   setMe,
-  theme,
-  toggleTheme,
+  setThemePreference,
+  themePreference,
 } from "../appstate.ts";
+import type { Locale } from "../../../spec/api.ts";
 import { t } from "../lib/i18n.ts";
+import type { ThemePreference } from "../lib/theme.ts";
 import { loginUrl, logout } from "../lib/account-client.ts";
 
 /**
@@ -62,16 +72,113 @@ const MoonIcon: Component = () => (
   </svg>
 );
 
+const MonitorIcon: Component = () => (
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M8 21h8M12 17v4" />
+  </svg>
+);
+
+const CheckIcon: Component = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2.4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M20 6 9 17l-5-5" />
+  </svg>
+);
+
+const THEME_OPTIONS: readonly ThemePreference[] = ["system", "light", "dark"];
+
+function themeOptionLabel(pref: ThemePreference, loc: Locale): string {
+  if (pref === "light") return t("themeLight", loc);
+  if (pref === "dark") return t("themeDark", loc);
+  return t("themeSystem", loc);
+}
+
+const ThemeIcon: Component<{ pref: ThemePreference }> = (props) => (
+  <Show
+    when={props.pref === "system"}
+    fallback={
+      <Show when={props.pref === "light"} fallback={<MoonIcon />}>
+        <SunIcon />
+      </Show>
+    }
+  >
+    <MonitorIcon />
+  </Show>
+);
+
 export const TopBar: Component = () => {
   const navigate = useNavigate();
   const route = useLocation();
+  const themeMenuId = createUniqueId();
   const [loggingOut, setLoggingOut] = createSignal(false);
   const [logoutFailed, setLogoutFailed] = createSignal(false);
+  const [themeMenuOpen, setThemeMenuOpen] = createSignal(false);
   let logoutErrTimer: ReturnType<typeof setTimeout> | undefined;
+  let themeWrapRef: HTMLDivElement | undefined;
+  let themeBtnRef: HTMLButtonElement | undefined;
+  const menuItemRefs: (HTMLButtonElement | undefined)[] = [];
 
   onCleanup(() => {
     if (logoutErrTimer) clearTimeout(logoutErrTimer);
   });
+
+  createEffect(() => {
+    if (!themeMenuOpen()) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!themeWrapRef?.contains(e.target as Node)) {
+        setThemeMenuOpen(false);
+      }
+    };
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setThemeMenuOpen(false);
+        themeBtnRef?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onWindowKeyDown);
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onWindowKeyDown);
+    });
+  });
+
+  const openThemeMenu = (focusIndex?: number) => {
+    setThemeMenuOpen(true);
+    const idx =
+      focusIndex ?? Math.max(0, THEME_OPTIONS.indexOf(themePreference()));
+    queueMicrotask(() => {
+      menuItemRefs[idx]?.focus({ preventScroll: true });
+    });
+  };
+
+  const selectTheme = (pref: ThemePreference) => {
+    setThemePreference(pref);
+    setThemeMenuOpen(false);
+    themeBtnRef?.focus({ preventScroll: true });
+  };
 
   const onLogout = async () => {
     if (loggingOut()) return;
@@ -98,10 +205,13 @@ export const TopBar: Component = () => {
     }
   };
 
-  const themeLabel = () =>
-    theme() === "dark"
-      ? t("switchToLight", locale())
-      : t("switchToDark", locale());
+  const themeButtonLabel = () => {
+    const loc = locale();
+    const current = themeOptionLabel(themePreference(), loc);
+    return loc === "ja"
+      ? `${t("themeMenuLabel", loc)}（${current}）`
+      : `${t("themeMenuLabel", loc)} (${current})`;
+  };
 
   return (
     <header class="topbar">
@@ -156,17 +266,97 @@ export const TopBar: Component = () => {
             </nav>
           </Show>
           <div class="topbar-prefs">
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm theme-toggle"
-              aria-label={themeLabel()}
-              title={themeLabel()}
-              onClick={toggleTheme}
-            >
-              <Show when={theme() === "dark"} fallback={<MoonIcon />}>
-                <SunIcon />
+            <div ref={themeWrapRef} class="theme-menu-wrap">
+              <button
+                ref={themeBtnRef}
+                type="button"
+                class="btn btn-ghost btn-sm theme-toggle"
+                aria-haspopup="menu"
+                aria-expanded={themeMenuOpen()}
+                aria-controls={themeMenuOpen() ? themeMenuId : undefined}
+                aria-label={themeButtonLabel()}
+                title={themeButtonLabel()}
+                onClick={() => {
+                  if (themeMenuOpen()) setThemeMenuOpen(false);
+                  else openThemeMenu();
+                }}
+                onKeyDown={(e) => {
+                  if (e.isComposing || e.keyCode === 229) return;
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    openThemeMenu();
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    openThemeMenu(THEME_OPTIONS.length - 1);
+                  }
+                }}
+              >
+                <ThemeIcon pref={themePreference()} />
+              </button>
+              <Show when={themeMenuOpen()}>
+                <div
+                  id={themeMenuId}
+                  class="theme-menu"
+                  role="menu"
+                  aria-label={t("themeLabel", locale())}
+                  onKeyDown={(e) => {
+                    if (e.isComposing || e.keyCode === 229) return;
+                    if (e.key === "Tab") {
+                      setThemeMenuOpen(false);
+                      return;
+                    }
+                    const current = menuItemRefs.findIndex(
+                      (el) => el === document.activeElement,
+                    );
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      const next =
+                        (current < 0 ? 0 : current + 1) % THEME_OPTIONS.length;
+                      menuItemRefs[next]?.focus({ preventScroll: true });
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      const prev =
+                        (current <= 0 ? THEME_OPTIONS.length : current) - 1;
+                      menuItemRefs[prev]?.focus({ preventScroll: true });
+                    } else if (e.key === "Home") {
+                      e.preventDefault();
+                      menuItemRefs[0]?.focus({ preventScroll: true });
+                    } else if (e.key === "End") {
+                      e.preventDefault();
+                      menuItemRefs[THEME_OPTIONS.length - 1]?.focus({
+                        preventScroll: true,
+                      });
+                    }
+                  }}
+                >
+                  <For each={THEME_OPTIONS}>
+                    {(opt, idx) => (
+                      <button
+                        ref={(el) => {
+                          menuItemRefs[idx()] = el;
+                        }}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={themePreference() === opt}
+                        class="theme-menu-item"
+                        classList={{ active: themePreference() === opt }}
+                        onClick={() => selectTheme(opt)}
+                      >
+                        <ThemeIcon pref={opt} />
+                        <span class="theme-menu-label">
+                          {themeOptionLabel(opt, locale())}
+                        </span>
+                        <span class="theme-menu-check" aria-hidden="true">
+                          <Show when={themePreference() === opt}>
+                            <CheckIcon />
+                          </Show>
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
               </Show>
-            </button>
+            </div>
             <button
               type="button"
               class="btn btn-ghost btn-sm lang-toggle"

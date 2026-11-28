@@ -41,7 +41,9 @@ export const AppCard: Component<{
       <div class="app-card-text">
         <span class="app-card-name">{pick(l().name, props.locale)}</span>
         <span class="app-card-sub">{sub()}</span>
-        <Show when={!props.compact}>
+        <Show
+          when={!props.compact && pick(l().description, props.locale).trim()}
+        >
           <span class="app-card-desc">
             {pick(l().description, props.locale)}
           </span>

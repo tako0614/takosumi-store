@@ -206,9 +206,13 @@ export function renderMarkdown(
     const line = lines[i]!;
 
     // Fenced code block.
-    const fence = /^\s*```/.exec(line);
+    const fence = /^\s*```(.*)$/.exec(line);
     if (fence) {
       closeList();
+      const rawInfo = (fence[1] ?? "").trim().split(/\s+/, 1)[0] ?? "";
+      const lang = /^[a-z0-9_+#.-]{1,24}$/i.test(rawInfo)
+        ? rawInfo.toLowerCase()
+        : "";
       const body: string[] = [];
       i += 1;
       while (i < lines.length && !/^\s*```/.test(lines[i]!)) {
@@ -216,8 +220,9 @@ export function renderMarkdown(
         i += 1;
       }
       i += 1; // skip closing fence
+      const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : "";
       html.push(
-        `<pre class="md-code"><code>${escapeHtml(body.join("\n"))}</code></pre>`,
+        `<pre class="md-code"${langAttr}><code>${escapeHtml(body.join("\n"))}</code></pre>`,
       );
       continue;
     }
