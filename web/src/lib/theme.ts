@@ -5,6 +5,7 @@
  * keeps `documentElement.dataset.theme` + `<meta name="theme-color">` in sync.
  */
 export type ThemeMode = "dark" | "light";
+export type ThemePreference = "system" | ThemeMode;
 
 export const THEME_STORAGE_KEY = "tcs.theme";
 
@@ -12,6 +13,12 @@ export const THEME_COLOR: Readonly<Record<ThemeMode, string>> = {
   dark: "#0a0a0a",
   light: "#f7f7f8",
 };
+
+export function themePreferenceFromOverride(
+  override: ThemeMode | null,
+): ThemePreference {
+  return override ?? "system";
+}
 
 export function readSavedTheme(
   storage: Pick<Storage, "getItem"> | null = typeof localStorage !== "undefined"
@@ -36,6 +43,20 @@ export function saveTheme(
   if (!storage) return;
   try {
     storage.setItem(THEME_STORAGE_KEY, mode);
+  } catch {
+    /* ignore storage errors (private mode / quota) */
+  }
+}
+
+export function clearSavedTheme(
+  storage: Pick<Storage, "removeItem"> | null = typeof localStorage !==
+  "undefined"
+    ? localStorage
+    : null,
+): void {
+  if (!storage) return;
+  try {
+    storage.removeItem(THEME_STORAGE_KEY);
   } catch {
     /* ignore storage errors (private mode / quota) */
   }

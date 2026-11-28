@@ -14,11 +14,14 @@ import {
 import { getServers } from "./lib/servers.ts";
 import { fetchAccountConfig, fetchMe, type Me } from "./lib/account-client.ts";
 import {
+  clearSavedTheme,
   readSavedTheme,
   resolveTheme,
   saveTheme,
   systemPrefersLight,
+  themePreferenceFromOverride,
   type ThemeMode,
+  type ThemePreference,
 } from "./lib/theme.ts";
 
 function initialLocale(): Locale {
@@ -43,12 +46,23 @@ const [themeOverrideSig, setThemeOverrideSig] = createSignal<ThemeMode | null>(
 const [prefersLightSig, setPrefersLightSig] =
   createSignal<boolean>(systemPrefersLight());
 export const themeOverride = themeOverrideSig;
+export const themePreference = (): ThemePreference =>
+  themePreferenceFromOverride(themeOverrideSig());
 export const theme = (): ThemeMode =>
   resolveTheme(themeOverrideSig(), prefersLightSig());
 
 export function setTheme(mode: ThemeMode): void {
   setThemeOverrideSig(mode);
   saveTheme(mode);
+}
+
+export function setThemePreference(pref: ThemePreference): void {
+  if (pref === "system") {
+    setThemeOverrideSig(null);
+    clearSavedTheme();
+    return;
+  }
+  setTheme(pref);
 }
 
 export function toggleTheme(): void {

@@ -97,7 +97,54 @@ export const AppDetailPage: Component = () => {
   );
 
   const [codeCopyStatus, setCodeCopyStatus] = createSignal("");
+  const [gitCopyStatus, setGitCopyStatus] = createSignal<
+    "" | "copied" | "failed"
+  >("");
   let mdRef: HTMLDivElement | undefined;
+  let gitCopyTimer: ReturnType<typeof setTimeout> | undefined;
+  let pageDisposed = false;
+
+  const clearGitCopyStatus = () => {
+    if (gitCopyTimer !== undefined) {
+      clearTimeout(gitCopyTimer);
+      gitCopyTimer = undefined;
+    }
+    setGitCopyStatus("");
+  };
+
+  createEffect(() => {
+    void id();
+    clearGitCopyStatus();
+  });
+
+  onCleanup(() => {
+    pageDisposed = true;
+    if (gitCopyTimer !== undefined) clearTimeout(gitCopyTimer);
+  });
+
+  const copyGitUrl = async (gitUrl: string) => {
+    const targetId = id();
+    if (gitCopyTimer !== undefined) {
+      clearTimeout(gitCopyTimer);
+      gitCopyTimer = undefined;
+    }
+    try {
+      await navigator.clipboard.writeText(gitUrl);
+      if (pageDisposed || id() !== targetId) return;
+      setGitCopyStatus("copied");
+      gitCopyTimer = setTimeout(() => {
+        gitCopyTimer = undefined;
+        if (!pageDisposed && id() === targetId) setGitCopyStatus("");
+      }, 2000);
+    } catch {
+      if (pageDisposed || id() !== targetId) return;
+      setGitCopyStatus("failed");
+      gitCopyTimer = setTimeout(() => {
+        gitCopyTimer = undefined;
+        if (!pageDisposed && id() === targetId) setGitCopyStatus("");
+      }, 3000);
+    }
+  };
 
   // Enhance rendered README fenced code blocks with accessible copy buttons.
   createEffect(() => {
@@ -168,6 +215,13 @@ export const AppDetailPage: Component = () => {
       btn.addEventListener("click", onClick);
       const head = document.createElement("div");
       head.className = "md-code-head";
+      const lang = pre.getAttribute("data-lang");
+      if (lang) {
+        const langEl = document.createElement("span");
+        langEl.className = "md-code-lang mono";
+        langEl.textContent = lang;
+        head.appendChild(langEl);
+      }
       head.appendChild(btn);
       wrap.insertBefore(head, pre);
       cleanups.push(() => {
@@ -189,11 +243,20 @@ export const AppDetailPage: Component = () => {
         <BackLink />
 
         <Show when={resolving()}>
-          <div class="detail-hero" aria-busy="true">
-            <span class="icon-tile skel skel-icon-lg" />
-            <div class="detail-hero-text">
-              <span class="skel skel-line" style={{ width: "50%" }} />
+          <div class="detail-skel" aria-busy="true">
+            <span class="sr-only" role="status">
+              {t("loading", locale())}
+            </span>
+            <div class="detail-hero" aria-hidden="true">
+              <span class="icon-tile skel skel-icon-lg" />
+              <div class="detail-hero-text detail-skel-hero">
+                <span class="skel skel-line" style={{ width: "55%" }} />
+                <span class="skel skel-line" style={{ width: "35%" }} />
+              </div>
+            </div>
+            <div class="install-panel detail-skel-panel" aria-hidden="true">
               <span class="skel skel-line" style={{ width: "30%" }} />
+              <span class="skel publish-skel-field" />
             </div>
           </div>
         </Show>
@@ -264,10 +327,14 @@ export const AppDetailPage: Component = () => {
 
               <InstallPanel listing={l()} locale={locale()} />
 
-              <section class="detail-section">
-                <h2>{t("about", locale())}</h2>
-                <p class="detail-desc">{pick(l().description, locale())}</p>
-              </section>
+              <Show when={pick(l().description, locale()).trim()}>
+                {(desc) => (
+                  <section class="detail-section">
+                    <h2>{t("about", locale())}</h2>
+                    <p class="detail-desc">{desc()}</p>
+                  </section>
+                )}
+              </Show>
 
               <Show when={readme()}>
                 {(doc) => (
@@ -305,7 +372,38 @@ export const AppDetailPage: Component = () => {
                 <h2>{t("source", locale())}</h2>
                 <dl class="kv">
                   <dt>{t("gitUrl", locale())}</dt>
-                  <dd class="mono">{l().source.git}</dd>
+                  <dd class="kv-copy-cell">
+                    <div class="kv-copy-row">
+                      <span class="mono kv-copy-value">{l().source.git}</span>
+                      <button
+                        type="button"
+                        class="btn btn-secondary btn-sm kv-copy-btn"
+                        data-copied={
+                          gitCopyStatus() === "copied" ? "true" : undefined
+                        }
+                        aria-label={
+                          gitCopyStatus() === "copied"
+                            ? t("copied", locale())
+                            : t("copyGitUrl", locale())
+                        }
+                        onClick={() => void copyGitUrl(l().source.git)}
+                      >
+                        {gitCopyStatus() === "copied"
+                          ? t("copied", locale())
+                          : t("copyCode", locale())}
+                      </button>
+                    </div>
+                    <Show when={gitCopyStatus() === "failed"}>
+                      <p class="field-error kv-copy-error" role="alert">
+                        {t("copyFailed", locale())}
+                      </p>
+                    </Show>
+                    <span class="sr-only" aria-live="polite">
+                      {gitCopyStatus() === "copied"
+                        ? t("copied", locale())
+                        : ""}
+                    </span>
+                  </dd>
                   <Show when={l().source.path}>
                     {(modPath) => (
                       <>

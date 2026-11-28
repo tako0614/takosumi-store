@@ -15,7 +15,7 @@ import {
   oidcEnabled,
   setMe,
 } from "../appstate.ts";
-import { t, tagLabel } from "../lib/i18n.ts";
+import { pick, t, tagLabel } from "../lib/i18n.ts";
 import { loginUrl, setHandle } from "../lib/account-client.ts";
 import {
   bodyFromListing,
@@ -25,19 +25,39 @@ import {
   type PublishBody,
 } from "../lib/publish-client.ts";
 import {
+  draftFromLocalized,
+  emptyLocalizedDraft,
+  primaryText,
+  resolveLocalized,
+  secondaryText,
+  setPrimaryText,
+  setSecondaryText,
+  type LocalizedDraft,
+} from "../lib/publish-localized.ts";
+import {
+  deriveAutoSlug,
   repoNameFromGitUrl,
+  slugify,
+  validateDescriptionLength,
   validateGitUrl,
   validateHandle,
   validateLogoUrl,
+  validateNameLength,
   validateSlug,
 } from "../lib/publish-validation.ts";
 import { navTracker, setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
+import type { Locale } from "../../../spec/api.ts";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 const MAX_TAGS = 8;
+
+type LocaleTouched = { readonly ja: boolean; readonly en: boolean };
+const UNTOUCHED_LOCALES: LocaleTouched = { ja: false, en: false };
+const ALL_TOUCHED_LOCALES: LocaleTouched = { ja: true, en: true };
+const otherLocale = (loc: Locale): Locale => (loc === "ja" ? "en" : "ja");
 
 const PublishSkeleton: Component = () => (
   <div class="publish-skel" aria-busy="true">
@@ -58,14 +78,7 @@ const PublishSkeleton: Component = () => (
   </div>
 );
 
-function slugify(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-}
+type HandleErrorState = "" | "required" | "invalid" | { server: string };
 
 export const PublishPage: Component = () => {
   const navigate = useNavigate();
@@ -75,26 +88,32 @@ export const PublishPage: Component = () => {
     typeof searchParams.edit === "string" ? searchParams.edit : "";
 
   const [handleDraft, setHandleDraft] = createSignal("");
-  const [handleErr, setHandleErr] = createSignal("");
+  const [handleErrState, setHandleErrState] =
+    createSignal<HandleErrorState>("");
   const [handleBusy, setHandleBusy] = createSignal(false);
+  let handleInputRef: HTMLInputElement | undefined;
+  const handleErr = (): string => {
+    const state = handleErrState();
+    if (!state) return "";
+    if (state === "required") return t("handleRequired", locale());
+    if (state === "invalid") return t("handleInvalid", locale());
+    return state.server;
+  };
   const submitHandle = async (e: Event) => {
     e.preventDefault();
     if (handleBusy()) return;
     const check = validateHandle(handleDraft());
-    if (check === "required") {
-      setHandleErr(t("handleRequired", locale()));
+    if (check === "required" || check === "invalid") {
+      setHandleErrState(check);
+      queueMicrotask(() => handleInputRef?.focus());
       return;
     }
-    if (check === "invalid") {
-      setHandleErr(t("handleInvalid", locale()));
-      return;
-    }
-    setHandleErr("");
+    setHandleErrState("");
     setHandleBusy(true);
     try {
       const r = await setHandle(handleDraft().trim());
       if (r.ok) setMe(r.me);
-      else setHandleErr(r.message);
+      else setHandleErrState({ server: r.message });
     } finally {
       setHandleBusy(false);
     }
@@ -103,21 +122,54 @@ export const PublishPage: Component = () => {
   // Primary inputs — just a Git URL, a logo, and an optional name.
   const [git, setGit] = createSignal("");
   const [iconUrl, setIconUrl] = createSignal("");
-  const [name, setName] = createSignal("");
-  // Advanced — only user-meaningful presentation overrides.
+  const [nameDraft, setNameDraft] = createSignal<LocalizedDraft>(
+    emptyLocalizedDraft(),
+  );
+  // Advanced — only user-meaningful presentation overrides (including optional
+  // bilingual JA/EN overrides that keep single-language publishing effortless).
   const [slug, setSlug] = createSignal("");
   const [tags, setTags] = createSignal<string[]>([]);
   const [tagDraft, setTagDraft] = createSignal("");
-  const [description, setDescription] = createSignal("");
+  const [descDraft, setDescDraft] = createSignal<LocalizedDraft>(
+    emptyLocalizedDraft(),
+  );
   const [advOpen, setAdvOpen] = createSignal(false);
   const [errors, setErrors] = createSignal<string[]>([]);
+  const [quotaErr, setQuotaErr] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   let tagInputRef: HTMLInputElement | undefined;
 
   // Touched flags for calm, non-nagging inline field validation.
+  // Keyed by underlying locale (`ja`/`en`) for bilingual fields so switching
+  // the UI language preserves error visibility on the same value.
   const [gitTouched, setGitTouched] = createSignal(false);
+  const [nameTouched, setNameTouched] =
+    createSignal<LocaleTouched>(UNTOUCHED_LOCALES);
   const [logoTouched, setLogoTouched] = createSignal(false);
   const [slugTouched, setSlugTouched] = createSignal(false);
+  const [descTouched, setDescTouched] =
+    createSignal<LocaleTouched>(UNTOUCHED_LOCALES);
+
+  const touchPrimaryLocale = (
+    draft: LocalizedDraft,
+    setter: (fn: (prev: LocaleTouched) => LocaleTouched) => void,
+  ) => {
+    const loc = locale();
+    setter((prev) =>
+      draft.split ? { ...prev, [loc]: true } : ALL_TOUCHED_LOCALES,
+    );
+  };
+  const touchSecondaryLocale = (
+    setter: (fn: (prev: LocaleTouched) => LocaleTouched) => void,
+  ) => {
+    const alt = otherLocale(locale());
+    setter((prev) => ({ ...prev, [alt]: true }));
+  };
+
+  const repoName = (): string => repoNameFromGitUrl(git());
+  const resolvedName = () => resolveLocalized(nameDraft(), repoName());
+  const resolvedDescription = () => resolveLocalized(descDraft());
+  const autoSlug = () => deriveAutoSlug(resolvedName(), git());
 
   const gitErr = (): string => {
     if (!gitTouched()) return "";
@@ -125,6 +177,20 @@ export const PublishPage: Component = () => {
     if (code === "required") return t("gitUrlRequired", locale());
     if (code === "invalid") return t("gitUrlInvalid", locale());
     return "";
+  };
+  const nameErr = (): string => {
+    const loc = locale();
+    if (!nameTouched()[loc]) return "";
+    return validateNameLength(primaryText(nameDraft(), loc)) === "too_long"
+      ? t("nameTooLong", loc)
+      : "";
+  };
+  const altNameErr = (): string => {
+    const loc = locale();
+    if (!nameTouched()[otherLocale(loc)]) return "";
+    return validateNameLength(secondaryText(nameDraft(), loc)) === "too_long"
+      ? t("nameTooLong", loc)
+      : "";
   };
   const logoErr = (): string => {
     if (!logoTouched()) return "";
@@ -134,7 +200,27 @@ export const PublishPage: Component = () => {
   };
   const slugErr = (): string => {
     if (!slugTouched() || Boolean(editId())) return "";
-    return validateSlug(slug()) === "invalid" ? t("slugInvalid", locale()) : "";
+    if (validateSlug(slug()) === "invalid") return t("slugInvalid", locale());
+    if (!slug().trim() && validateGitUrl(git()) === null && !autoSlug()) {
+      return t("slugRequiredAscii", locale());
+    }
+    return "";
+  };
+  const descErr = (): string => {
+    const loc = locale();
+    if (!descTouched()[loc]) return "";
+    return validateDescriptionLength(primaryText(descDraft(), loc)) ===
+      "too_long"
+      ? t("descriptionTooLong", loc)
+      : "";
+  };
+  const altDescErr = (): string => {
+    const loc = locale();
+    if (!descTouched()[otherLocale(loc)]) return "";
+    return validateDescriptionLength(secondaryText(descDraft(), loc)) ===
+      "too_long"
+      ? t("descriptionTooLong", loc)
+      : "";
   };
 
   // Edit mode: load from the publisher's own listings so unlisted (`hidden`)
@@ -173,16 +259,19 @@ export const PublishPage: Component = () => {
   let prefilledFor: string | null = null;
   const resetFormFields = () => {
     setGit("");
-    setName("");
+    setNameDraft(emptyLocalizedDraft());
     setIconUrl("");
     setSlug("");
     setTags([]);
     setTagDraft("");
-    setDescription("");
+    setDescDraft(emptyLocalizedDraft());
     setErrors([]);
+    setQuotaErr(false);
     setGitTouched(false);
+    setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
     setSlugTouched(false);
+    setDescTouched(UNTOUCHED_LOCALES);
     setAdvOpen(false);
   };
   createEffect(() => {
@@ -198,20 +287,28 @@ export const PublishPage: Component = () => {
     const l = editListing();
     if (!l || prefilledFor === id) return;
     prefilledFor = id;
+    const nextName = draftFromLocalized(l.name);
+    const nextDesc = draftFromLocalized(l.description);
     setGit(l.source.git);
-    setName(l.name.ja || l.name.en);
+    setNameDraft(nextName);
     setIconUrl(l.iconUrl ?? "");
     setSlug(l.slug);
     setTags([...(l.tags ?? [])]);
     setTagDraft("");
-    setDescription(l.description.ja || l.description.en);
+    setDescDraft(nextDesc);
     setErrors([]);
+    setQuotaErr(false);
     setGitTouched(false);
+    setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
     setSlugTouched(false);
+    setDescTouched(UNTOUCHED_LOCALES);
     setAdvOpen(
       Boolean(
-        (l.tags ?? []).length > 0 || l.description.ja || l.description.en,
+        (l.tags ?? []).length > 0 ||
+        l.description.ja.trim() ||
+        l.description.en.trim() ||
+        nextName.split,
       ),
     );
   });
@@ -240,9 +337,8 @@ export const PublishPage: Component = () => {
   const removeTag = (tag: string) =>
     setTags((prev) => prev.filter((x) => x !== tag));
 
-  const repoName = (): string => repoNameFromGitUrl(git());
-  const effectiveName = () => name().trim() || repoName();
-  const autoSlug = () => slugify(effectiveName());
+  const previewName = () => pick(resolvedName(), locale());
+  const previewDesc = () => pick(resolvedDescription(), locale());
   const previewIconUrl = () => {
     const trimmed = iconUrl().trim();
     return trimmed && validateLogoUrl(trimmed) === null ? trimmed : undefined;
@@ -252,6 +348,9 @@ export const PublishPage: Component = () => {
       .slice(0, 3)
       .map((tg) => tagLabel(tg, locale()))
       .join(" · ");
+
+  const displayedErrors = () =>
+    quotaErr() ? [t("quotaReached", locale())] : errors();
 
   const submit = async (e: Event) => {
     e.preventDefault();
@@ -263,22 +362,38 @@ export const PublishPage: Component = () => {
       : null;
     if (editId() && !existing) return;
     setGitTouched(true);
+    setNameTouched(ALL_TOUCHED_LOCALES);
     setLogoTouched(true);
     setSlugTouched(true);
-    if (gitErr() || logoErr() || slugErr()) {
-      const focusId = gitErr()
-        ? "publish-git"
+    setDescTouched(ALL_TOUCHED_LOCALES);
+    const firstInvalid = gitErr()
+      ? { id: "publish-git", adv: false }
+      : nameErr()
+        ? { id: "publish-name", adv: false }
         : logoErr()
-          ? "publish-logo"
-          : "publish-slug";
-      if (focusId === "publish-slug") setAdvOpen(true);
-      queueMicrotask(() => document.getElementById(focusId)?.focus());
+          ? { id: "publish-logo", adv: false }
+          : slugErr()
+            ? { id: "publish-slug", adv: true }
+            : descErr()
+              ? { id: "publish-description", adv: true }
+              : altNameErr()
+                ? { id: "publish-alt-name", adv: true }
+                : altDescErr()
+                  ? { id: "publish-alt-description", adv: true }
+                  : null;
+    if (firstInvalid) {
+      if (firstInvalid.adv) setAdvOpen(true);
+      queueMicrotask(() => document.getElementById(firstInvalid.id)?.focus());
       return;
     }
 
     setBusy(true);
     setErrors([]);
-    const display = effectiveName();
+    setQuotaErr(false);
+    const finalName = resolvedName();
+    const finalDesc = resolvedDescription();
+    const explicitSlug = slug().trim();
+    const suggested = autoSlug() || slugify(explicitSlug);
 
     // In edit mode, start from the existing discovery listing, then overlay the
     // editable display/source fields. Installer-owned UX is not a listing field.
@@ -286,18 +401,18 @@ export const PublishPage: Component = () => {
       ? bodyFromListing(existing)
       : {
           source: { git: "" },
-          suggestedName: slugify(display),
-          name: { ja: display, en: display },
-          description: { ja: "", en: "" },
+          suggestedName: suggested,
+          name: finalName,
+          description: finalDesc,
           badge: { ja: "", en: "" },
         };
     const body: PublishBody = {
       ...base,
       source: { git: git().trim() },
-      ...(!existing && slug().trim() ? { slug: slug().trim() } : {}),
+      ...(!existing && explicitSlug ? { slug: explicitSlug } : {}),
       tags: tags(),
-      name: { ja: display, en: display },
-      description: { ja: description().trim(), en: description().trim() },
+      name: finalName,
+      description: finalDesc,
       ...(iconUrl().trim()
         ? { iconUrl: iconUrl().trim() }
         : { iconUrl: undefined }),
@@ -326,7 +441,7 @@ export const PublishPage: Component = () => {
         });
       }
     } else if (res.status === 429) {
-      setErrors([t("quotaReached", locale())]);
+      setQuotaErr(true);
     } else {
       setErrors(res.errors ?? [res.message]);
     }
@@ -377,6 +492,7 @@ export const PublishPage: Component = () => {
                     <label class="field" for="publish-handle">
                       <span>{t("setHandle", locale())}</span>
                       <input
+                        ref={handleInputRef}
                         id="publish-handle"
                         name="handle"
                         value={handleDraft()}
@@ -386,7 +502,7 @@ export const PublishPage: Component = () => {
                         }
                         onInput={(e) => {
                           setHandleDraft(e.currentTarget.value);
-                          if (handleErr()) setHandleErr("");
+                          if (handleErrState()) setHandleErrState("");
                         }}
                         placeholder={t("handlePlaceholder", locale())}
                         autocomplete="username"
@@ -450,7 +566,7 @@ export const PublishPage: Component = () => {
                         <div class="app-card publish-preview-card">
                           <IconTile
                             label={
-                              effectiveName() ||
+                              previewName() ||
                               t("previewFallbackName", locale())
                             }
                             seed={`${who().handle}/${slug().trim() || autoSlug() || "preview"}`}
@@ -459,7 +575,7 @@ export const PublishPage: Component = () => {
                           />
                           <div class="app-card-text">
                             <span class="app-card-name">
-                              {effectiveName() ||
+                              {previewName() ||
                                 t("previewFallbackName", locale())}
                             </span>
                             <span class="app-card-sub">
@@ -467,7 +583,7 @@ export const PublishPage: Component = () => {
                                 `${who().handle}/${slug().trim() || autoSlug() || "app"}`}
                             </span>
                             <span class="app-card-desc">
-                              {description().trim() ||
+                              {previewDesc() ||
                                 t("previewFallbackDesc", locale())}
                             </span>
                           </div>
@@ -516,14 +632,39 @@ export const PublishPage: Component = () => {
                           <input
                             id="publish-name"
                             name="name"
-                            value={name()}
-                            onInput={(e) => setName(e.currentTarget.value)}
+                            value={primaryText(nameDraft(), locale())}
+                            aria-invalid={Boolean(nameErr()) || undefined}
+                            aria-describedby={
+                              nameErr() ? "publish-name-error" : undefined
+                            }
+                            onInput={(e) =>
+                              setNameDraft((prev) =>
+                                setPrimaryText(
+                                  prev,
+                                  locale(),
+                                  e.currentTarget.value,
+                                ),
+                              )
+                            }
+                            onBlur={() =>
+                              touchPrimaryLocale(nameDraft(), setNameTouched)
+                            }
                             placeholder={
+                              secondaryText(nameDraft(), locale()).trim() ||
                               repoName() ||
                               t("displayNamePlaceholder", locale())
                             }
                             autocomplete="off"
                           />
+                          <Show when={nameErr()}>
+                            <p
+                              id="publish-name-error"
+                              class="field-error"
+                              role="alert"
+                            >
+                              {nameErr()}
+                            </p>
+                          </Show>
                         </div>
 
                         <div class="field">
@@ -686,18 +827,140 @@ export const PublishPage: Component = () => {
                             <textarea
                               id="publish-description"
                               name="description"
-                              value={description()}
+                              value={primaryText(descDraft(), locale())}
+                              aria-invalid={Boolean(descErr()) || undefined}
+                              aria-describedby={
+                                descErr() ? "publish-desc-error" : undefined
+                              }
                               onInput={(e) =>
-                                setDescription(e.currentTarget.value)
+                                setDescDraft((prev) =>
+                                  setPrimaryText(
+                                    prev,
+                                    locale(),
+                                    e.currentTarget.value,
+                                  ),
+                                )
+                              }
+                              onBlur={() =>
+                                touchPrimaryLocale(descDraft(), setDescTouched)
                               }
                               rows={3}
                             />
+                            <Show when={descErr()}>
+                              <p
+                                id="publish-desc-error"
+                                class="field-error"
+                                role="alert"
+                              >
+                                {descErr()}
+                              </p>
+                            </Show>
                           </div>
+
+                          <fieldset class="bilingual-group">
+                            <legend>{t("bilingualHeading", locale())}</legend>
+                            <p class="field-hint bilingual-hint">
+                              {t("bilingualHint", locale())}
+                            </p>
+
+                            <div class="field">
+                              <label for="publish-alt-name">
+                                {t("altNameField", locale())}
+                              </label>
+                              <input
+                                id="publish-alt-name"
+                                name="altName"
+                                value={secondaryText(nameDraft(), locale())}
+                                aria-invalid={
+                                  Boolean(altNameErr()) || undefined
+                                }
+                                aria-describedby={
+                                  altNameErr()
+                                    ? "publish-alt-name-error"
+                                    : undefined
+                                }
+                                onInput={(e) =>
+                                  setNameDraft((prev) =>
+                                    setSecondaryText(
+                                      prev,
+                                      locale(),
+                                      e.currentTarget.value,
+                                    ),
+                                  )
+                                }
+                                onBlur={() =>
+                                  touchSecondaryLocale(setNameTouched)
+                                }
+                                placeholder={
+                                  primaryText(nameDraft(), locale()).trim() ||
+                                  repoName() ||
+                                  t("displayNamePlaceholder", locale())
+                                }
+                                autocomplete="off"
+                              />
+                              <Show when={altNameErr()}>
+                                <p
+                                  id="publish-alt-name-error"
+                                  class="field-error"
+                                  role="alert"
+                                >
+                                  {altNameErr()}
+                                </p>
+                              </Show>
+                            </div>
+
+                            <div class="field">
+                              <label for="publish-alt-description">
+                                {t("altDescriptionField", locale())}
+                              </label>
+                              <textarea
+                                id="publish-alt-description"
+                                name="altDescription"
+                                value={secondaryText(descDraft(), locale())}
+                                aria-invalid={
+                                  Boolean(altDescErr()) || undefined
+                                }
+                                aria-describedby={
+                                  altDescErr()
+                                    ? "publish-alt-desc-error"
+                                    : undefined
+                                }
+                                onInput={(e) =>
+                                  setDescDraft((prev) =>
+                                    setSecondaryText(
+                                      prev,
+                                      locale(),
+                                      e.currentTarget.value,
+                                    ),
+                                  )
+                                }
+                                onBlur={() =>
+                                  touchSecondaryLocale(setDescTouched)
+                                }
+                                placeholder={
+                                  primaryText(descDraft(), locale()).trim() ||
+                                  t("previewFallbackDesc", locale())
+                                }
+                                rows={3}
+                              />
+                              <Show when={altDescErr()}>
+                                <p
+                                  id="publish-alt-desc-error"
+                                  class="field-error"
+                                  role="alert"
+                                >
+                                  {altDescErr()}
+                                </p>
+                              </Show>
+                            </div>
+                          </fieldset>
                         </details>
 
-                        <Show when={errors().length > 0}>
+                        <Show when={displayedErrors().length > 0}>
                           <ul class="form-errors" role="alert">
-                            <For each={errors()}>{(err) => <li>{err}</li>}</For>
+                            <For each={displayedErrors()}>
+                              {(err) => <li>{err}</li>}
+                            </For>
                           </ul>
                         </Show>
 

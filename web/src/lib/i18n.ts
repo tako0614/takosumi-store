@@ -97,6 +97,7 @@ const S = {
   copyLink: { ja: "リンクをコピー", en: "Copy link" },
   copyCode: { ja: "コピー", en: "Copy" },
   copyCodeLabel: { ja: "コードをコピー", en: "Copy code" },
+  copyGitUrl: { ja: "Git URL をコピー", en: "Copy Git URL" },
   copied: { ja: "コピーしました", en: "Copied" },
   copyFailed: {
     ja: "クリップボードにコピーできませんでした",
@@ -163,6 +164,34 @@ const S = {
   slugInvalid: {
     ja: "スラッグは半角小文字英数字とハイフン（1〜48文字）で入力してください。",
     en: "Use lowercase letters, numbers, and hyphens (1–48 characters).",
+  },
+  slugRequiredAscii: {
+    ja: "名前やリポジトリ名に半角英数字が含まれないため、スラッグを半角小文字英数字で入力してください。",
+    en: "Enter a lowercase ASCII slug when the name and repository have no ASCII letters.",
+  },
+  nameTooLong: {
+    ja: "名前は 120 文字以内で入力してください。",
+    en: "Name must be 120 characters or fewer.",
+  },
+  descriptionTooLong: {
+    ja: "説明は 2000 文字以内で入力してください。",
+    en: "Description must be 2000 characters or fewer.",
+  },
+  bilingualHeading: {
+    ja: "英語表示（任意）",
+    en: "Japanese localization (optional)",
+  },
+  bilingualHint: {
+    ja: "空欄のままにすると、日本語の入力内容が英語表示にも使われます。",
+    en: "Leave blank to use your English text for Japanese visitors as well.",
+  },
+  altNameField: {
+    ja: "英語の名前",
+    en: "Japanese name",
+  },
+  altDescriptionField: {
+    ja: "英語の説明",
+    en: "Japanese description",
   },
   handleRequired: {
     ja: "ハンドルを入力してください。",
@@ -231,7 +260,12 @@ const S = {
   readme: { ja: "README", en: "README" },
   readmeFrom: { ja: "リポジトリの README", en: "From the repository README" },
   actionFailed: { ja: "操作に失敗しました", en: "That action failed" },
-  // theme toggle (label describes the target theme)
+  // theme selector (menu + legacy target labels)
+  themeLabel: { ja: "テーマ設定", en: "Theme" },
+  themeMenuLabel: { ja: "テーマを変更", en: "Change theme" },
+  themeSystem: { ja: "システム設定", en: "System" },
+  themeLight: { ja: "ライト", en: "Light" },
+  themeDark: { ja: "ダーク", en: "Dark" },
   switchToLight: {
     ja: "ライトモードに切り替え",
     en: "Switch to light mode",

@@ -1,4 +1,10 @@
-import { createSignal, onCleanup, Show, type Component } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  onCleanup,
+  Show,
+  type Component,
+} from "solid-js";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 import type { Locale } from "../../../spec/api.ts";
 import { t } from "../lib/i18n.ts";
@@ -17,7 +23,7 @@ export const InstallPanel: Component<{
   const [origin, setOrigin] = createSignal(getTakosOrigin());
   const [editing, setEditing] = createSignal(!getTakosOrigin());
   const [draft, setDraft] = createSignal(getTakosOrigin());
-  const [originErr, setOriginErr] = createSignal("");
+  const [originErr, setOriginErr] = createSignal(false);
   const [copyStatus, setCopyStatus] = createSignal<"" | "copied" | "failed">(
     "",
   );
@@ -32,6 +38,10 @@ export const InstallPanel: Component<{
     }
     setCopyStatus("");
   };
+  createEffect(() => {
+    void props.listing.id;
+    clearCopyStatus();
+  });
   onCleanup(() => {
     if (copyTimer) clearTimeout(copyTimer);
   });
@@ -42,7 +52,7 @@ export const InstallPanel: Component<{
   const cancelEdit = () => {
     if (!origin()) return;
     setDraft(origin());
-    setOriginErr("");
+    setOriginErr(false);
     setEditing(false);
     queueMicrotask(() => changeBtnRef?.focus());
   };
@@ -54,11 +64,11 @@ export const InstallPanel: Component<{
       clearCopyStatus();
       setOrigin(normalized);
       setDraft(normalized);
-      setOriginErr("");
+      setOriginErr(false);
       setEditing(false);
       queueMicrotask(() => openLinkRef?.focus());
     } else {
-      setOriginErr(t("invalidOriginError", props.locale));
+      setOriginErr(true);
       queueMicrotask(() => originInputRef?.focus());
     }
   };
@@ -101,13 +111,13 @@ export const InstallPanel: Component<{
                 id="takos-origin"
                 type="url"
                 value={draft()}
-                aria-invalid={Boolean(originErr()) || undefined}
+                aria-invalid={originErr() || undefined}
                 aria-describedby={
                   originErr() ? "takos-origin-error" : "takos-origin-hint"
                 }
                 onInput={(e) => {
                   setDraft(e.currentTarget.value);
-                  if (originErr()) setOriginErr("");
+                  if (originErr()) setOriginErr(false);
                 }}
                 placeholder={t("takosOriginPlaceholder", props.locale)}
                 autocomplete="url"
@@ -133,7 +143,7 @@ export const InstallPanel: Component<{
                 class="field-error install-error"
                 role="alert"
               >
-                {originErr()}
+                {t("invalidOriginError", props.locale)}
               </p>
             </Show>
             <p id="takos-origin-hint" class="install-hint">
@@ -170,7 +180,7 @@ export const InstallPanel: Component<{
             onClick={() => {
               clearCopyStatus();
               setDraft(origin());
-              setOriginErr("");
+              setOriginErr(false);
               setEditing(true);
               queueMicrotask(() => {
                 originInputRef?.focus();
