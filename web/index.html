@@ -49,18 +49,20 @@
     <link rel="icon" type="image/png" href="/tako.png" />
     <link rel="apple-touch-icon" href="/tako.png" />
     <script>
-      try {
-        var t = localStorage.getItem("tcs.theme");
-        if (t === "light" || t === "dark") {
-          document.documentElement.dataset.theme = t;
-          var c = t === "light" ? "#f7f7f8" : "#0a0a0a";
-          document
-            .querySelectorAll('meta[name="theme-color"]')
-            .forEach(function (m) {
-              m.setAttribute("content", c);
-            });
-        }
-      } catch (e) {}
+      (function () {
+        try {
+          var t = localStorage.getItem("tcs.theme");
+          if (t === "light" || t === "dark") {
+            document.documentElement.dataset.theme = t;
+            var c = t === "light" ? "#f7f7f8" : "#0a0a0a";
+            document
+              .querySelectorAll('meta[name="theme-color"]')
+              .forEach(function (m) {
+                m.setAttribute("content", c);
+              });
+          }
+        } catch (e) {}
+      })();
     </script>
   </head>
   <body>

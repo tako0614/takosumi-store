@@ -1,4 +1,4 @@
-import { createSignal, Show, type Component } from "solid-js";
+import { createSignal, onCleanup, Show, type Component } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import {
   locale,
@@ -66,15 +66,32 @@ export const TopBar: Component = () => {
   const navigate = useNavigate();
   const route = useLocation();
   const [loggingOut, setLoggingOut] = createSignal(false);
+  const [logoutFailed, setLogoutFailed] = createSignal(false);
+  let logoutErrTimer: ReturnType<typeof setTimeout> | undefined;
+
+  onCleanup(() => {
+    if (logoutErrTimer) clearTimeout(logoutErrTimer);
+  });
 
   const onLogout = async () => {
     if (loggingOut()) return;
+    if (logoutErrTimer) {
+      clearTimeout(logoutErrTimer);
+      logoutErrTimer = undefined;
+    }
+    setLogoutFailed(false);
     setLoggingOut(true);
     try {
       const ok = await logout();
       if (ok) {
         setMe(null);
         navigate("/");
+      } else {
+        setLogoutFailed(true);
+        logoutErrTimer = setTimeout(() => {
+          setLogoutFailed(false);
+          logoutErrTimer = undefined;
+        }, 4000);
       }
     } finally {
       setLoggingOut(false);
@@ -165,6 +182,11 @@ export const TopBar: Component = () => {
           </div>
         </div>
       </div>
+      <Show when={logoutFailed()}>
+        <div class="topbar-error" role="alert">
+          <div class="topbar-error-inner">{t("actionFailed", locale())}</div>
+        </div>
+      </Show>
     </header>
   );
 };

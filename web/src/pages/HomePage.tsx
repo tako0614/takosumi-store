@@ -297,7 +297,13 @@ export const HomePage: Component = () => {
           </div>
         </Show>
 
-        <Show when={filtersActive() && !firstLoad() && !loadError()}>
+        <Show
+          when={
+            filtersActive() &&
+            !firstLoad() &&
+            !(loadError() && agg().items.length === 0)
+          }
+        >
           <div class="results-bar" aria-live="polite">
             <span class="results-summary muted">
               {locale() === "ja"
@@ -323,7 +329,13 @@ export const HomePage: Component = () => {
           />
         </Show>
 
-        <Show when={!firstLoad() && !loadError() && displayed().length === 0}>
+        <Show
+          when={
+            !firstLoad() &&
+            !(loadError() && agg().items.length === 0) &&
+            displayed().length === 0
+          }
+        >
           <Show
             when={filtersActive() || agg().items.length > 0}
             fallback={
@@ -344,14 +356,14 @@ export const HomePage: Component = () => {
             <EmptyState
               title={t("noResults", locale())}
               message={
-                !agg().done && filtersActive()
+                !agg().done && !loadError() && filtersActive()
                   ? t("partialResultsHint", locale())
                   : t("noResultsHint", locale())
               }
               action={
                 <Show when={filtersActive()}>
                   <div class="state-actions">
-                    <Show when={!agg().done}>
+                    <Show when={!agg().done && !loadError()}>
                       <button
                         type="button"
                         class="btn btn-primary"
@@ -401,15 +413,20 @@ export const HomePage: Component = () => {
               type="button"
               class="btn btn-secondary btn-sm"
               disabled={agg().loading}
-              onClick={() => void rebuild()}
+              onClick={() => void loadMoreItems()}
             >
-              {t("retry", locale())}
+              {agg().loading ? t("loading", locale()) : t("retry", locale())}
             </button>
           </div>
         </Show>
 
         <Show
-          when={!agg().done && agg().items.length > 0 && displayed().length > 0}
+          when={
+            !agg().done &&
+            !loadError() &&
+            agg().items.length > 0 &&
+            displayed().length > 0
+          }
         >
           <div class="loadmore">
             <Show when={filtersActive()}>

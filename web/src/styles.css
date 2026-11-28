@@ -260,6 +260,18 @@ main:focus {
   border-color: var(--tg-line-strong);
   background: var(--tg-bg-subtle);
 }
+.topbar-error {
+  border-top: 1px solid color-mix(in srgb, var(--tg-danger) 45%, var(--tg-line));
+  background: var(--tg-accent-soft);
+  color: var(--tg-accent-text);
+  font-size: var(--tg-fs-xs);
+  font-weight: 600;
+}
+.topbar-error-inner {
+  max-width: var(--tg-container);
+  margin: 0 auto;
+  padding: 6px var(--tg-s-5);
+}
 
 /* ===== Home header & catalog controls ===== */
 .home-head {
@@ -1127,6 +1139,9 @@ main:focus {
     padding: var(--tg-s-2) var(--tg-s-4);
     gap: var(--tg-s-2);
   }
+  .topbar-error-inner {
+    padding: 6px var(--tg-s-4);
+  }
   .container {
     padding: 0 var(--tg-s-4);
   }
@@ -1493,12 +1508,6 @@ a.manage-item-name:hover {
   border-bottom: 1px solid var(--tg-line);
   background: var(--tg-bg-elev);
 }
-.md-code-block pre.md-code {
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  padding: 12px 14px;
-}
 .md-code-copy {
   min-height: 28px;
   padding: 4px 10px;
@@ -1523,6 +1532,12 @@ a.manage-item-name:hover {
   border-radius: 10px;
   padding: 12px 14px;
   overflow-x: auto;
+}
+.md .md-code-block pre.md-code {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 12px 14px;
 }
 .md pre.md-code code {
   background: none;

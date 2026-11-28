@@ -15,7 +15,9 @@ import {
   logout,
   setHandle,
 } from "../web/src/lib/account-client.ts";
+import { initState, loadMore } from "../web/src/lib/aggregate.ts";
 import { t, type StringKey } from "../web/src/lib/i18n.ts";
+import type { ListingV2 } from "../spec/v2/listing.ts";
 
 describe("theme preference resolution and DOM synchronization", () => {
   test("reads/saves only valid theme values and tolerates storage failures", () => {
@@ -154,6 +156,105 @@ describe("account-client network resilience", () => {
       ok: false,
       message: "Network error",
     });
+  });
+});
+
+describe("aggregate loadMore transient failure cursor preservation", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function sampleListing(slug: string, updatedAt: string): ListingV2 {
+    return {
+      id: `takos/${slug}`,
+      scope: "takos",
+      slug,
+      source: { git: `https://github.com/tako0614/${slug}.git` },
+      category: "tools",
+      tags: ["tools"],
+      suggestedName: slug,
+      name: { ja: slug, en: slug },
+      description: { ja: slug, en: slug },
+      badge: { ja: "tools", en: "tools" },
+      createdAt: updatedAt,
+      updatedAt,
+    };
+  }
+
+  test("preserves loaded pages and failed cursor on transient error, then retries that exact cursor", async () => {
+    const requestedCursors: (string | null)[] = [];
+    let failP3Once = true;
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const cursor = url.searchParams.get("cursor");
+      requestedCursors.push(cursor);
+      if (cursor === null) {
+        return Response.json({
+          items: [
+            sampleListing("a1", "2026-11-20T05:00:00Z"),
+            sampleListing("a2", "2026-11-20T04:00:00Z"),
+          ],
+          nextCursor: "p2",
+        });
+      }
+      if (cursor === "p2") {
+        return Response.json({
+          items: [
+            sampleListing("a3", "2026-11-20T03:00:00Z"),
+            sampleListing("a4", "2026-11-20T02:00:00Z"),
+          ],
+          nextCursor: "p3",
+        });
+      }
+      if (cursor === "p3") {
+        if (failP3Once) {
+          failP3Once = false;
+          return new Response("upstream error", { status: 500 });
+        }
+        return Response.json({
+          items: [sampleListing("a5", "2026-11-20T01:00:00Z")],
+        });
+      }
+      return new Response("unexpected cursor", { status: 400 });
+    }) as unknown as typeof fetch;
+
+    const base = "https://store.test";
+    let state = initState([{ base, home: true }], {
+      sort: "updated",
+      locale: "en",
+    });
+
+    // Page 1 and page 2 succeed (4 items, nextCursor = "p3").
+    state = await loadMore(state);
+    state = await loadMore(state);
+    expect(state.items.map((i) => i.slug)).toEqual(["a1", "a2", "a3", "a4"]);
+    expect(state.cursors[base]).toBe("p3");
+    expect(state.done).toBe(false);
+
+    // Page 3 fails transiently: keeps all 4 items, preserves cursor "p3", marks server failed.
+    state = await loadMore(state);
+    expect(state.items.map((i) => i.slug)).toEqual(["a1", "a2", "a3", "a4"]);
+    expect(state.cursors[base]).toBe("p3");
+    expect(state.done).toBe(false);
+    expect(state.status[0]?.ok).toBe(false);
+    expect(state.status[0]?.error).toBeDefined();
+
+    // Retry calls loadMore again with cursor "p3" (never resetting to null).
+    state = await loadMore(state);
+    expect(requestedCursors).toEqual([null, "p2", "p3", "p3"]);
+    expect(state.items.map((i) => i.slug)).toEqual([
+      "a1",
+      "a2",
+      "a3",
+      "a4",
+      "a5",
+    ]);
+    expect(state.cursors[base]).toBeNull();
+    expect(state.done).toBe(true);
+    expect(state.status[0]?.ok).toBe(true);
+    expect(state.status[0]?.error).toBeUndefined();
   });
 });
 
