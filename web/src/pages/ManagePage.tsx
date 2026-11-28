@@ -1,5 +1,6 @@
 import {
   createEffect,
+  createMemo,
   createResource,
   createSignal,
   For,
@@ -53,7 +54,7 @@ const ManageSkeleton: Component = () => (
 );
 
 export const ManagePage: Component = () => {
-  const [items, { refetch }] = createResource<OwnedListing[], unknown>(
+  const [items, { mutate, refetch }] = createResource<OwnedListing[], unknown>(
     me,
     async (who) => (who ? await listMine() : []),
   );
@@ -67,6 +68,20 @@ export const ManagePage: Component = () => {
     null,
   );
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Keep the list mounted during background `refetch()` ("refreshing") so
+  // actions like Unpublish / Refresh never flash the whole-page skeleton or
+  // tear down focused controls.
+  const initialLoading = () =>
+    items.state === "pending" || items.state === "unresolved";
+  const initialError = () => items.state === "errored";
+  const currentItems = createMemo<readonly OwnedListing[]>(() =>
+    items.state === "errored" ? [] : (items.latest ?? []),
+  );
+  const listingById = createMemo(
+    () => new Map(currentItems().map((item) => [item.id, item])),
+  );
+  const listingIds = createMemo(() => currentItems().map((item) => item.id));
 
   const isBusy = (id: string) => busyAction()?.id === id;
   const isActionBusy = (id: string, kind: ManageActionKind) =>
@@ -94,7 +109,15 @@ export const ManagePage: Component = () => {
     kind: ManageActionKind,
     action: () => Promise<boolean>,
     successKey: StringKey,
+    onOptimisticSuccess?: () => void,
   ): Promise<boolean> {
+    const activeBefore = document.activeElement;
+    const trigger =
+      kind !== "delete" &&
+      activeBefore instanceof HTMLElement &&
+      activeBefore.closest(".manage-item-actions")
+        ? activeBefore
+        : null;
     setBusyAction({ id: l.id, kind });
     setErrId("");
     let ok = false;
@@ -106,12 +129,28 @@ export const ManagePage: Component = () => {
       setBusyAction(null);
     }
     if (ok) {
+      onOptimisticSuccess?.();
       invalidateListings();
-      refetch();
+      void refetch();
       const label = pick(l.name, locale());
       announce(`${label}: ${t(successKey, locale())}`);
     } else {
       setErrId(l.id);
+    }
+    // Disabling a focused button drops focus to <body> in browsers; restore it
+    // once re-enabled unless the user moved focus elsewhere in the meantime.
+    if (trigger && trigger.isConnected) {
+      queueMicrotask(() => {
+        const active = document.activeElement;
+        if (
+          trigger.isConnected &&
+          (!active ||
+            active === document.body ||
+            active === document.documentElement)
+        ) {
+          trigger.focus({ preventScroll: true });
+        }
+      });
     }
     return ok;
   }
@@ -131,6 +170,13 @@ export const ManagePage: Component = () => {
       "toggle",
       () => setVisibility(l.id, next),
       next === "hidden" ? "unpublished" : "republished",
+      () => {
+        mutate((prev) =>
+          prev?.map((item) =>
+            item.id === l.id ? { ...item, status: next } : item,
+          ),
+        );
+      },
     );
   };
 
@@ -143,6 +189,9 @@ export const ManagePage: Component = () => {
         "delete",
         () => deleteListing(target.id, true),
         "deleted",
+        () => {
+          mutate((prev) => prev?.filter((item) => item.id !== target.id));
+        },
       );
     } finally {
       setPendingDelete(null);
@@ -192,9 +241,9 @@ export const ManagePage: Component = () => {
               </div>
             }
           >
-            <Show when={!items.loading} fallback={<ManageSkeleton />}>
+            <Show when={!initialLoading()} fallback={<ManageSkeleton />}>
               <Show
-                when={!items.error}
+                when={!initialError()}
                 fallback={
                   <ErrorState
                     title={t("errorTitle", locale())}
@@ -205,7 +254,7 @@ export const ManagePage: Component = () => {
                 }
               >
                 <Show
-                  when={(items() ?? []).length > 0}
+                  when={listingIds().length > 0}
                   fallback={
                     <EmptyState
                       glyph="📦"
@@ -219,100 +268,123 @@ export const ManagePage: Component = () => {
                   }
                 >
                   <ul class="manage-list">
-                    <For each={items()}>
-                      {(l) => (
-                        <li
-                          class="manage-item"
-                          classList={{ "is-hidden": l.status === "hidden" }}
-                        >
-                          <IconTile
-                            label={pick(l.name, locale())}
-                            seed={l.id}
-                            iconUrl={l.iconUrl}
-                            size={52}
-                          />
-                          <div class="manage-item-main">
-                            <div class="manage-item-head">
-                              <Show
-                                when={l.status === "visible"}
-                                fallback={
-                                  <span class="manage-item-name">
-                                    {pick(l.name, locale())}
-                                  </span>
-                                }
-                              >
-                                <A
-                                  href={`/${encodeURIComponent(l.scope)}/${encodeURIComponent(l.slug)}`}
-                                  class="manage-item-name"
+                    <For each={listingIds()}>
+                      {(id) => {
+                        const listing = () => listingById().get(id);
+                        return (
+                          <Show when={listing()}>
+                            {(l) => {
+                              const displayName = () =>
+                                pick(l().name, locale());
+                              const refreshLabel = () =>
+                                isActionBusy(id, "refresh")
+                                  ? t("refreshing", locale())
+                                  : t("refreshVersion", locale());
+                              const toggleLabel = () =>
+                                isActionBusy(id, "toggle")
+                                  ? l().status === "visible"
+                                    ? t("unpublishing", locale())
+                                    : t("republishing", locale())
+                                  : l().status === "visible"
+                                    ? t("unpublish", locale())
+                                    : t("republish", locale());
+                              const deleteLabel = () =>
+                                isActionBusy(id, "delete")
+                                  ? t("deleting", locale())
+                                  : t("deleteAction", locale());
+                              return (
+                                <li
+                                  class="manage-item"
+                                  classList={{
+                                    "is-hidden": l().status === "hidden",
+                                  }}
                                 >
-                                  {pick(l.name, locale())}
-                                </A>
-                              </Show>
-                              <span
-                                class="chip chip-mini"
-                                classList={{
-                                  "chip-ok": l.status === "visible",
-                                  "chip-muted": l.status === "hidden",
-                                }}
-                              >
-                                {l.status === "visible"
-                                  ? t("statusVisible", locale())
-                                  : t("statusHidden", locale())}
-                              </span>
-                            </div>
-                            <div class="manage-item-meta mono muted">
-                              {l.scope}/{l.slug}
-                            </div>
-                            <Show when={errId() === l.id}>
-                              <div class="field-error" role="alert">
-                                {t("actionFailed", locale())}
-                              </div>
-                            </Show>
-                          </div>
-                          <div class="manage-item-actions">
-                            <A
-                              href={`/publish?edit=${encodeURIComponent(l.id)}`}
-                              class="btn btn-secondary btn-sm"
-                            >
-                              {t("edit", locale())}
-                            </A>
-                            <button
-                              type="button"
-                              class="btn btn-ghost btn-sm"
-                              disabled={isBusy(l.id)}
-                              onClick={() => void refresh(l)}
-                            >
-                              {isActionBusy(l.id, "refresh")
-                                ? t("refreshing", locale())
-                                : t("refreshVersion", locale())}
-                            </button>
-                            <button
-                              type="button"
-                              class="btn btn-ghost btn-sm"
-                              disabled={isBusy(l.id)}
-                              onClick={() => void toggle(l)}
-                            >
-                              {isActionBusy(l.id, "toggle")
-                                ? l.status === "visible"
-                                  ? t("unpublishing", locale())
-                                  : t("republishing", locale())
-                                : l.status === "visible"
-                                  ? t("unpublish", locale())
-                                  : t("republish", locale())}
-                            </button>
-                            <button
-                              type="button"
-                              class="btn btn-ghost btn-sm btn-danger"
-                              disabled={isBusy(l.id)}
-                              onClick={() => setPendingDelete(l)}
-                            >
-                              {isActionBusy(l.id, "delete")
-                                ? t("deleting", locale())
-                                : t("deleteAction", locale())}
-                            </button>
-                          </div>
-                        </li>
-                      )}
+                                  <IconTile
+                                    label={displayName()}
+                                    seed={l().id}
+                                    iconUrl={l().iconUrl}
+                                    size={52}
+                                  />
+                                  <div class="manage-item-main">
+                                    <div class="manage-item-head">
+                                      <Show
+                                        when={l().status === "visible"}
+                                        fallback={
+                                          <span class="manage-item-name">
+                                            {displayName()}
+                                          </span>
+                                        }
+                                      >
+                                        <A
+                                          href={`/${encodeURIComponent(l().scope)}/${encodeURIComponent(l().slug)}`}
+                                          class="manage-item-name"
+                                        >
+                                          {displayName()}
+                                        </A>
+                                      </Show>
+                                      <span
+                                        class="chip chip-mini"
+                                        classList={{
+                                          "chip-ok": l().status === "visible",
+                                          "chip-muted": l().status === "hidden",
+                                        }}
+                                      >
+                                        {l().status === "visible"
+                                          ? t("statusVisible", locale())
+                                          : t("statusHidden", locale())}
+                                      </span>
+                                    </div>
+                                    <div class="manage-item-meta mono muted">
+                                      {l().scope}/{l().slug}
+                                    </div>
+                                    <Show when={errId() === id}>
+                                      <div class="field-error" role="alert">
+                                        {t("actionFailed", locale())}
+                                      </div>
+                                    </Show>
+                                  </div>
+                                  <div class="manage-item-actions">
+                                    <A
+                                      href={`/publish?edit=${encodeURIComponent(l().id)}`}
+                                      class="btn btn-secondary btn-sm"
+                                      aria-label={`${t("edit", locale())}: ${displayName()}`}
+                                    >
+                                      {t("edit", locale())}
+                                    </A>
+                                    <button
+                                      type="button"
+                                      class="btn btn-ghost btn-sm"
+                                      disabled={isBusy(id)}
+                                      aria-label={`${refreshLabel()}: ${displayName()}`}
+                                      onClick={() => void refresh(l())}
+                                    >
+                                      {refreshLabel()}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      class="btn btn-ghost btn-sm"
+                                      disabled={isBusy(id)}
+                                      aria-label={`${toggleLabel()}: ${displayName()}`}
+                                      onClick={() => void toggle(l())}
+                                    >
+                                      {toggleLabel()}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      class="btn btn-ghost btn-sm btn-danger"
+                                      disabled={isBusy(id)}
+                                      aria-label={`${deleteLabel()}: ${displayName()}`}
+                                      onClick={() => setPendingDelete(l())}
+                                    >
+                                      {deleteLabel()}
+                                    </button>
+                                  </div>
+                                </li>
+                              );
+                            }}
+                          </Show>
+                        );
+                      }}
                     </For>
                   </ul>
                   <p class="manage-hint">

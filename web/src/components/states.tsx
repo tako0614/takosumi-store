@@ -1,21 +1,28 @@
 import { For, Show, type Component, type JSX } from "solid-js";
 
 /** Placeholder cards shown while the first page loads. */
-export const SkeletonGrid: Component<{ count?: number }> = (props) => {
+export const SkeletonGrid: Component<{ count?: number; label?: string }> = (
+  props,
+) => {
   return (
-    <div class="app-grid" aria-busy="true" aria-hidden="true">
-      <For each={Array.from({ length: props.count ?? 8 })}>
-        {() => (
-          <div class="app-card skeleton-card">
-            <span class="skel skel-icon" />
-            <div class="app-card-text">
-              <span class="skel skel-line" style={{ width: "70%" }} />
-              <span class="skel skel-line" style={{ width: "45%" }} />
-              <span class="skel skel-line" style={{ width: "90%" }} />
+    <div aria-busy="true">
+      <span class="sr-only" role="status">
+        {props.label ?? "Loading…"}
+      </span>
+      <div class="app-grid" aria-hidden="true">
+        <For each={Array.from({ length: props.count ?? 8 })}>
+          {() => (
+            <div class="app-card skeleton-card">
+              <span class="skel skel-icon" />
+              <div class="app-card-text">
+                <span class="skel skel-line" style={{ width: "70%" }} />
+                <span class="skel skel-line" style={{ width: "45%" }} />
+                <span class="skel skel-line" style={{ width: "90%" }} />
+              </div>
             </div>
-          </div>
-        )}
-      </For>
+          )}
+        </For>
+      </div>
     </div>
   );
 };
