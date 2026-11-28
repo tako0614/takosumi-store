@@ -124,6 +124,7 @@ export const AppDetailPage: Component = () => {
         pre.parentNode?.insertBefore(wrap, pre);
         wrap.appendChild(pre);
       }
+      wrap.querySelector(".md-code-head")?.remove();
       wrap.querySelector(".md-code-copy")?.remove();
 
       const btn = document.createElement("button");
@@ -165,7 +166,10 @@ export const AppDetailPage: Component = () => {
       };
 
       btn.addEventListener("click", onClick);
-      wrap.appendChild(btn);
+      const head = document.createElement("div");
+      head.className = "md-code-head";
+      head.appendChild(btn);
+      wrap.insertBefore(head, pre);
       cleanups.push(() => {
         btn.removeEventListener("click", onClick);
       });
@@ -277,7 +281,7 @@ export const AppDetailPage: Component = () => {
                       innerHTML={renderMarkdown(
                         doc().markdown,
                         doc().sourceUrl,
-                        { headingOffset: 2 },
+                        { headingOffset: 2, locale: locale() },
                       )}
                     />
                     <span class="sr-only" aria-live="polite">
@@ -300,7 +304,7 @@ export const AppDetailPage: Component = () => {
               <section class="detail-section">
                 <h2>{t("source", locale())}</h2>
                 <dl class="kv">
-                  <dt>git</dt>
+                  <dt>{t("gitUrl", locale())}</dt>
                   <dd class="mono">{l().source.git}</dd>
                   <Show when={l().source.path}>
                     {(modPath) => (

@@ -6,7 +6,7 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { useParams } from "@solidjs/router";
+import { A, useParams } from "@solidjs/router";
 import { locale } from "../appstate.ts";
 import { homeBase } from "../lib/servers.ts";
 import { fetchListingsPage } from "../lib/tcs-client.ts";
@@ -88,10 +88,18 @@ export const ScopePage: Component = () => {
           />
         </Show>
         <Show when={!page.loading && !page.error && items().length === 0}>
-          <EmptyState glyph="📦" title={t("scopeEmpty", locale())} />
+          <EmptyState
+            glyph="📦"
+            title={t("scopeEmpty", locale())}
+            action={
+              <A href="/" class="btn btn-primary">
+                {t("browseCatalog", locale())}
+              </A>
+            }
+          />
         </Show>
         <Show when={!page.error && items().length > 0}>
-          <section class="app-grid">
+          <section class="app-grid" aria-label={t("apps", locale())}>
             <For each={items()}>
               {(listing) => <AppCard listing={listing} locale={locale()} />}
             </For>

@@ -14,8 +14,15 @@ import { HomePage } from "./pages/HomePage.tsx";
 import { AppDetailPage } from "./pages/AppDetailPage.tsx";
 import { ScopePage } from "./pages/ScopePage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
-import { loadAccount, locale } from "./appstate.ts";
+import {
+  loadAccount,
+  locale,
+  syncSystemTheme,
+  theme,
+  themeOverride,
+} from "./appstate.ts";
 import { t } from "./lib/i18n.ts";
+import { applyThemeToDocument } from "./lib/theme.ts";
 import {
   focusMainAfterNavigation,
   navTracker,
@@ -60,6 +67,17 @@ const Layout: ParentComponent = (props) => {
 
   onMount(() => {
     void loadAccount();
+    if (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function"
+    ) {
+      const mq = window.matchMedia("(prefers-color-scheme: light)");
+      syncSystemTheme(mq.matches);
+      const onThemeChange = (e: MediaQueryListEvent) =>
+        syncSystemTheme(e.matches);
+      mq.addEventListener("change", onThemeChange);
+      onCleanup(() => mq.removeEventListener("change", onThemeChange));
+    }
   });
   onCleanup(() => {
     unsubscribeAnnouncer();
@@ -69,6 +87,10 @@ const Layout: ParentComponent = (props) => {
 
   createEffect(() => {
     document.documentElement.lang = locale();
+  });
+
+  createEffect(() => {
+    applyThemeToDocument(themeOverride(), theme());
   });
 
   // On client-side route changes (not query-only filter updates), move focus to

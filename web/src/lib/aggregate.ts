@@ -172,7 +172,9 @@ export async function loadMore(
           ok: unsupported,
           supported: !unsupported,
           items: [] as readonly ListingV2[],
-          nextCursor: null,
+          // Keep the failed cursor on transient errors so Retry fetches the
+          // failed page without discarding previously loaded pages.
+          nextCursor: unsupported ? null : cursor,
           error: unsupported
             ? undefined
             : String((err as Error)?.message ?? err),

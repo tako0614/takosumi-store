@@ -29,8 +29,21 @@ const S = {
   resultsCount: { ja: "件表示", en: "shown" },
   all: { ja: "すべて", en: "All" },
   apps: { ja: "アプリ", en: "Apps" },
+  allApps: { ja: "すべてのアプリ", en: "All apps" },
   recentlyAdded: { ja: "新着・更新", en: "Recently updated" },
   loadMore: { ja: "もっと見る", en: "Load more" },
+  loadMoreMatches: {
+    ja: "さらに読み込んで検索",
+    en: "Load more to search",
+  },
+  partialResultsHint: {
+    ja: "読み込み済みのアプリから表示しています。",
+    en: "Showing matches from loaded apps so far.",
+  },
+  loadMoreFailed: {
+    ja: "続きを読み込めませんでした。",
+    en: "Couldn’t load more apps.",
+  },
   loading: { ja: "読み込み中…", en: "Loading…" },
   noResults: {
     ja: "該当する Capsule がありません",
@@ -108,6 +121,10 @@ const S = {
   tagsHint: {
     ja: "Enter かカンマで追加。自由に付けられます。",
     en: "Press Enter or comma to add. Free-form.",
+  },
+  tagsLimitReached: {
+    ja: "タグは最大 8 件まで追加できます。",
+    en: "Up to 8 tags maximum.",
   },
   tagsPlaceholder: {
     ja: "例: social, activitypub",
@@ -190,6 +207,9 @@ const S = {
   updateAction: { ja: "更新する", en: "Save changes" },
   refreshVersion: { ja: "最新コミットに更新", en: "Update to latest commit" },
   refreshing: { ja: "更新中…", en: "Updating…" },
+  unpublishing: { ja: "非公開にしています…", en: "Unpublishing…" },
+  republishing: { ja: "公開しています…", en: "Republishing…" },
+  deleting: { ja: "削除中…", en: "Deleting…" },
   refreshed: { ja: "更新しました", en: "Updated" },
   unpublished: { ja: "非公開にしました", en: "Unlisted" },
   republished: { ja: "公開しました", en: "Published" },
@@ -211,6 +231,15 @@ const S = {
   readme: { ja: "README", en: "README" },
   readmeFrom: { ja: "リポジトリの README", en: "From the repository README" },
   actionFailed: { ja: "操作に失敗しました", en: "That action failed" },
+  // theme toggle (label describes the target theme)
+  switchToLight: {
+    ja: "ライトモードに切り替え",
+    en: "Switch to light mode",
+  },
+  switchToDark: {
+    ja: "ダークモードに切り替え",
+    en: "Switch to dark mode",
+  },
   // language switcher (label is shown in the *target* language)
   switchLanguage: { ja: "English", en: "日本語" },
   switchLanguageLabel: {
@@ -234,6 +263,15 @@ const S = {
     ja: "非公開・削除されたか、URL が間違っている可能性があります。",
     en: "It may have been unlisted or removed, or the URL is wrong.",
   },
+  editNotFoundTitle: {
+    ja: "編集対象のリポジトリが見つかりません",
+    en: "Repository listing not found",
+  },
+  editNotFoundHint: {
+    ja: "削除されたか、このアカウントで管理できないリポジトリです。",
+    en: "It may have been deleted or doesn’t belong to this account.",
+  },
+  backToManage: { ja: "管理一覧へ戻る", en: "Back to Manage" },
   browseCatalog: { ja: "アプリ一覧へ", en: "Browse apps" },
   emptyCatalogTitle: {
     ja: "まだ Capsule が公開されていません",

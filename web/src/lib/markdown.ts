@@ -1,3 +1,5 @@
+import type { Locale } from "../../../spec/api.ts";
+
 /**
  * Minimal, dependency-free Markdown → HTML renderer for README display.
  *
@@ -173,6 +175,8 @@ function alignAttr(align: TableAlign | undefined): string {
 export interface RenderMarkdownOptions {
   /** Shift heading levels downward (clamped to h6) to preserve page outline. */
   readonly headingOffset?: number;
+  /** Locale for screen-reader task-list status labels (defaults to `"en"`). */
+  readonly locale?: Locale;
 }
 
 export function renderMarkdown(
@@ -299,7 +303,15 @@ export function renderMarkdown(
       const task = ul ? /^\[([ xX])\]\s+(.*)$/.exec(rawItem) : null;
       if (task) {
         const checked = task[1]!.toLowerCase() === "x";
-        const statusText = checked ? "Completed: " : "Not completed: ";
+        const loc = opts?.locale ?? "en";
+        const statusText =
+          loc === "ja"
+            ? checked
+              ? "完了: "
+              : "未完了: "
+            : checked
+              ? "Completed: "
+              : "Not completed: ";
         html.push(
           `<li class="md-task"><input type="checkbox" class="md-task-box" disabled${checked ? " checked" : ""} aria-hidden="true" tabindex="-1" /><span class="sr-only">${statusText}</span><span>${renderInline(escapeHtml(task[2]!.trim()), source)}</span></li>`,
         );

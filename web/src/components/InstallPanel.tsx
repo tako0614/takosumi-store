@@ -21,6 +21,9 @@ export const InstallPanel: Component<{
   const [copyStatus, setCopyStatus] = createSignal<"" | "copied" | "failed">(
     "",
   );
+  let originInputRef: HTMLInputElement | undefined;
+  let openLinkRef: HTMLAnchorElement | undefined;
+  let changeBtnRef: HTMLButtonElement | undefined;
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   const clearCopyStatus = () => {
     if (copyTimer) {
@@ -41,6 +44,7 @@ export const InstallPanel: Component<{
     setDraft(origin());
     setOriginErr("");
     setEditing(false);
+    queueMicrotask(() => changeBtnRef?.focus());
   };
 
   const saveOrigin = (e: Event) => {
@@ -52,8 +56,10 @@ export const InstallPanel: Component<{
       setDraft(normalized);
       setOriginErr("");
       setEditing(false);
+      queueMicrotask(() => openLinkRef?.focus());
     } else {
       setOriginErr(t("invalidOriginError", props.locale));
+      queueMicrotask(() => originInputRef?.focus());
     }
   };
 
@@ -91,6 +97,7 @@ export const InstallPanel: Component<{
             <label for="takos-origin">{t("whereInstall", props.locale)}</label>
             <div class="install-origin-row">
               <input
+                ref={originInputRef}
                 id="takos-origin"
                 type="url"
                 value={draft()}
@@ -137,6 +144,7 @@ export const InstallPanel: Component<{
       >
         <div class="install-actions">
           <a
+            ref={openLinkRef}
             class="btn btn-primary btn-lg"
             href={installUrl()}
             target="_blank"
@@ -156,6 +164,7 @@ export const InstallPanel: Component<{
           </span>
           <span class="install-target-origin mono">{origin()}</span>
           <button
+            ref={changeBtnRef}
             type="button"
             class="btn btn-ghost btn-sm install-change-btn"
             onClick={() => {
@@ -163,6 +172,10 @@ export const InstallPanel: Component<{
               setDraft(origin());
               setOriginErr("");
               setEditing(true);
+              queueMicrotask(() => {
+                originInputRef?.focus();
+                originInputRef?.select();
+              });
             }}
           >
             {t("change", props.locale)}
