@@ -3,6 +3,7 @@ import {
   createSignal,
   createUniqueId,
   For,
+  on,
   onCleanup,
   Show,
   type Component,
@@ -142,6 +143,16 @@ export const TopBar: Component = () => {
     if (logoutErrTimer) clearTimeout(logoutErrTimer);
   });
 
+  createEffect(
+    on(
+      () => route.pathname,
+      () => {
+        setThemeMenuOpen(false);
+      },
+      { defer: true },
+    ),
+  );
+
   createEffect(() => {
     if (!themeMenuOpen()) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -149,8 +160,18 @@ export const TopBar: Component = () => {
         setThemeMenuOpen(false);
       }
     };
+    const onFocusIn = (e: FocusEvent) => {
+      if (!themeWrapRef?.contains(e.target as Node)) {
+        setThemeMenuOpen(false);
+      }
+    };
     const onWindowKeyDown = (e: KeyboardEvent) => {
       if (e.isComposing || e.keyCode === 229) return;
+      if (!themeWrapRef?.contains(document.activeElement)) {
+        setThemeMenuOpen(false);
+        return;
+      }
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") {
         e.preventDefault();
         setThemeMenuOpen(false);
@@ -158,9 +179,11 @@ export const TopBar: Component = () => {
       }
     };
     document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("focusin", onFocusIn);
     window.addEventListener("keydown", onWindowKeyDown);
     onCleanup(() => {
       document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("focusin", onFocusIn);
       window.removeEventListener("keydown", onWindowKeyDown);
     });
   });
@@ -302,6 +325,10 @@ export const TopBar: Component = () => {
                   onKeyDown={(e) => {
                     if (e.isComposing || e.keyCode === 229) return;
                     if (e.key === "Tab") {
+                      // Return focus to the trigger before unmounting the menu
+                      // so native Tab / Shift+Tab advances from the button
+                      // instead of resetting to <body>.
+                      themeBtnRef?.focus({ preventScroll: true });
                       setThemeMenuOpen(false);
                       return;
                     }
@@ -337,6 +364,7 @@ export const TopBar: Component = () => {
                         }}
                         type="button"
                         role="menuitemradio"
+                        tabIndex={-1}
                         aria-checked={themePreference() === opt}
                         class="theme-menu-item"
                         classList={{ active: themePreference() === opt }}

@@ -49,9 +49,15 @@ import { navTracker, setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
+import type { Locale } from "../../../spec/api.ts";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 const MAX_TAGS = 8;
+
+type LocaleTouched = { readonly ja: boolean; readonly en: boolean };
+const UNTOUCHED_LOCALES: LocaleTouched = { ja: false, en: false };
+const ALL_TOUCHED_LOCALES: LocaleTouched = { ja: true, en: true };
+const otherLocale = (loc: Locale): Locale => (loc === "ja" ? "en" : "ja");
 
 const PublishSkeleton: Component = () => (
   <div class="publish-skel" aria-busy="true">
@@ -134,13 +140,31 @@ export const PublishPage: Component = () => {
   let tagInputRef: HTMLInputElement | undefined;
 
   // Touched flags for calm, non-nagging inline field validation.
+  // Keyed by underlying locale (`ja`/`en`) for bilingual fields so switching
+  // the UI language preserves error visibility on the same value.
   const [gitTouched, setGitTouched] = createSignal(false);
-  const [nameTouched, setNameTouched] = createSignal(false);
+  const [nameTouched, setNameTouched] =
+    createSignal<LocaleTouched>(UNTOUCHED_LOCALES);
   const [logoTouched, setLogoTouched] = createSignal(false);
   const [slugTouched, setSlugTouched] = createSignal(false);
-  const [descTouched, setDescTouched] = createSignal(false);
-  const [altNameTouched, setAltNameTouched] = createSignal(false);
-  const [altDescTouched, setAltDescTouched] = createSignal(false);
+  const [descTouched, setDescTouched] =
+    createSignal<LocaleTouched>(UNTOUCHED_LOCALES);
+
+  const touchPrimaryLocale = (
+    draft: LocalizedDraft,
+    setter: (fn: (prev: LocaleTouched) => LocaleTouched) => void,
+  ) => {
+    const loc = locale();
+    setter((prev) =>
+      draft.split ? { ...prev, [loc]: true } : ALL_TOUCHED_LOCALES,
+    );
+  };
+  const touchSecondaryLocale = (
+    setter: (fn: (prev: LocaleTouched) => LocaleTouched) => void,
+  ) => {
+    const alt = otherLocale(locale());
+    setter((prev) => ({ ...prev, [alt]: true }));
+  };
 
   const repoName = (): string => repoNameFromGitUrl(git());
   const resolvedName = () => resolveLocalized(nameDraft(), repoName());
@@ -155,16 +179,17 @@ export const PublishPage: Component = () => {
     return "";
   };
   const nameErr = (): string => {
-    if (!nameTouched()) return "";
-    return validateNameLength(primaryText(nameDraft(), locale())) === "too_long"
-      ? t("nameTooLong", locale())
+    const loc = locale();
+    if (!nameTouched()[loc]) return "";
+    return validateNameLength(primaryText(nameDraft(), loc)) === "too_long"
+      ? t("nameTooLong", loc)
       : "";
   };
   const altNameErr = (): string => {
-    if (!altNameTouched()) return "";
-    return validateNameLength(secondaryText(nameDraft(), locale())) ===
-      "too_long"
-      ? t("nameTooLong", locale())
+    const loc = locale();
+    if (!nameTouched()[otherLocale(loc)]) return "";
+    return validateNameLength(secondaryText(nameDraft(), loc)) === "too_long"
+      ? t("nameTooLong", loc)
       : "";
   };
   const logoErr = (): string => {
@@ -182,17 +207,19 @@ export const PublishPage: Component = () => {
     return "";
   };
   const descErr = (): string => {
-    if (!descTouched()) return "";
-    return validateDescriptionLength(primaryText(descDraft(), locale())) ===
+    const loc = locale();
+    if (!descTouched()[loc]) return "";
+    return validateDescriptionLength(primaryText(descDraft(), loc)) ===
       "too_long"
-      ? t("descriptionTooLong", locale())
+      ? t("descriptionTooLong", loc)
       : "";
   };
   const altDescErr = (): string => {
-    if (!altDescTouched()) return "";
-    return validateDescriptionLength(secondaryText(descDraft(), locale())) ===
+    const loc = locale();
+    if (!descTouched()[otherLocale(loc)]) return "";
+    return validateDescriptionLength(secondaryText(descDraft(), loc)) ===
       "too_long"
-      ? t("descriptionTooLong", locale())
+      ? t("descriptionTooLong", loc)
       : "";
   };
 
@@ -241,12 +268,10 @@ export const PublishPage: Component = () => {
     setErrors([]);
     setQuotaErr(false);
     setGitTouched(false);
-    setNameTouched(false);
+    setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
     setSlugTouched(false);
-    setDescTouched(false);
-    setAltNameTouched(false);
-    setAltDescTouched(false);
+    setDescTouched(UNTOUCHED_LOCALES);
     setAdvOpen(false);
   };
   createEffect(() => {
@@ -274,12 +299,10 @@ export const PublishPage: Component = () => {
     setErrors([]);
     setQuotaErr(false);
     setGitTouched(false);
-    setNameTouched(false);
+    setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
     setSlugTouched(false);
-    setDescTouched(false);
-    setAltNameTouched(false);
-    setAltDescTouched(false);
+    setDescTouched(UNTOUCHED_LOCALES);
     setAdvOpen(
       Boolean(
         (l.tags ?? []).length > 0 ||
@@ -339,12 +362,10 @@ export const PublishPage: Component = () => {
       : null;
     if (editId() && !existing) return;
     setGitTouched(true);
-    setNameTouched(true);
+    setNameTouched(ALL_TOUCHED_LOCALES);
     setLogoTouched(true);
     setSlugTouched(true);
-    setDescTouched(true);
-    setAltNameTouched(true);
-    setAltDescTouched(true);
+    setDescTouched(ALL_TOUCHED_LOCALES);
     const firstInvalid = gitErr()
       ? { id: "publish-git", adv: false }
       : nameErr()
@@ -625,7 +646,9 @@ export const PublishPage: Component = () => {
                                 ),
                               )
                             }
-                            onBlur={() => setNameTouched(true)}
+                            onBlur={() =>
+                              touchPrimaryLocale(nameDraft(), setNameTouched)
+                            }
                             placeholder={
                               secondaryText(nameDraft(), locale()).trim() ||
                               repoName() ||
@@ -818,7 +841,9 @@ export const PublishPage: Component = () => {
                                   ),
                                 )
                               }
-                              onBlur={() => setDescTouched(true)}
+                              onBlur={() =>
+                                touchPrimaryLocale(descDraft(), setDescTouched)
+                              }
                               rows={3}
                             />
                             <Show when={descErr()}>
@@ -863,7 +888,9 @@ export const PublishPage: Component = () => {
                                     ),
                                   )
                                 }
-                                onBlur={() => setAltNameTouched(true)}
+                                onBlur={() =>
+                                  touchSecondaryLocale(setNameTouched)
+                                }
                                 placeholder={
                                   primaryText(nameDraft(), locale()).trim() ||
                                   repoName() ||
@@ -907,7 +934,9 @@ export const PublishPage: Component = () => {
                                     ),
                                   )
                                 }
-                                onBlur={() => setAltDescTouched(true)}
+                                onBlur={() =>
+                                  touchSecondaryLocale(setDescTouched)
+                                }
                                 placeholder={
                                   primaryText(descDraft(), locale()).trim() ||
                                   t("previewFallbackDesc", locale())

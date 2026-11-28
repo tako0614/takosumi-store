@@ -160,6 +160,9 @@ describe("PublishPage slug derivation and text length validation", () => {
     ).toBe("");
 
     expect(slugify("  My Cool_App!!  ")).toBe("my-cool-app");
+    // 48-char truncation must strip any trailing hyphen left at position 47.
+    expect(slugify(`${"a".repeat(47)} b`)).toBe("a".repeat(47));
+    expect(slugify(`${"a".repeat(47)} b`).endsWith("-")).toBe(false);
   });
 
   test("validates name and description maximum lengths matching backend bounds", () => {

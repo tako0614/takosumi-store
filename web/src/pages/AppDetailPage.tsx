@@ -102,6 +102,7 @@ export const AppDetailPage: Component = () => {
   >("");
   let mdRef: HTMLDivElement | undefined;
   let gitCopyTimer: ReturnType<typeof setTimeout> | undefined;
+  let pageDisposed = false;
 
   const clearGitCopyStatus = () => {
     if (gitCopyTimer !== undefined) {
@@ -117,26 +118,30 @@ export const AppDetailPage: Component = () => {
   });
 
   onCleanup(() => {
+    pageDisposed = true;
     if (gitCopyTimer !== undefined) clearTimeout(gitCopyTimer);
   });
 
   const copyGitUrl = async (gitUrl: string) => {
+    const targetId = id();
     if (gitCopyTimer !== undefined) {
       clearTimeout(gitCopyTimer);
       gitCopyTimer = undefined;
     }
     try {
       await navigator.clipboard.writeText(gitUrl);
+      if (pageDisposed || id() !== targetId) return;
       setGitCopyStatus("copied");
       gitCopyTimer = setTimeout(() => {
         gitCopyTimer = undefined;
-        setGitCopyStatus("");
+        if (!pageDisposed && id() === targetId) setGitCopyStatus("");
       }, 2000);
     } catch {
+      if (pageDisposed || id() !== targetId) return;
       setGitCopyStatus("failed");
       gitCopyTimer = setTimeout(() => {
         gitCopyTimer = undefined;
-        setGitCopyStatus("");
+        if (!pageDisposed && id() === targetId) setGitCopyStatus("");
       }, 3000);
     }
   };
