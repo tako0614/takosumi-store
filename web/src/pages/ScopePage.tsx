@@ -11,6 +11,7 @@ import { locale } from "../appstate.ts";
 import { homeBase } from "../lib/servers.ts";
 import { fetchListingsPage } from "../lib/tcs-client.ts";
 import { t } from "../lib/i18n.ts";
+import { setPageTitle } from "../lib/nav-history.ts";
 import { AppCard } from "../components/AppCard.tsx";
 import { BackLink } from "../components/BackLink.tsx";
 import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
@@ -45,9 +46,10 @@ export const ScopePage: Component = () => {
 
   createEffect(() => {
     const label = publisherDisplayName() || params.scope;
-    document.title = label
-      ? `${label} — ${t("appName", locale())}`
-      : t("appName", locale());
+    setPageTitle(
+      label ? `${label} — ${t("appName", locale())}` : t("appName", locale()),
+      page.loading,
+    );
   });
 
   return (

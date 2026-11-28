@@ -31,6 +31,7 @@ import {
 } from "../lib/publish-validation.ts";
 import { fetchListingByScopeSlug } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
+import { navTracker, setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
@@ -54,7 +55,7 @@ export const PublishPage: Component = () => {
     const heading = editId()
       ? t("editApp", locale())
       : t("publishApp", locale());
-    document.title = `${heading} — ${t("appName", locale())}`;
+    setPageTitle(`${heading} — ${t("appName", locale())}`);
   });
 
   const [handleDraft, setHandleDraft] = createSignal("");
@@ -222,11 +223,22 @@ export const PublishPage: Component = () => {
     setBusy(false);
     if (res.ok) {
       invalidateListings();
-      // Replace the form entry so "Back" never returns to a submitted form.
-      navigate(
-        existing ? "/manage" : `/${res.listing.scope}/${res.listing.slug}`,
-        { replace: true },
-      );
+      if (existing) {
+        // When edit was opened from /manage, pop back so we don't leave a
+        // duplicate /manage entry in browser history.
+        const delta = navTracker.backDelta();
+        if (delta < 0 && navTracker.previousPathname() === "/manage") {
+          if (delta === -1) history.back();
+          else history.go(delta);
+        } else {
+          navigate("/manage", { replace: true });
+        }
+      } else {
+        // Replace the form entry so "Back" never returns to a submitted form.
+        navigate(`/${res.listing.scope}/${res.listing.slug}`, {
+          replace: true,
+        });
+      }
     } else if (res.status === 429) {
       setErrors([t("quotaReached", locale())]);
     } else {

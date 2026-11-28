@@ -1,24 +1,165 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   createNavTracker,
+  createRouteAnnouncer,
   focusMainAfterNavigation,
 } from "../web/src/lib/nav-history.ts";
 import { listMine } from "../web/src/lib/publish-client.ts";
 import { t, type StringKey } from "../web/src/lib/i18n.ts";
 
 describe("nav tracker (Back link history awareness)", () => {
-  test("only reports an in-app previous entry after a push navigation", () => {
-    const nav = createNavTracker();
-    expect(nav.canGoBack()).toBe(false); // deep link / first load
-    nav.onRouteChange(false); // home -> detail (push)
-    expect(nav.canGoBack()).toBe(true);
-    nav.onRouteChange(false); // detail -> scope (push)
-    nav.onRouteChange(true); // browser back
-    expect(nav.canGoBack()).toBe(true);
-    nav.onRouteChange(true); // back to the entry page
+  test("back-to-entry stops at depth 0 so BackLink never leaves the store", () => {
+    // Deep link to /takos -> push /takos/yurucommu -> pop back to /takos.
+    const nav = createNavTracker("/takos");
     expect(nav.canGoBack()).toBe(false);
-    nav.onRouteChange(true); // forward-pop never goes negative
+    expect(nav.backDelta()).toBe(0);
+    expect(nav.previousPathname()).toBeNull();
+
+    nav.onBeforeLeave({ to: "/takos/yurucommu", options: { replace: false } });
+    expect(nav.canGoBack()).toBe(true);
+    expect(nav.backDelta()).toBe(-1);
+    expect(nav.previousPathname()).toBe("/takos");
+
+    // Browser Back / BackLink history.back() reports delta -1.
+    nav.onBeforeLeave({ to: -1 });
     expect(nav.canGoBack()).toBe(false);
+    expect(nav.backDelta()).toBe(0);
+    expect(nav.previousPathname()).toBeNull();
+
+    // Extra negative deltas clamp at 0.
+    nav.onBeforeLeave({ to: -2 });
+    expect(nav.canGoBack()).toBe(false);
+    expect(nav.backDelta()).toBe(0);
+  });
+
+  test("same-pathname hash push + pop keeps the next forward push intact", () => {
+    // /?q=yuru -> #main -> browser Back -> /takos/yurucommu -> BackLink keeps ?q=yuru.
+    const nav = createNavTracker("/?q=yuru");
+    nav.onBeforeLeave({ to: "/?q=yuru#main", options: { replace: false } });
+    // Still on the entry pathname, so BackLink does not pop to the same page.
+    expect(nav.canGoBack()).toBe(false);
+    expect(nav.backDelta()).toBe(0);
+
+    // Browser Back pops the #main entry cleanly.
+    nav.onBeforeLeave({ to: -1 });
+    expect(nav.canGoBack()).toBe(false);
+
+    // Navigating forward to detail pushes above /?q=yuru (no stale pop flag).
+    nav.onBeforeLeave({ to: "/takos/yurucommu", options: { replace: false } });
+    expect(nav.canGoBack()).toBe(true);
+    expect(nav.backDelta()).toBe(-1);
+    expect(nav.previousPathname()).toBe("/");
+  });
+
+  test("skip-link / in-page hash jump skips over same-page entries on backDelta", () => {
+    const nav = createNavTracker("/");
+    nav.onBeforeLeave({ to: "/takos/yurucommu", options: { replace: false } });
+    nav.onBeforeLeave({
+      to: "/takos/yurucommu#main",
+      options: { replace: false },
+    });
+    expect(nav.canGoBack()).toBe(true);
+    expect(nav.backDelta()).toBe(-2);
+    expect(nav.previousPathname()).toBe("/");
+
+    nav.onBeforeLeave({ to: -2 });
+    expect(nav.canGoBack()).toBe(false);
+  });
+
+  test("replace navigation from depth 0 never inflates depth (direct / OIDC publish)", () => {
+    const nav = createNavTracker("/publish");
+    expect(nav.canGoBack()).toBe(false);
+
+    // PublishPage redirects with { replace: true } after creating a listing.
+    nav.onBeforeLeave({ to: "/takos/new-app", options: { replace: true } });
+    expect(nav.canGoBack()).toBe(false);
+    expect(nav.backDelta()).toBe(0);
+
+    // Catalog query filter updates also use replace and must not inflate depth.
+    nav.reset("/");
+    nav.onBeforeLeave({ to: "/?q=hello", options: { replace: true } });
+    expect(nav.canGoBack()).toBe(false);
+  });
+
+  test("edit from /manage recognizes previousPathname === /manage and avoids duplicate entries", () => {
+    const nav = createNavTracker("/");
+    nav.onBeforeLeave({ to: "/manage", options: { replace: false } });
+    nav.onBeforeLeave({
+      to: "/publish?edit=takos/yurucommu",
+      options: { replace: false },
+    });
+    expect(nav.previousPathname()).toBe("/manage");
+    expect(nav.backDelta()).toBe(-1);
+
+    // Saving pops back to /manage instead of pushing/replacing a duplicate.
+    nav.onBeforeLeave({ to: -1 });
+    expect(nav.canGoBack()).toBe(true);
+    expect(nav.previousPathname()).toBe("/");
+    expect(nav.backDelta()).toBe(-1);
+
+    // Clicking BackLink once on /manage returns directly to /.
+    nav.onBeforeLeave({ to: -1 });
+    expect(nav.canGoBack()).toBe(false);
+  });
+
+  test("ignores prevented leaves and supports forward pops back into recorded history", () => {
+    const nav = createNavTracker("/");
+    nav.onBeforeLeave({
+      to: "/takos",
+      options: { replace: false },
+      defaultPrevented: true,
+    });
+    expect(nav.canGoBack()).toBe(false);
+
+    nav.onBeforeLeave({ to: "/takos", options: { replace: false } });
+    nav.onBeforeLeave({ to: -1 });
+    expect(nav.canGoBack()).toBe(false);
+
+    nav.onBeforeLeave({ to: 1 });
+    expect(nav.canGoBack()).toBe(true);
+    expect(nav.previousPathname()).toBe("/");
+  });
+});
+
+describe("route title announcer", () => {
+  test("does not announce on initial load or while a route title is still pending", () => {
+    const announcer = createRouteAnnouncer();
+    const seen: string[] = [];
+    announcer.subscribe((msg) => seen.push(msg));
+
+    // Initial load reports title without beginNavigation() -> silent.
+    announcer.reportTitle("Takosumi Store");
+    expect(seen).toEqual([]);
+
+    // Navigate to an uncached detail page -> clears, waits through pending state,
+    // then announces the resolved title once ready.
+    announcer.beginNavigation();
+    announcer.reportTitle("Takosumi Store", true);
+    expect(seen).toEqual([""]);
+
+    announcer.reportTitle("Yurucommu — Takosumi Store", false);
+    expect(seen).toEqual(["", "Yurucommu — Takosumi Store"]);
+
+    // Subsequent language toggle on the same route does not re-announce.
+    announcer.reportTitle("Yurucommu — Takosumi ストア", false);
+    expect(seen).toEqual(["", "Yurucommu — Takosumi Store"]);
+  });
+
+  test("announces lazy routes whenever they finish mounting", () => {
+    const announcer = createRouteAnnouncer();
+    const seen: string[] = [];
+    const unsubscribe = announcer.subscribe((msg) => seen.push(msg));
+
+    announcer.beginNavigation();
+    expect(seen).toEqual([""]);
+    // Lazy chunk resolves later and reports its title.
+    announcer.reportTitle("My listings — Takosumi Store");
+    expect(seen).toEqual(["", "My listings — Takosumi Store"]);
+
+    unsubscribe();
+    announcer.beginNavigation();
+    announcer.reportTitle("Takosumi Store");
+    expect(seen).toEqual(["", "My listings — Takosumi Store"]);
   });
 });
 

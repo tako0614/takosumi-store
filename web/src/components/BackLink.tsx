@@ -29,7 +29,9 @@ export const BackLink: Component<{ href?: string }> = (props) => {
           return;
         }
         e.preventDefault();
-        if (navTracker.canGoBack()) history.back();
+        const delta = navTracker.backDelta();
+        if (delta === -1) history.back();
+        else if (delta < 0) history.go(delta);
         else navigate(href());
       }}
     >

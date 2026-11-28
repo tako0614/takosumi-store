@@ -20,6 +20,7 @@ import {
 } from "../appstate.ts";
 import { filterCatalog, normalizeCatalogSort } from "../lib/catalog-filter.ts";
 import { tagLabel, t } from "../lib/i18n.ts";
+import { setPageTitle } from "../lib/nav-history.ts";
 import { AppCard } from "../components/AppCard.tsx";
 import { CategoryShelf } from "../components/CategoryShelf.tsx";
 import { EmptyState, ErrorState, SkeletonGrid } from "../components/states.tsx";
@@ -85,7 +86,7 @@ export const HomePage: Component = () => {
   });
 
   createEffect(() => {
-    document.title = t("appName", locale());
+    setPageTitle(t("appName", locale()));
   });
 
   createEffect(() => {

@@ -19,6 +19,7 @@ import {
 } from "../lib/tcs-client.ts";
 import { homeBase } from "../lib/servers.ts";
 import { renderMarkdown } from "../lib/markdown.ts";
+import { setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
 import { InstallPanel } from "../components/InstallPanel.tsx";
@@ -78,9 +79,10 @@ export const AppDetailPage: Component = () => {
         : fetchFailed()
           ? t("errorTitle", loc)
           : "";
-    document.title = label
-      ? `${label} — ${t("appName", loc)}`
-      : t("appName", loc);
+    setPageTitle(
+      label ? `${label} — ${t("appName", loc)}` : t("appName", loc),
+      resolving(),
+    );
   });
 
   // README from the source repo — registry-grade detail. Fetched lazily once

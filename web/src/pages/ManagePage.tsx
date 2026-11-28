@@ -21,6 +21,7 @@ import {
 } from "../lib/publish-client.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { BackLink } from "../components/BackLink.tsx";
+import { setPageTitle } from "../lib/nav-history.ts";
 import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
 
@@ -51,7 +52,7 @@ export const ManagePage: Component = () => {
   });
 
   createEffect(() => {
-    document.title = `${t("myListings", locale())} — ${t("appName", locale())}`;
+    setPageTitle(`${t("myListings", locale())} — ${t("appName", locale())}`);
   });
 
   async function run(

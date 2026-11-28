@@ -1452,6 +1452,7 @@ main:focus {
   .back-link,
   .brand,
   .detail-repo-link,
+  .readme-src .linklike,
   .results-bar .linklike {
     min-height: 44px;
   }
@@ -1486,9 +1487,28 @@ main:focus {
   .install-change-btn {
     min-height: 44px;
   }
-  .results-bar .linklike {
+  .results-bar .linklike,
+  .readme-src .linklike {
     display: inline-flex;
     align-items: center;
+  }
+  .readme-src {
+    margin-top: 6px;
+  }
+  .detail-developer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 0;
+  }
+  .detail-developer .linklike {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding-right: 5px;
+  }
+  .detail-developer .detail-id-sep {
+    margin-left: 0;
   }
   .shelf-nav-btn {
     width: 44px;
@@ -1507,6 +1527,9 @@ main:focus {
   .field select,
   .install-origin input {
     height: 48px;
+  }
+  .tag-input {
+    row-gap: 10px;
   }
   .field .tag-input input.tag-entry {
     height: 36px;

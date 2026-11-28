@@ -8,7 +8,7 @@ import {
   type Component,
   type ParentComponent,
 } from "solid-js";
-import { Route, Router, useLocation } from "@solidjs/router";
+import { Route, Router, useBeforeLeave, useLocation } from "@solidjs/router";
 import { TopBar } from "./components/TopBar.tsx";
 import { HomePage } from "./pages/HomePage.tsx";
 import { AppDetailPage } from "./pages/AppDetailPage.tsx";
@@ -16,7 +16,11 @@ import { ScopePage } from "./pages/ScopePage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
 import { loadAccount, locale } from "./appstate.ts";
 import { t } from "./lib/i18n.ts";
-import { focusMainAfterNavigation, navTracker } from "./lib/nav-history.ts";
+import {
+  focusMainAfterNavigation,
+  navTracker,
+  routeAnnouncer,
+} from "./lib/nav-history.ts";
 
 const PublishPage = lazy(async () => ({
   default: (await import("./pages/PublishPage.tsx")).PublishPage,
@@ -28,21 +32,39 @@ const ManagePage = lazy(async () => ({
 const Layout: ParentComponent = (props) => {
   const location = useLocation();
   const [routeAnnouncement, setRouteAnnouncement] = createSignal("");
-  let popped = false;
   let cancelFocus: (() => void) | undefined;
-  let announceTimer: ReturnType<typeof setTimeout> | undefined;
+  let announceFrame: number | undefined;
+
+  navTracker.reset(location.pathname + location.search + location.hash);
+  useBeforeLeave((e) => {
+    navTracker.onBeforeLeave(e);
+  });
+
+  const unsubscribeAnnouncer = routeAnnouncer.subscribe((text) => {
+    if (announceFrame !== undefined) {
+      cancelAnimationFrame(announceFrame);
+      announceFrame = undefined;
+    }
+    if (!text) {
+      setRouteAnnouncement("");
+      return;
+    }
+    // Clear first and write on the next frame so screen readers always detect
+    // the live-region update even when two routes share the same title.
+    setRouteAnnouncement("");
+    announceFrame = requestAnimationFrame(() => {
+      announceFrame = undefined;
+      setRouteAnnouncement(text);
+    });
+  });
 
   onMount(() => {
     void loadAccount();
-    const onPop = () => {
-      popped = true;
-    };
-    window.addEventListener("popstate", onPop);
-    onCleanup(() => window.removeEventListener("popstate", onPop));
   });
   onCleanup(() => {
+    unsubscribeAnnouncer();
     cancelFocus?.();
-    if (announceTimer) clearTimeout(announceTimer);
+    if (announceFrame !== undefined) cancelAnimationFrame(announceFrame);
   });
 
   createEffect(() => {
@@ -50,23 +72,15 @@ const Layout: ParentComponent = (props) => {
   });
 
   // On client-side route changes (not query-only filter updates), move focus to
-  // the new page's <main> and announce its title, so keyboard and screen-reader
-  // users land on the new content instead of a lost focus on <body>.
+  // the new page's <main> and arm the route announcer so it reads the settled
+  // page title once the route (including lazy chunks and async fetches) loads.
   createEffect(
     on(
       () => location.pathname,
       () => {
-        navTracker.onRouteChange(popped);
-        popped = false;
         cancelFocus?.();
         cancelFocus = focusMainAfterNavigation();
-        if (announceTimer) clearTimeout(announceTimer);
-        setRouteAnnouncement("");
-        // Page titles are set by each page's own effect; read it a beat later.
-        announceTimer = setTimeout(
-          () => setRouteAnnouncement(document.title),
-          120,
-        );
+        routeAnnouncer.beginNavigation();
       },
       { defer: true },
     ),
