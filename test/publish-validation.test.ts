@@ -8,19 +8,27 @@ import {
 } from "../web/src/lib/publish-validation.ts";
 
 describe("publish-validation", () => {
-  test("validateGitUrl requires a valid HTTP(S) repository URL without credentials", () => {
+  test("validateGitUrl requires a canonical public HTTPS repository URL without credentials, query, or fragment", () => {
     expect(validateGitUrl("")).toBe("required");
     expect(validateGitUrl("   ")).toBe("required");
     expect(validateGitUrl("not-a-url")).toBe("invalid");
     expect(validateGitUrl("javascript:alert(1)")).toBe("invalid");
+    expect(validateGitUrl("http://github.com/example/app.git")).toBe("invalid");
+    expect(validateGitUrl("http://localhost:3000/org/app")).toBe("invalid");
+    expect(validateGitUrl("https://localhost/org/app")).toBe("invalid");
     expect(validateGitUrl("https://github.com/")).toBe("invalid");
     expect(validateGitUrl("https://user:pass@github.com/org/repo.git")).toBe(
+      "invalid",
+    );
+    expect(
+      validateGitUrl("https://github.com/example/app.git?tab=readme"),
+    ).toBe("invalid");
+    expect(validateGitUrl("https://github.com/example/app#section")).toBe(
       "invalid",
     );
     expect(validateGitUrl("https://github.com/example/takos-storage.git")).toBe(
       null,
     );
-    expect(validateGitUrl("http://localhost:3000/org/app")).toBe(null);
   });
 
   test("validateLogoUrl permits empty or HTTPS URLs without credentials", () => {
@@ -44,9 +52,13 @@ describe("publish-validation", () => {
     expect(validateSlug("a".repeat(49))).toBe("invalid");
   });
 
-  test("validateHandle requires a valid publisher handle", () => {
+  test("validateHandle mirrors the backend publisher handle grammar (2–32 chars, letters/digits/-/_)", () => {
     expect(validateHandle("")).toBe("required");
+    expect(validateHandle("a")).toBe("invalid");
+    expect(validateHandle("-bad")).toBe("invalid");
     expect(validateHandle("takos-team")).toBe(null);
+    expect(validateHandle("tako_dev")).toBe(null);
+    expect(validateHandle("ab")).toBe(null);
     expect(validateHandle("bad handle!")).toBe("invalid");
     expect(validateHandle("a".repeat(33))).toBe("invalid");
   });

@@ -90,8 +90,11 @@ function renderInline(escaped: string, source: URL | undefined): string {
       const href = safeUrl(url, source);
       if (!href) return match;
       const content = label ? restore(renderEmphasis(label)) : href;
+      const externalAttrs = href.startsWith("#")
+        ? ""
+        : ' target="_blank" rel="noopener noreferrer nofollow"';
       return protect(
-        `<a href="${href}" target="_blank" rel="noopener noreferrer nofollow">${image ? "🖼 " : ""}${content}</a>`,
+        `<a href="${href}"${externalAttrs}>${image ? "🖼 " : ""}${content}</a>`,
       );
     },
   );

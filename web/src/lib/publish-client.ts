@@ -1,7 +1,7 @@
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
 
 export interface PublishBody {
-  source: { git: string };
+  source: { git: string; path?: string };
   /** Optional explicit slug; defaults to one derived from suggestedName. */
   slug?: string;
   /** Free-form browse tags; the server derives `category` from tags[0]. */
@@ -21,7 +21,10 @@ export type OwnedListing = ListingV2 & { status: "visible" | "hidden" };
 /** Rebuild the publish body from a listing (for PATCH; setup lives in Git). */
 export function bodyFromListing(l: ListingV2): PublishBody {
   return {
-    source: { git: l.source.git },
+    source: {
+      git: l.source.git,
+      ...(l.source.path ? { path: l.source.path } : {}),
+    },
     ...(l.tags ? { tags: [...l.tags] } : {}),
     ...(l.category ? { category: l.category } : {}),
     suggestedName: l.suggestedName,

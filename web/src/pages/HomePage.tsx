@@ -116,6 +116,8 @@ export const HomePage: Component = () => {
   const facetTags = createMemo(() => {
     const set = new Set<string>();
     for (const it of agg().items) for (const tg of it.tags ?? []) set.add(tg);
+    const active = fTag().trim();
+    if (active) set.add(active);
     return [...set].sort();
   });
 
@@ -317,7 +319,7 @@ export const HomePage: Component = () => {
         </Show>
 
         <Show when={firstLoad()}>
-          <SkeletonGrid count={8} />
+          <SkeletonGrid count={8} label={t("loading", locale())} />
         </Show>
 
         <Show when={!firstLoad() && loadError() && agg().items.length === 0}>

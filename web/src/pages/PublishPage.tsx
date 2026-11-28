@@ -36,6 +36,8 @@ import {
 } from "../lib/publish-localized.ts";
 import {
   deriveAutoSlug,
+  MAX_TAGS,
+  parseTagInput,
   repoNameFromGitUrl,
   slugify,
   validateDescriptionLength,
@@ -44,6 +46,7 @@ import {
   validateLogoUrl,
   validateNameLength,
   validateSlug,
+  type TagFeedbackReason,
 } from "../lib/publish-validation.ts";
 import { navTracker, setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
@@ -51,8 +54,6 @@ import { IconTile } from "../components/IconTile.tsx";
 import { EmptyState, ErrorState } from "../components/states.tsx";
 import type { Locale } from "../../../spec/api.ts";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
-
-const MAX_TAGS = 8;
 
 type LocaleTouched = { readonly ja: boolean; readonly en: boolean };
 const UNTOUCHED_LOCALES: LocaleTouched = { ja: false, en: false };
@@ -78,7 +79,8 @@ const PublishSkeleton: Component = () => (
   </div>
 );
 
-type HandleErrorState = "" | "required" | "invalid" | { server: string };
+type HandleErrorState =
+  "" | "required" | "invalid" | "network" | { server: string };
 
 export const PublishPage: Component = () => {
   const navigate = useNavigate();
@@ -97,6 +99,7 @@ export const PublishPage: Component = () => {
     if (!state) return "";
     if (state === "required") return t("handleRequired", locale());
     if (state === "invalid") return t("handleInvalid", locale());
+    if (state === "network") return t("networkError", locale());
     return state.server;
   };
   const submitHandle = async (e: Event) => {
@@ -113,7 +116,10 @@ export const PublishPage: Component = () => {
     try {
       const r = await setHandle(handleDraft().trim());
       if (r.ok) setMe(r.me);
-      else setHandleErrState({ server: r.message });
+      else
+        setHandleErrState(
+          r.message === "Network error" ? "network" : { server: r.message },
+        );
     } finally {
       setHandleBusy(false);
     }
@@ -130,12 +136,14 @@ export const PublishPage: Component = () => {
   const [slug, setSlug] = createSignal("");
   const [tags, setTags] = createSignal<string[]>([]);
   const [tagDraft, setTagDraft] = createSignal("");
+  const [tagFeedback, setTagFeedback] = createSignal<TagFeedbackReason>("");
   const [descDraft, setDescDraft] = createSignal<LocalizedDraft>(
     emptyLocalizedDraft(),
   );
   const [advOpen, setAdvOpen] = createSignal(false);
   const [errors, setErrors] = createSignal<string[]>([]);
   const [quotaErr, setQuotaErr] = createSignal(false);
+  const [networkErr, setNetworkErr] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   let tagInputRef: HTMLInputElement | undefined;
 
@@ -264,9 +272,11 @@ export const PublishPage: Component = () => {
     setSlug("");
     setTags([]);
     setTagDraft("");
+    setTagFeedback("");
     setDescDraft(emptyLocalizedDraft());
     setErrors([]);
     setQuotaErr(false);
+    setNetworkErr(false);
     setGitTouched(false);
     setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
@@ -295,9 +305,11 @@ export const PublishPage: Component = () => {
     setSlug(l.slug);
     setTags([...(l.tags ?? [])]);
     setTagDraft("");
+    setTagFeedback("");
     setDescDraft(nextDesc);
     setErrors([]);
     setQuotaErr(false);
+    setNetworkErr(false);
     setGitTouched(false);
     setNameTouched(UNTOUCHED_LOCALES);
     setLogoTouched(false);
@@ -313,29 +325,25 @@ export const PublishPage: Component = () => {
     );
   });
 
-  // Free-form tag chips. Mirrors the server normalizer (lowercase slug, ≤8).
-  const normTag = (s: string): string =>
-    s
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 24);
+  // Free-form tag chips. Mirrors the server normalizer (lowercase ASCII slug, ≤8)
+  // and surfaces a brief hint when non-ASCII/duplicate/over-limit tokens are skipped.
   const addTags = (raw: string) => {
-    setTags((prev) => {
-      const next = [...prev];
-      for (const part of raw.split(",")) {
-        const tag = normTag(part);
-        if (tag && !next.includes(tag) && next.length < MAX_TAGS) {
-          next.push(tag);
-        }
-      }
-      return next;
-    });
+    const result = parseTagInput(raw, tags(), MAX_TAGS);
+    setTags(result.next);
+    setTagFeedback(result.feedback);
     setTagDraft("");
   };
-  const removeTag = (tag: string) =>
+  const removeTag = (tag: string) => {
     setTags((prev) => prev.filter((x) => x !== tag));
+    setTagFeedback("");
+  };
+  const tagFeedbackText = (): string => {
+    const reason = tagFeedback();
+    if (reason === "non_ascii") return t("tagsNonAsciiHint", locale());
+    if (reason === "duplicate") return t("tagsDuplicateHint", locale());
+    if (reason === "limit_reached") return t("tagsLimitReached", locale());
+    return "";
+  };
 
   const previewName = () => pick(resolvedName(), locale());
   const previewDesc = () => pick(resolvedDescription(), locale());
@@ -350,7 +358,11 @@ export const PublishPage: Component = () => {
       .join(" · ");
 
   const displayedErrors = () =>
-    quotaErr() ? [t("quotaReached", locale())] : errors();
+    quotaErr()
+      ? [t("quotaReached", locale())]
+      : networkErr()
+        ? [t("networkError", locale())]
+        : errors();
 
   const submit = async (e: Event) => {
     e.preventDefault();
@@ -390,13 +402,14 @@ export const PublishPage: Component = () => {
     setBusy(true);
     setErrors([]);
     setQuotaErr(false);
+    setNetworkErr(false);
     const finalName = resolvedName();
     const finalDesc = resolvedDescription();
     const explicitSlug = slug().trim();
     const suggested = autoSlug() || slugify(explicitSlug);
 
     // In edit mode, start from the existing discovery listing, then overlay the
-    // editable display/source fields. Installer-owned UX is not a listing field.
+    // editable display/source fields while preserving any reviewed module path.
     const base: PublishBody = existing
       ? bodyFromListing(existing)
       : {
@@ -408,7 +421,10 @@ export const PublishPage: Component = () => {
         };
     const body: PublishBody = {
       ...base,
-      source: { git: git().trim() },
+      source: {
+        git: git().trim(),
+        ...(base.source.path ? { path: base.source.path } : {}),
+      },
       ...(!existing && explicitSlug ? { slug: explicitSlug } : {}),
       tags: tags(),
       name: finalName,
@@ -442,6 +458,8 @@ export const PublishPage: Component = () => {
       }
     } else if (res.status === 429) {
       setQuotaErr(true);
+    } else if (res.status === 0) {
+      setNetworkErr(true);
     } else {
       setErrors(res.errors ?? [res.message]);
     }
@@ -489,8 +507,10 @@ export const PublishPage: Component = () => {
                     onSubmit={submitHandle}
                     noValidate
                   >
-                    <label class="field" for="publish-handle">
-                      <span>{t("setHandle", locale())}</span>
+                    <div class="field">
+                      <label for="publish-handle">
+                        {t("setHandle", locale())}
+                      </label>
                       <input
                         ref={handleInputRef}
                         id="publish-handle"
@@ -498,7 +518,9 @@ export const PublishPage: Component = () => {
                         value={handleDraft()}
                         aria-invalid={Boolean(handleErr()) || undefined}
                         aria-describedby={
-                          handleErr() ? "publish-handle-error" : undefined
+                          handleErr()
+                            ? "publish-handle-error publish-handle-hint"
+                            : "publish-handle-hint"
                         }
                         onInput={(e) => {
                           setHandleDraft(e.currentTarget.value);
@@ -507,16 +529,19 @@ export const PublishPage: Component = () => {
                         placeholder={t("handlePlaceholder", locale())}
                         autocomplete="username"
                       />
-                    </label>
-                    <Show when={handleErr()}>
-                      <p
-                        id="publish-handle-error"
-                        class="field-error"
-                        role="alert"
-                      >
-                        {handleErr()}
-                      </p>
-                    </Show>
+                      <Show when={handleErr()}>
+                        <p
+                          id="publish-handle-error"
+                          class="field-error"
+                          role="alert"
+                        >
+                          {handleErr()}
+                        </p>
+                      </Show>
+                      <span id="publish-handle-hint" class="field-hint">
+                        {t("handleHint", locale())}
+                      </span>
+                    </div>
                     <button
                       type="submit"
                       class="btn btn-primary"
@@ -738,7 +763,9 @@ export const PublishPage: Component = () => {
                               </p>
                             </Show>
                             <span id="publish-slug-hint" class="field-hint">
-                              {t("publicIdHint", locale())}
+                              {editId()
+                                ? t("publicIdLockedHint", locale())
+                                : t("publicIdHint", locale())}
                             </span>
                           </div>
 
@@ -784,14 +811,24 @@ export const PublishPage: Component = () => {
                                 name="tags"
                                 class="tag-entry"
                                 value={tagDraft()}
-                                aria-describedby="publish-tags-hint"
-                                onInput={(e) =>
-                                  setTagDraft(e.currentTarget.value)
+                                aria-describedby={
+                                  tagFeedbackText()
+                                    ? "publish-tags-feedback publish-tags-hint"
+                                    : "publish-tags-hint"
                                 }
+                                onInput={(e) => {
+                                  setTagDraft(e.currentTarget.value);
+                                  if (tagFeedback()) setTagFeedback("");
+                                }}
                                 onKeyDown={(e) => {
                                   if (e.isComposing || e.keyCode === 229)
                                     return;
-                                  if (e.key === "Enter" || e.key === ",") {
+                                  if (
+                                    e.key === "Enter" ||
+                                    e.key === "," ||
+                                    e.key === "、" ||
+                                    e.key === "，"
+                                  ) {
                                     e.preventDefault();
                                     addTags(tagDraft());
                                   } else if (
@@ -813,6 +850,18 @@ export const PublishPage: Component = () => {
                                 autocomplete="off"
                               />
                             </div>
+                            <Show when={tagFeedbackText()}>
+                              {(msg) => (
+                                <p
+                                  id="publish-tags-feedback"
+                                  class="tag-feedback"
+                                  role="status"
+                                  aria-live="polite"
+                                >
+                                  {msg()}
+                                </p>
+                              )}
+                            </Show>
                             <span id="publish-tags-hint" class="field-hint">
                               {tags().length >= MAX_TAGS
                                 ? t("tagsLimitReached", locale())

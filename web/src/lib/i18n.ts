@@ -127,6 +127,14 @@ const S = {
     ja: "タグは最大 8 件まで追加できます。",
     en: "Up to 8 tags maximum.",
   },
+  tagsNonAsciiHint: {
+    ja: "タグは半角英数字（a-z, 0-9）で入力してください。",
+    en: "Tags use ASCII letters and numbers (a–z, 0–9).",
+  },
+  tagsDuplicateHint: {
+    ja: "そのタグはすでに追加されています。",
+    en: "That tag is already added.",
+  },
   tagsPlaceholder: {
     ja: "例: social, activitypub",
     en: "e.g. social, activitypub",
@@ -154,8 +162,8 @@ const S = {
     en: "Enter a Git repository URL.",
   },
   gitUrlInvalid: {
-    ja: "https:// または http:// から始まる有効な Git URL を入力してください。",
-    en: "Enter a valid Git URL starting with https:// or http://.",
+    ja: "https:// から始まる公開 Git リポジトリ URL を入力してください（クエリや # は使えません）。",
+    en: "Enter a valid public HTTPS Git URL starting with https:// (no query or fragment).",
   },
   logoUrlInvalid: {
     ja: "ロゴ画像は https:// から始まる有効な URL を入力してください。",
@@ -198,8 +206,12 @@ const S = {
     en: "Enter a handle.",
   },
   handleInvalid: {
-    ja: "ハンドルは半角小文字英数字とハイフン（1〜32文字）で入力してください。",
-    en: "Use lowercase letters, numbers, and hyphens (1–32 characters).",
+    ja: "ハンドルは半角英数字で始まり、2〜32文字（英数字・ハイフン・アンダースコア）で入力してください。",
+    en: "Start with a letter or number and use 2–32 lowercase letters, numbers, hyphens, or underscores.",
+  },
+  handleHint: {
+    ja: "公開 URL のスコープ（handle/slug）になります。半角英数字・ハイフン・アンダースコア（2〜32文字）。",
+    en: "Becomes your public scope in URLs (handle/slug). 2–32 letters, numbers, hyphens, or underscores.",
   },
   slug: { ja: "スラッグ（URL 名・任意）", en: "Slug (URL name, optional)" },
   slugPlaceholder: { ja: "名前から自動生成", en: "auto from the name" },
@@ -207,6 +219,14 @@ const S = {
   publicIdHint: {
     ja: "スコープはあなたのハンドルです。URL は scope/slug になります。",
     en: "The scope is your handle. The URL will be scope/slug.",
+  },
+  publicIdLockedHint: {
+    ja: "公開 ID（scope/slug）は公開後に変更できません。",
+    en: "The public ID (scope/slug) cannot be changed after publishing.",
+  },
+  networkError: {
+    ja: "通信エラーが発生しました。接続を確認して、もう一度お試しください。",
+    en: "Network error. Check your connection and try again.",
   },
   quota: { ja: "公開枠", en: "Listing quota" },
   quotaReached: {

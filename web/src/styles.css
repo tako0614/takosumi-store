@@ -177,7 +177,7 @@ button {
   text-decoration: underline;
 }
 
-:where(a, button, input, select, textarea):focus-visible {
+:where(a, button, input, select, textarea, summary):focus-visible {
   outline: 2px solid var(--tg-accent);
   outline-offset: 2px;
   border-radius: var(--tg-r-sm);
@@ -652,14 +652,22 @@ main:focus {
 .shelf-wrap {
   position: relative;
 }
+.shelf-wrap.has-prev::before,
 .shelf-wrap.has-next::after {
   content: "";
   position: absolute;
   top: 0;
-  right: 0;
   bottom: var(--tg-s-2);
   width: 32px;
   pointer-events: none;
+  z-index: 1;
+}
+.shelf-wrap.has-prev::before {
+  left: 0;
+  background: linear-gradient(to left, transparent, var(--tg-bg));
+}
+.shelf-wrap.has-next::after {
+  right: 0;
   background: linear-gradient(to right, transparent, var(--tg-bg));
 }
 .shelf-title {
@@ -1150,6 +1158,16 @@ main:focus {
 }
 .tag-input:focus-within {
   border-color: var(--tg-accent);
+}
+.tag-input:has(.tag-entry:focus-visible) {
+  outline: 2px solid var(--tg-accent);
+  outline-offset: 1px;
+}
+.tag-feedback {
+  margin: 0;
+  font-size: var(--tg-fs-xs);
+  font-weight: 500;
+  color: var(--tg-accent-text);
 }
 .tag-chip {
   display: inline-flex;
