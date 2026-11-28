@@ -13,6 +13,13 @@ import {
 } from "./lib/aggregate.ts";
 import { getServers } from "./lib/servers.ts";
 import { fetchAccountConfig, fetchMe, type Me } from "./lib/account-client.ts";
+import {
+  readSavedTheme,
+  resolveTheme,
+  saveTheme,
+  systemPrefersLight,
+  type ThemeMode,
+} from "./lib/theme.ts";
 
 function initialLocale(): Locale {
   try {
@@ -30,6 +37,28 @@ function initialLocale(): Locale {
 const [localeSig, setLocaleSig] = createSignal<Locale>(initialLocale());
 export const locale = localeSig;
 
+const [themeOverrideSig, setThemeOverrideSig] = createSignal<ThemeMode | null>(
+  readSavedTheme(),
+);
+const [prefersLightSig, setPrefersLightSig] =
+  createSignal<boolean>(systemPrefersLight());
+export const themeOverride = themeOverrideSig;
+export const theme = (): ThemeMode =>
+  resolveTheme(themeOverrideSig(), prefersLightSig());
+
+export function setTheme(mode: ThemeMode): void {
+  setThemeOverrideSig(mode);
+  saveTheme(mode);
+}
+
+export function toggleTheme(): void {
+  setTheme(theme() === "dark" ? "light" : "dark");
+}
+
+export function syncSystemTheme(prefersLight: boolean): void {
+  setPrefersLightSig(prefersLight);
+}
+
 const freshCatalog = () =>
   initState(getServers(), { sort: "updated", locale: localeSig() });
 const [agg, setAgg] = createSignal<AggregateState>(freshCatalog());
@@ -37,7 +66,8 @@ export { agg };
 
 const [me, setMe] = createSignal<Me | null>(null);
 const [oidcEnabled, setOidcEnabled] = createSignal(false);
-export { me, oidcEnabled, setMe };
+const [accountLoaded, setAccountLoaded] = createSignal(false);
+export { accountLoaded, me, oidcEnabled, setMe };
 
 export function setLocale(value: Locale): void {
   setLocaleSig(value);
@@ -89,14 +119,18 @@ export async function loadMoreItems(): Promise<void> {
 }
 
 export async function loadAccount(): Promise<void> {
-  const config = await fetchAccountConfig();
-  setOidcEnabled(config.oidc);
-  if (!config.oidc) {
-    setMe(null);
-    return;
+  try {
+    const config = await fetchAccountConfig();
+    setOidcEnabled(config.oidc);
+    if (!config.oidc) {
+      setMe(null);
+      return;
+    }
+    const who = await fetchMe();
+    setMe(who);
+  } finally {
+    setAccountLoaded(true);
   }
-  const who = await fetchMe();
-  setMe(who);
 }
 
 /** First server that failed with a real (non-capability) error. */

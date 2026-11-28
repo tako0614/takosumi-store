@@ -1,6 +1,7 @@
 import {
   createEffect,
   createMemo,
+  createSignal,
   For,
   onCleanup,
   onMount,
@@ -34,7 +35,17 @@ function paramStr(value: string | string[] | undefined): string {
 export const HomePage: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   let searchInputRef: HTMLInputElement | undefined;
+  let chipsRef: HTMLDivElement | undefined;
   let composing = false;
+  const [chipsCanPrev, setChipsCanPrev] = createSignal(false);
+  const [chipsCanNext, setChipsCanNext] = createSignal(false);
+
+  const syncChipsScroll = () => {
+    const el = chipsRef;
+    if (!el) return;
+    setChipsCanPrev(el.scrollLeft > 4);
+    setChipsCanNext(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  };
 
   const fTag = () => paramStr(searchParams.tag);
   const fQuery = () => paramStr(searchParams.q);
@@ -58,6 +69,7 @@ export const HomePage: Component = () => {
     const onGlobalKey = (e: KeyboardEvent) => {
       if (
         e.isComposing ||
+        e.keyCode === 229 ||
         e.defaultPrevented ||
         e.key !== "/" ||
         e.ctrlKey ||
@@ -79,10 +91,15 @@ export const HomePage: Component = () => {
       if (searchInputRef) {
         e.preventDefault();
         searchInputRef.focus();
+        searchInputRef.select();
       }
     };
     window.addEventListener("keydown", onGlobalKey);
-    onCleanup(() => window.removeEventListener("keydown", onGlobalKey));
+    window.addEventListener("resize", syncChipsScroll);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onGlobalKey);
+      window.removeEventListener("resize", syncChipsScroll);
+    });
   });
 
   createEffect(() => {
@@ -100,6 +117,24 @@ export const HomePage: Component = () => {
     const set = new Set<string>();
     for (const it of agg().items) for (const tg of it.tags ?? []) set.add(tg);
     return [...set].sort();
+  });
+
+  // Keep mobile tag-strip edge fades in sync and reveal deep-linked active chips.
+  createEffect(() => {
+    const active = fTag();
+    void facetTags().length;
+    void locale();
+    queueMicrotask(() => {
+      const el = chipsRef;
+      if (!el) return;
+      if (active && el.scrollWidth > el.clientWidth + 4) {
+        el.querySelector<HTMLButtonElement>(".chip.active")?.scrollIntoView({
+          inline: "nearest",
+          block: "nearest",
+        });
+      }
+      syncChipsScroll();
+    });
   });
 
   const displayed = createMemo(() =>
@@ -171,7 +206,14 @@ export const HomePage: Component = () => {
                     }
                   }}
                 />
-                <Show when={fQuery()}>
+                <Show
+                  when={fQuery()}
+                  fallback={
+                    <kbd class="search-kbd" aria-hidden="true">
+                      /
+                    </kbd>
+                  }
+                >
                   <button
                     type="button"
                     class="search-clear"
@@ -214,32 +256,42 @@ export const HomePage: Component = () => {
 
             <Show when={facetTags().length > 0}>
               <div
-                class="chips"
-                role="group"
-                aria-label={t("tagFilters", locale())}
+                class="chips-wrap"
+                classList={{
+                  "has-prev": chipsCanPrev(),
+                  "has-next": chipsCanNext(),
+                }}
               >
-                <button
-                  type="button"
-                  class="chip"
-                  classList={{ active: !fTag() }}
-                  aria-pressed={!fTag()}
-                  onClick={() => setFTag("")}
+                <div
+                  ref={chipsRef}
+                  class="chips"
+                  role="group"
+                  aria-label={t("tagFilters", locale())}
+                  onScroll={syncChipsScroll}
                 >
-                  {t("all", locale())}
-                </button>
-                <For each={facetTags()}>
-                  {(tg) => (
-                    <button
-                      type="button"
-                      class="chip"
-                      classList={{ active: fTag() === tg }}
-                      aria-pressed={fTag() === tg}
-                      onClick={() => setFTag(fTag() === tg ? "" : tg)}
-                    >
-                      {tagLabel(tg, locale())}
-                    </button>
-                  )}
-                </For>
+                  <button
+                    type="button"
+                    class="chip"
+                    classList={{ active: !fTag() }}
+                    aria-pressed={!fTag()}
+                    onClick={() => setFTag("")}
+                  >
+                    {t("all", locale())}
+                  </button>
+                  <For each={facetTags()}>
+                    {(tg) => (
+                      <button
+                        type="button"
+                        class="chip"
+                        classList={{ active: fTag() === tg }}
+                        aria-pressed={fTag() === tg}
+                        onClick={() => setFTag(fTag() === tg ? "" : tg)}
+                      >
+                        {tagLabel(tg, locale())}
+                      </button>
+                    )}
+                  </For>
+                </div>
               </div>
             </Show>
           </div>
@@ -291,16 +343,34 @@ export const HomePage: Component = () => {
           >
             <EmptyState
               title={t("noResults", locale())}
-              message={t("noResultsHint", locale())}
+              message={
+                !agg().done && filtersActive()
+                  ? t("partialResultsHint", locale())
+                  : t("noResultsHint", locale())
+              }
               action={
                 <Show when={filtersActive()}>
-                  <button
-                    type="button"
-                    class="btn btn-secondary"
-                    onClick={resetFilters}
-                  >
-                    {t("resetFilters", locale())}
-                  </button>
+                  <div class="state-actions">
+                    <Show when={!agg().done}>
+                      <button
+                        type="button"
+                        class="btn btn-primary"
+                        disabled={agg().loading}
+                        onClick={() => void loadMoreItems()}
+                      >
+                        {agg().loading
+                          ? t("loading", locale())
+                          : t("loadMoreMatches", locale())}
+                      </button>
+                    </Show>
+                    <button
+                      type="button"
+                      class="btn btn-secondary"
+                      onClick={resetFilters}
+                    >
+                      {t("resetFilters", locale())}
+                    </button>
+                  </div>
                 </Show>
               }
             />
@@ -313,6 +383,7 @@ export const HomePage: Component = () => {
             items={recent()}
             locale={locale()}
           />
+          <h2 class="shelf-title grid-heading">{t("allApps", locale())}</h2>
         </Show>
 
         <Show when={displayed().length > 0}>
@@ -323,15 +394,40 @@ export const HomePage: Component = () => {
           </section>
         </Show>
 
-        <Show when={!agg().done && !filtersActive() && agg().items.length > 0}>
+        <Show when={!firstLoad() && loadError() && agg().items.length > 0}>
+          <div class="inline-error-bar" role="alert">
+            <span>{t("loadMoreFailed", locale())}</span>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              disabled={agg().loading}
+              onClick={() => void rebuild()}
+            >
+              {t("retry", locale())}
+            </button>
+          </div>
+        </Show>
+
+        <Show
+          when={!agg().done && agg().items.length > 0 && displayed().length > 0}
+        >
           <div class="loadmore">
+            <Show when={filtersActive()}>
+              <p class="loadmore-hint muted">
+                {t("partialResultsHint", locale())}
+              </p>
+            </Show>
             <button
               type="button"
               class="btn btn-secondary"
               disabled={agg().loading}
               onClick={() => void loadMoreItems()}
             >
-              {agg().loading ? t("loading", locale()) : t("loadMore", locale())}
+              {agg().loading
+                ? t("loading", locale())
+                : filtersActive()
+                  ? t("loadMoreMatches", locale())
+                  : t("loadMore", locale())}
             </button>
           </div>
         </Show>

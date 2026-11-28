@@ -6,8 +6,9 @@ import {
   Show,
   type Component,
 } from "solid-js";
-import { useNavigate, useSearchParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import {
+  accountLoaded,
   invalidateListings,
   locale,
   me,
@@ -19,6 +20,7 @@ import { loginUrl, setHandle } from "../lib/account-client.ts";
 import {
   bodyFromListing,
   createListing,
+  listMine,
   updateListing,
   type PublishBody,
 } from "../lib/publish-client.ts";
@@ -29,12 +31,32 @@ import {
   validateLogoUrl,
   validateSlug,
 } from "../lib/publish-validation.ts";
-import { fetchListingByScopeSlug } from "../lib/tcs-client.ts";
-import { homeBase } from "../lib/servers.ts";
 import { navTracker, setPageTitle } from "../lib/nav-history.ts";
 import { BackLink } from "../components/BackLink.tsx";
 import { IconTile } from "../components/IconTile.tsx";
+import { EmptyState, ErrorState } from "../components/states.tsx";
 import type { ListingV2 } from "../../../spec/v2/listing.ts";
+
+const MAX_TAGS = 8;
+
+const PublishSkeleton: Component = () => (
+  <div class="publish-skel" aria-busy="true">
+    <span class="sr-only" role="status">
+      {t("loading", locale())}
+    </span>
+    <div class="app-card skeleton-card" aria-hidden="true">
+      <span class="skel skel-icon" />
+      <div class="app-card-text">
+        <span class="skel skel-line" style={{ width: "45%" }} />
+        <span class="skel skel-line" style={{ width: "30%" }} />
+        <span class="skel skel-line" style={{ width: "75%" }} />
+      </div>
+    </div>
+    <span class="skel publish-skel-field" aria-hidden="true" />
+    <span class="skel publish-skel-field" aria-hidden="true" />
+    <span class="skel publish-skel-field" aria-hidden="true" />
+  </div>
+);
 
 function slugify(s: string): string {
   return s
@@ -47,21 +69,17 @@ function slugify(s: string): string {
 
 export const PublishPage: Component = () => {
   const navigate = useNavigate();
+  const route = useLocation();
   const [searchParams] = useSearchParams();
   const editId = () =>
     typeof searchParams.edit === "string" ? searchParams.edit : "";
 
-  createEffect(() => {
-    const heading = editId()
-      ? t("editApp", locale())
-      : t("publishApp", locale());
-    setPageTitle(`${heading} — ${t("appName", locale())}`);
-  });
-
   const [handleDraft, setHandleDraft] = createSignal("");
   const [handleErr, setHandleErr] = createSignal("");
+  const [handleBusy, setHandleBusy] = createSignal(false);
   const submitHandle = async (e: Event) => {
     e.preventDefault();
+    if (handleBusy()) return;
     const check = validateHandle(handleDraft());
     if (check === "required") {
       setHandleErr(t("handleRequired", locale()));
@@ -72,9 +90,14 @@ export const PublishPage: Component = () => {
       return;
     }
     setHandleErr("");
-    const r = await setHandle(handleDraft().trim());
-    if (r.ok) setMe(r.me);
-    else setHandleErr(r.message);
+    setHandleBusy(true);
+    try {
+      const r = await setHandle(handleDraft().trim());
+      if (r.ok) setMe(r.me);
+      else setHandleErr(r.message);
+    } finally {
+      setHandleBusy(false);
+    }
   };
 
   // Primary inputs — just a Git URL, a logo, and an optional name.
@@ -86,8 +109,10 @@ export const PublishPage: Component = () => {
   const [tags, setTags] = createSignal<string[]>([]);
   const [tagDraft, setTagDraft] = createSignal("");
   const [description, setDescription] = createSignal("");
+  const [advOpen, setAdvOpen] = createSignal(false);
   const [errors, setErrors] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
+  let tagInputRef: HTMLInputElement | undefined;
 
   // Touched flags for calm, non-nagging inline field validation.
   const [gitTouched, setGitTouched] = createSignal(false);
@@ -112,28 +137,83 @@ export const PublishPage: Component = () => {
     return validateSlug(slug()) === "invalid" ? t("slugInvalid", locale()) : "";
   };
 
-  // Edit mode: load the existing discovery listing and prefill editable fields.
+  // Edit mode: load from the publisher's own listings so unlisted (`hidden`)
+  // listings are editable too and non-owned ids cleanly resolve as not-found.
   // Install UX remains outside Store. A repository may propose it to Takosumi
   // through `.well-known/takosumi.json`, which Store never reads or edits.
-  const [editListing] = createResource(
-    () => editId() || null,
-    async (id: string): Promise<ListingV2 | null> => {
-      const [scope, slug] = id.split("/");
-      if (!scope || !slug) return null;
-      return fetchListingByScopeSlug(homeBase(), scope, slug);
+  const [editListing, { refetch: refetchEdit }] = createResource(
+    () => (me() && editId() ? ([me()!.id, editId()] as const) : null),
+    async ([, id]): Promise<ListingV2 | null> => {
+      const mine = await listMine();
+      return mine.find((item) => item.id === id) ?? null;
     },
   );
-  let didPrefill = false;
+  const editLoading = () => Boolean(editId() && me() && editListing.loading);
+  const editError = () =>
+    Boolean(editId() && me() && !editListing.loading && editListing.error);
+  const editNotFound = () =>
+    Boolean(
+      editId() &&
+      me() &&
+      !editListing.loading &&
+      !editListing.error &&
+      !editListing(),
+    );
+
   createEffect(() => {
+    const heading = editId()
+      ? t("editApp", locale())
+      : t("publishApp", locale());
+    setPageTitle(
+      `${heading} — ${t("appName", locale())}`,
+      !accountLoaded() || editLoading(),
+    );
+  });
+
+  let prefilledFor: string | null = null;
+  const resetFormFields = () => {
+    setGit("");
+    setName("");
+    setIconUrl("");
+    setSlug("");
+    setTags([]);
+    setTagDraft("");
+    setDescription("");
+    setErrors([]);
+    setGitTouched(false);
+    setLogoTouched(false);
+    setSlugTouched(false);
+    setAdvOpen(false);
+  };
+  createEffect(() => {
+    const id = editId();
+    if (!id) {
+      if (prefilledFor !== null) {
+        prefilledFor = null;
+        resetFormFields();
+      }
+      return;
+    }
+    if (editListing.loading || editListing.error) return;
     const l = editListing();
-    if (!l || didPrefill) return;
-    didPrefill = true;
+    if (!l || prefilledFor === id) return;
+    prefilledFor = id;
     setGit(l.source.git);
     setName(l.name.ja || l.name.en);
     setIconUrl(l.iconUrl ?? "");
     setSlug(l.slug);
     setTags([...(l.tags ?? [])]);
+    setTagDraft("");
     setDescription(l.description.ja || l.description.en);
+    setErrors([]);
+    setGitTouched(false);
+    setLogoTouched(false);
+    setSlugTouched(false);
+    setAdvOpen(
+      Boolean(
+        (l.tags ?? []).length > 0 || l.description.ja || l.description.en,
+      ),
+    );
   });
 
   // Free-form tag chips. Mirrors the server normalizer (lowercase slug, ≤8).
@@ -149,7 +229,9 @@ export const PublishPage: Component = () => {
       const next = [...prev];
       for (const part of raw.split(",")) {
         const tag = normTag(part);
-        if (tag && !next.includes(tag) && next.length < 8) next.push(tag);
+        if (tag && !next.includes(tag) && next.length < MAX_TAGS) {
+          next.push(tag);
+        }
       }
       return next;
     });
@@ -173,6 +255,13 @@ export const PublishPage: Component = () => {
 
   const submit = async (e: Event) => {
     e.preventDefault();
+    if (busy()) return;
+    const existing = editId()
+      ? editListing.error
+        ? null
+        : editListing()
+      : null;
+    if (editId() && !existing) return;
     setGitTouched(true);
     setLogoTouched(true);
     setSlugTouched(true);
@@ -182,17 +271,14 @@ export const PublishPage: Component = () => {
         : logoErr()
           ? "publish-logo"
           : "publish-slug";
-      const target = document.getElementById(focusId);
-      const details = target?.closest("details");
-      if (details && !details.open) details.open = true;
-      target?.focus();
+      if (focusId === "publish-slug") setAdvOpen(true);
+      queueMicrotask(() => document.getElementById(focusId)?.focus());
       return;
     }
 
     setBusy(true);
     setErrors([]);
     const display = effectiveName();
-    const existing = editListing();
 
     // In edit mode, start from the existing discovery listing, then overlay the
     // editable display/source fields. Installer-owned UX is not a listing field.
@@ -254,288 +340,385 @@ export const PublishPage: Component = () => {
           {editId() ? t("editApp", locale()) : t("publishApp", locale())}
         </h1>
 
-        <Show
-          when={me()}
-          fallback={
-            <div class="notice">
+        <Show when={accountLoaded()} fallback={<PublishSkeleton />}>
+          <Show
+            when={me()}
+            fallback={
+              <div class="notice">
+                <Show
+                  when={oidcEnabled()}
+                  fallback={
+                    <p class="muted notice-text">
+                      {t("readOnlyPublish", locale())}
+                    </p>
+                  }
+                >
+                  <p class="notice-text">{t("signInToPublish", locale())}</p>
+                  <a
+                    class="btn btn-primary"
+                    href={loginUrl(route.pathname + route.search)}
+                    rel="external"
+                  >
+                    {t("signIn", locale())}
+                  </a>
+                </Show>
+              </div>
+            }
+          >
+            {(who) => (
               <Show
-                when={oidcEnabled()}
+                when={who().handle}
                 fallback={
-                  <p class="muted notice-text">
-                    {t("readOnlyPublish", locale())}
-                  </p>
-                }
-              >
-                <p class="notice-text">{t("signInToPublish", locale())}</p>
-                <a
-                  class="btn btn-primary"
-                  href={loginUrl("/publish")}
-                  rel="external"
-                >
-                  {t("signIn", locale())}
-                </a>
-              </Show>
-            </div>
-          }
-        >
-          {(who) => (
-            <Show
-              when={who().handle}
-              fallback={
-                <form
-                  class="form handle-step"
-                  onSubmit={submitHandle}
-                  noValidate
-                >
-                  <label class="field" for="publish-handle">
-                    <span>{t("setHandle", locale())}</span>
-                    <input
-                      id="publish-handle"
-                      name="handle"
-                      value={handleDraft()}
-                      aria-invalid={Boolean(handleErr()) || undefined}
-                      aria-describedby={
-                        handleErr() ? "publish-handle-error" : undefined
-                      }
-                      onInput={(e) => {
-                        setHandleDraft(e.currentTarget.value);
-                        if (handleErr()) setHandleErr("");
-                      }}
-                      placeholder={t("handlePlaceholder", locale())}
-                      autocomplete="username"
-                    />
-                  </label>
-                  <Show when={handleErr()}>
-                    <p
-                      id="publish-handle-error"
-                      class="field-error"
-                      role="alert"
-                    >
-                      {handleErr()}
-                    </p>
-                  </Show>
-                  <button type="submit" class="btn btn-primary">
-                    {t("save", locale())}
-                  </button>
-                </form>
-              }
-            >
-              <section
-                class="publish-preview"
-                aria-label={t("livePreview", locale())}
-              >
-                <span class="publish-preview-label muted">
-                  {t("livePreview", locale())}
-                </span>
-                <div class="app-card publish-preview-card">
-                  <IconTile
-                    label={
-                      effectiveName() || t("previewFallbackName", locale())
-                    }
-                    seed={`${who().handle}/${slug().trim() || autoSlug() || "preview"}`}
-                    iconUrl={previewIconUrl()}
-                    size={60}
-                  />
-                  <div class="app-card-text">
-                    <span class="app-card-name">
-                      {effectiveName() || t("previewFallbackName", locale())}
-                    </span>
-                    <span class="app-card-sub">
-                      {previewTagsText() ||
-                        `${who().handle}/${slug().trim() || autoSlug() || "app"}`}
-                    </span>
-                    <span class="app-card-desc">
-                      {description().trim() ||
-                        t("previewFallbackDesc", locale())}
-                    </span>
-                  </div>
-                </div>
-              </section>
-
-              <form class="form publish-form" onSubmit={submit} noValidate>
-                <div class="field">
-                  <label for="publish-git">{t("gitUrl", locale())}</label>
-                  <input
-                    id="publish-git"
-                    name="git"
-                    type="url"
-                    value={git()}
-                    aria-invalid={Boolean(gitErr()) || undefined}
-                    aria-describedby={
-                      gitErr() ? "publish-git-error" : undefined
-                    }
-                    onInput={(e) => setGit(e.currentTarget.value)}
-                    onBlur={() => setGitTouched(true)}
-                    placeholder="https://github.com/you/app.git"
-                    autocomplete="off"
-                    required
-                  />
-                  <Show when={gitErr()}>
-                    <p id="publish-git-error" class="field-error" role="alert">
-                      {gitErr()}
-                    </p>
-                  </Show>
-                </div>
-
-                <div class="field">
-                  <label for="publish-name">{t("displayName", locale())}</label>
-                  <input
-                    id="publish-name"
-                    name="name"
-                    value={name()}
-                    onInput={(e) => setName(e.currentTarget.value)}
-                    placeholder={
-                      repoName() || t("displayNamePlaceholder", locale())
-                    }
-                    autocomplete="off"
-                  />
-                </div>
-
-                <div class="field">
-                  <label for="publish-logo">{t("logoUrl", locale())}</label>
-                  <input
-                    id="publish-logo"
-                    name="iconUrl"
-                    type="url"
-                    value={iconUrl()}
-                    aria-invalid={Boolean(logoErr()) || undefined}
-                    aria-describedby={
-                      logoErr() ? "publish-logo-error" : undefined
-                    }
-                    onInput={(e) => setIconUrl(e.currentTarget.value)}
-                    onBlur={() => setLogoTouched(true)}
-                    placeholder="https://…/icon.png"
-                    autocomplete="off"
-                  />
-                  <Show when={logoErr()}>
-                    <p id="publish-logo-error" class="field-error" role="alert">
-                      {logoErr()}
-                    </p>
-                  </Show>
-                </div>
-
-                <details class="adv">
-                  <summary>{t("advanced", locale())}</summary>
-                  <div class="field">
-                    <label for="publish-slug">{t("publicId", locale())}</label>
-                    <div class="slug-row">
-                      <span class="slug-scope">{who().handle}</span>
-                      <span class="slug-sep">/</span>
+                  <form
+                    class="form handle-step"
+                    onSubmit={submitHandle}
+                    noValidate
+                  >
+                    <label class="field" for="publish-handle">
+                      <span>{t("setHandle", locale())}</span>
                       <input
-                        id="publish-slug"
-                        name="slug"
-                        value={slug()}
-                        aria-invalid={Boolean(slugErr()) || undefined}
+                        id="publish-handle"
+                        name="handle"
+                        value={handleDraft()}
+                        aria-invalid={Boolean(handleErr()) || undefined}
                         aria-describedby={
-                          slugErr()
-                            ? "publish-slug-error publish-slug-hint"
-                            : "publish-slug-hint"
+                          handleErr() ? "publish-handle-error" : undefined
                         }
-                        onInput={(e) => setSlug(e.currentTarget.value)}
-                        onBlur={() => setSlugTouched(true)}
-                        placeholder={
-                          autoSlug() || t("slugPlaceholder", locale())
-                        }
-                        autocomplete="off"
-                        disabled={Boolean(editId())}
+                        onInput={(e) => {
+                          setHandleDraft(e.currentTarget.value);
+                          if (handleErr()) setHandleErr("");
+                        }}
+                        placeholder={t("handlePlaceholder", locale())}
+                        autocomplete="username"
                       />
-                    </div>
-                    <Show when={slugErr()}>
+                    </label>
+                    <Show when={handleErr()}>
                       <p
-                        id="publish-slug-error"
+                        id="publish-handle-error"
                         class="field-error"
                         role="alert"
                       >
-                        {slugErr()}
+                        {handleErr()}
                       </p>
                     </Show>
-                    <span id="publish-slug-hint" class="field-hint">
-                      {t("publicIdHint", locale())}
-                    </span>
-                  </div>
-
-                  <div class="field">
-                    <label for="publish-tags">{t("tagsField", locale())}</label>
-                    <div class="tag-input">
-                      <For each={tags()}>
-                        {(tg) => (
-                          <span class="tag-chip">
-                            {tg}
-                            <button
-                              type="button"
-                              class="tag-x"
-                              aria-label={`${t("removeTag", locale())}: ${tg}`}
-                              onClick={() => removeTag(tg)}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        )}
-                      </For>
-                      <input
-                        id="publish-tags"
-                        name="tags"
-                        class="tag-entry"
-                        value={tagDraft()}
-                        aria-describedby="publish-tags-hint"
-                        onInput={(e) => setTagDraft(e.currentTarget.value)}
-                        onKeyDown={(e) => {
-                          if (e.isComposing || e.keyCode === 229) return;
-                          if (e.key === "Enter" || e.key === ",") {
-                            e.preventDefault();
-                            addTags(tagDraft());
-                          } else if (
-                            e.key === "Backspace" &&
-                            !tagDraft() &&
-                            tags().length > 0
-                          ) {
-                            removeTag(tags()[tags().length - 1]!);
-                          }
-                        }}
-                        onBlur={() => {
-                          if (tagDraft().trim()) addTags(tagDraft());
-                        }}
-                        placeholder={
-                          tags().length ? "" : t("tagsPlaceholder", locale())
-                        }
-                        autocomplete="off"
+                    <button
+                      type="submit"
+                      class="btn btn-primary"
+                      disabled={handleBusy()}
+                    >
+                      {handleBusy()
+                        ? t("loading", locale())
+                        : t("save", locale())}
+                    </button>
+                  </form>
+                }
+              >
+                <Show when={!editLoading()} fallback={<PublishSkeleton />}>
+                  <Show
+                    when={!editError()}
+                    fallback={
+                      <ErrorState
+                        title={t("errorTitle", locale())}
+                        message={t("errorHint", locale())}
+                        retryLabel={t("retry", locale())}
+                        onRetry={() => void refetchEdit()}
                       />
-                    </div>
-                    <span id="publish-tags-hint" class="field-hint">
-                      {t("tagsHint", locale())}
-                    </span>
-                  </div>
+                    }
+                  >
+                    <Show
+                      when={!editNotFound()}
+                      fallback={
+                        <EmptyState
+                          glyph="🧩"
+                          title={t("editNotFoundTitle", locale())}
+                          message={t("editNotFoundHint", locale())}
+                          action={
+                            <A href="/manage" class="btn btn-primary">
+                              {t("backToManage", locale())}
+                            </A>
+                          }
+                        />
+                      }
+                    >
+                      <section
+                        class="publish-preview"
+                        aria-label={t("livePreview", locale())}
+                      >
+                        <span class="publish-preview-label muted">
+                          {t("livePreview", locale())}
+                        </span>
+                        <div class="app-card publish-preview-card">
+                          <IconTile
+                            label={
+                              effectiveName() ||
+                              t("previewFallbackName", locale())
+                            }
+                            seed={`${who().handle}/${slug().trim() || autoSlug() || "preview"}`}
+                            iconUrl={previewIconUrl()}
+                            size={60}
+                          />
+                          <div class="app-card-text">
+                            <span class="app-card-name">
+                              {effectiveName() ||
+                                t("previewFallbackName", locale())}
+                            </span>
+                            <span class="app-card-sub">
+                              {previewTagsText() ||
+                                `${who().handle}/${slug().trim() || autoSlug() || "app"}`}
+                            </span>
+                            <span class="app-card-desc">
+                              {description().trim() ||
+                                t("previewFallbackDesc", locale())}
+                            </span>
+                          </div>
+                        </div>
+                      </section>
 
-                  <div class="field">
-                    <label for="publish-description">
-                      {t("descriptionField", locale())}
-                    </label>
-                    <textarea
-                      id="publish-description"
-                      name="description"
-                      value={description()}
-                      onInput={(e) => setDescription(e.currentTarget.value)}
-                      rows={3}
-                    />
-                  </div>
-                </details>
+                      <form
+                        class="form publish-form"
+                        onSubmit={submit}
+                        noValidate
+                      >
+                        <div class="field">
+                          <label for="publish-git">
+                            {t("gitUrl", locale())}
+                          </label>
+                          <input
+                            id="publish-git"
+                            name="git"
+                            type="url"
+                            value={git()}
+                            aria-invalid={Boolean(gitErr()) || undefined}
+                            aria-describedby={
+                              gitErr() ? "publish-git-error" : undefined
+                            }
+                            onInput={(e) => setGit(e.currentTarget.value)}
+                            onBlur={() => setGitTouched(true)}
+                            placeholder="https://github.com/you/app.git"
+                            autocomplete="off"
+                            required
+                          />
+                          <Show when={gitErr()}>
+                            <p
+                              id="publish-git-error"
+                              class="field-error"
+                              role="alert"
+                            >
+                              {gitErr()}
+                            </p>
+                          </Show>
+                        </div>
 
-                <Show when={errors().length > 0}>
-                  <ul class="form-errors" role="alert">
-                    <For each={errors()}>{(err) => <li>{err}</li>}</For>
-                  </ul>
+                        <div class="field">
+                          <label for="publish-name">
+                            {t("displayName", locale())}
+                          </label>
+                          <input
+                            id="publish-name"
+                            name="name"
+                            value={name()}
+                            onInput={(e) => setName(e.currentTarget.value)}
+                            placeholder={
+                              repoName() ||
+                              t("displayNamePlaceholder", locale())
+                            }
+                            autocomplete="off"
+                          />
+                        </div>
+
+                        <div class="field">
+                          <label for="publish-logo">
+                            {t("logoUrl", locale())}
+                          </label>
+                          <input
+                            id="publish-logo"
+                            name="iconUrl"
+                            type="url"
+                            value={iconUrl()}
+                            aria-invalid={Boolean(logoErr()) || undefined}
+                            aria-describedby={
+                              logoErr() ? "publish-logo-error" : undefined
+                            }
+                            onInput={(e) => setIconUrl(e.currentTarget.value)}
+                            onBlur={() => setLogoTouched(true)}
+                            placeholder="https://…/icon.png"
+                            autocomplete="off"
+                          />
+                          <Show when={logoErr()}>
+                            <p
+                              id="publish-logo-error"
+                              class="field-error"
+                              role="alert"
+                            >
+                              {logoErr()}
+                            </p>
+                          </Show>
+                        </div>
+
+                        <details
+                          class="adv"
+                          open={advOpen()}
+                          onToggle={(e) => setAdvOpen(e.currentTarget.open)}
+                        >
+                          <summary>{t("advanced", locale())}</summary>
+                          <div class="field">
+                            <label for="publish-slug">
+                              {t("publicId", locale())}
+                            </label>
+                            <div class="slug-row">
+                              <span class="slug-scope">{who().handle}</span>
+                              <span class="slug-sep">/</span>
+                              <input
+                                id="publish-slug"
+                                name="slug"
+                                value={slug()}
+                                aria-invalid={Boolean(slugErr()) || undefined}
+                                aria-describedby={
+                                  slugErr()
+                                    ? "publish-slug-error publish-slug-hint"
+                                    : "publish-slug-hint"
+                                }
+                                onInput={(e) => setSlug(e.currentTarget.value)}
+                                onBlur={() => setSlugTouched(true)}
+                                placeholder={
+                                  autoSlug() || t("slugPlaceholder", locale())
+                                }
+                                autocomplete="off"
+                                disabled={Boolean(editId())}
+                              />
+                            </div>
+                            <Show when={slugErr()}>
+                              <p
+                                id="publish-slug-error"
+                                class="field-error"
+                                role="alert"
+                              >
+                                {slugErr()}
+                              </p>
+                            </Show>
+                            <span id="publish-slug-hint" class="field-hint">
+                              {t("publicIdHint", locale())}
+                            </span>
+                          </div>
+
+                          <div class="field">
+                            <div class="field-label-row">
+                              <label for="publish-tags">
+                                {t("tagsField", locale())}
+                              </label>
+                              <Show when={tags().length > 0}>
+                                <span class="field-hint mono">
+                                  {tags().length}/{MAX_TAGS}
+                                </span>
+                              </Show>
+                            </div>
+                            <div
+                              class="tag-input"
+                              onClick={(e) => {
+                                if (
+                                  !(e.target as HTMLElement).closest("button")
+                                ) {
+                                  tagInputRef?.focus();
+                                }
+                              }}
+                            >
+                              <For each={tags()}>
+                                {(tg) => (
+                                  <span class="tag-chip">
+                                    {tg}
+                                    <button
+                                      type="button"
+                                      class="tag-x"
+                                      aria-label={`${t("removeTag", locale())}: ${tg}`}
+                                      onClick={() => removeTag(tg)}
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                )}
+                              </For>
+                              <input
+                                ref={tagInputRef}
+                                id="publish-tags"
+                                name="tags"
+                                class="tag-entry"
+                                value={tagDraft()}
+                                aria-describedby="publish-tags-hint"
+                                onInput={(e) =>
+                                  setTagDraft(e.currentTarget.value)
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.isComposing || e.keyCode === 229)
+                                    return;
+                                  if (e.key === "Enter" || e.key === ",") {
+                                    e.preventDefault();
+                                    addTags(tagDraft());
+                                  } else if (
+                                    e.key === "Backspace" &&
+                                    !tagDraft() &&
+                                    tags().length > 0
+                                  ) {
+                                    removeTag(tags()[tags().length - 1]!);
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (tagDraft().trim()) addTags(tagDraft());
+                                }}
+                                placeholder={
+                                  tags().length
+                                    ? ""
+                                    : t("tagsPlaceholder", locale())
+                                }
+                                autocomplete="off"
+                              />
+                            </div>
+                            <span id="publish-tags-hint" class="field-hint">
+                              {tags().length >= MAX_TAGS
+                                ? t("tagsLimitReached", locale())
+                                : t("tagsHint", locale())}
+                            </span>
+                          </div>
+
+                          <div class="field">
+                            <label for="publish-description">
+                              {t("descriptionField", locale())}
+                            </label>
+                            <textarea
+                              id="publish-description"
+                              name="description"
+                              value={description()}
+                              onInput={(e) =>
+                                setDescription(e.currentTarget.value)
+                              }
+                              rows={3}
+                            />
+                          </div>
+                        </details>
+
+                        <Show when={errors().length > 0}>
+                          <ul class="form-errors" role="alert">
+                            <For each={errors()}>{(err) => <li>{err}</li>}</For>
+                          </ul>
+                        </Show>
+
+                        <button
+                          type="submit"
+                          class="btn btn-primary"
+                          disabled={busy()}
+                        >
+                          {busy()
+                            ? t("loading", locale())
+                            : editId()
+                              ? t("updateAction", locale())
+                              : t("publishAction", locale())}
+                        </button>
+                      </form>
+                    </Show>
+                  </Show>
                 </Show>
-
-                <button type="submit" class="btn btn-primary" disabled={busy()}>
-                  {busy()
-                    ? t("loading", locale())
-                    : editId()
-                      ? t("updateAction", locale())
-                      : t("publishAction", locale())}
-                </button>
-              </form>
-            </Show>
-          )}
+              </Show>
+            )}
+          </Show>
         </Show>
       </div>
     </main>
